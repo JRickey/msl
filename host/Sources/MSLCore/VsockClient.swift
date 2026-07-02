@@ -29,6 +29,35 @@ public final class VsockClient: @unchecked Sendable {
         fd = -1
     }
 
+    /// Set a receive timeout so a `receive()` cannot block forever; `receive`
+    /// throws `MSLError.timedOut` when it fires. Zero means block indefinitely.
+    public func setReceiveTimeout(seconds: Double) throws {
+        guard fd >= 0 else { throw MSLError.io("set timeout on closed vsock") }
+        precondition(seconds >= 0, "receive timeout must be non-negative")
+        let whole = seconds.rounded(.down)
+        var tv = timeval(
+            tv_sec: __darwin_time_t(whole),
+            tv_usec: suseconds_t((seconds - whole) * 1_000_000))
+        let size = socklen_t(MemoryLayout<timeval>.size)
+        guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, size) == 0 else {
+            throw MSLError.io("setsockopt SO_RCVTIMEO failed: errno=\(errno)")
+        }
+    }
+
+    /// Relinquish ownership of the descriptor without closing it; the caller
+    /// takes over (used to switch the data plane to raw byte streaming). Any
+    /// receive timeout is cleared so raw pump reads on the fd never time out.
+    public func detachDescriptor() -> Int32 {
+        let owned = fd
+        if owned >= 0 {
+            var tv = timeval(tv_sec: 0, tv_usec: 0)
+            _ = setsockopt(
+                owned, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
+        fd = -1
+        return owned
+    }
+
     /// Send one frame: 4-byte big-endian length header, then the payload.
     public func send(_ payload: Data) throws {
         guard fd >= 0 else { throw MSLError.io("send on closed vsock") }
@@ -108,6 +137,8 @@ public final class VsockClient: @unchecked Sendable {
                 throw MSLError.io("vsock closed mid-frame after \(got)/\(count) bytes")
             } else if chunk != Int.min && errno == EINTR {
                 continue
+            } else if chunk != Int.min && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                throw MSLError.timedOut("receive after \(got)/\(count) bytes")
             } else {
                 throw MSLError.io("read errno=\(errno)")
             }

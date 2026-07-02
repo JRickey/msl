@@ -31,7 +31,14 @@ struct BootCommand: ParsableCommand {
     @Option(name: .long, help: "Seconds to wait for the guest agent before failing.")
     var timeout: Double = 60
 
+    @Option(name: .long, help: "Disk image, repeatable; ordered /dev/vda, /dev/vdb, ...")
+    var disk: [String] = []
+
+    @Option(name: .long, help: "virtiofs share tag=hostpath[:ro], repeatable.")
+    var share: [String] = []
+
     func run() throws {
+        let shares = try share.map { try ShareSpec.parse($0) }
         let spec = try BootSpec(
             kernelPath: kernel,
             initramfsPath: initramfs,
@@ -40,7 +47,9 @@ struct BootCommand: ParsableCommand {
             memoryMiB: memoryMib,
             consoleLogPath: consoleLog,
             execCommand: exec,
-            timeout: timeout)
+            timeout: timeout,
+            diskPaths: disk,
+            shares: shares)
         let host = VMHost(spec: spec)
         let driver = Driver(host: host, spec: spec)
         driver.launch()

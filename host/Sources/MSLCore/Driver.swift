@@ -1,13 +1,6 @@
 import Darwin
 import Foundation
 
-/// Decoded `ping` payload; all fields optional so an older agent still parses.
-struct PingData: Decodable, Sendable {
-    let agent: String?
-    let version: String?
-    let kernel: String?
-}
-
 /// Drives the M0 boot flow off the VM's serial queue: start, poll-connect,
 /// ping, optional exec, then stop. `exit(_:)` is the sanctioned termination
 /// point for the CLI (never `fatalError`). `@unchecked Sendable`: the only

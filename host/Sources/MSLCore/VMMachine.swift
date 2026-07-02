@@ -2,7 +2,8 @@ import Darwin
 import Foundation
 import Virtualization
 
-/// Validated boot parameters for a headless M0 VM.
+/// Validated boot parameters for a headless VM. `diskPaths` become
+/// /dev/vda,/dev/vdb,... in order; `shares` become virtiofs tags.
 public struct BootSpec: Sendable {
     public let kernelURL: URL
     public let initramfsURL: URL
@@ -12,11 +13,14 @@ public struct BootSpec: Sendable {
     public let consoleLogPath: String?
     public let execCommand: String?
     public let timeout: Double
+    public let diskURLs: [URL]
+    public let shares: [ShareSpec]
 
     public init(
         kernelPath: String, initramfsPath: String, commandLine: String,
         cpuCount: Int, memoryMiB: UInt64, consoleLogPath: String?,
-        execCommand: String?, timeout: Double
+        execCommand: String?, timeout: Double, diskPaths: [String] = [],
+        shares: [ShareSpec] = []
     ) throws {
         guard cpuCount >= 1 else { throw MSLError.invalidArgument("cpus must be >= 1") }
         guard memoryMiB >= 1 else { throw MSLError.invalidArgument("memory-mib must be >= 1") }
@@ -29,6 +33,8 @@ public struct BootSpec: Sendable {
         guard fileManager.isReadableFile(atPath: initramfsPath) else {
             throw MSLError.invalidArgument("initramfs not readable: \(initramfsPath)")
         }
+        self.diskURLs = try Self.validatedDisks(diskPaths, fileManager: fileManager)
+        try Self.validateShares(shares, fileManager: fileManager)
         self.kernelURL = URL(fileURLWithPath: kernelPath)
         self.initramfsURL = URL(fileURLWithPath: initramfsPath)
         self.commandLine = commandLine
@@ -37,6 +43,39 @@ public struct BootSpec: Sendable {
         self.consoleLogPath = consoleLogPath
         self.execCommand = execCommand
         self.timeout = timeout
+        self.shares = shares
+    }
+
+    private static func validatedDisks(
+        _ paths: [String], fileManager: FileManager
+    ) throws -> [URL] {
+        guard paths.count <= 26 else { throw MSLError.invalidArgument("too many disks (max 26)") }
+        var urls: [URL] = []
+        for path in paths {  // bounded: at most 26 disks
+            guard fileManager.isReadableFile(atPath: path) else {
+                throw MSLError.invalidArgument("disk not readable: \(path)")
+            }
+            urls.append(URL(fileURLWithPath: path))
+        }
+        return urls
+    }
+
+    private static func validateShares(_ shares: [ShareSpec], fileManager: FileManager) throws {
+        var seen = Set<String>()
+        for share in shares {  // bounded: caller-supplied share list
+            guard ShareSpec.isValidTag(share.tag) else {
+                throw MSLError.invalidArgument("invalid share tag: \(share.tag)")
+            }
+            guard seen.insert(share.tag).inserted else {
+                throw MSLError.invalidArgument("duplicate share tag: \(share.tag)")
+            }
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: share.hostPath, isDirectory: &isDir),
+                isDir.boolValue
+            else {
+                throw MSLError.invalidArgument("share path is not a directory: \(share.hostPath)")
+            }
+        }
     }
 }
 
@@ -124,20 +163,28 @@ public final class VMHost: @unchecked Sendable {
         if let error = box.value { throw error }
     }
 
-    /// Poll-connect to the agent port; each attempt is time-bounded and the
+    /// Poll-connect to the control port; each attempt is time-bounded and the
     /// whole poll is bounded by `spec.timeout` (wall clock and attempt count).
     public func connectAndWait() throws -> VsockClient {
+        let fd = try connectRaw(port: Proto.port, timeout: spec.timeout)
+        return try VsockClient(fileDescriptor: fd)
+    }
+
+    /// Poll-connect to `port`, returning an owned blocking fd. Bounded by
+    /// `timeout` (wall clock and derived attempt count). Reused for 5000/5001.
+    public func connectRaw(port: UInt32, timeout: Double) throws -> Int32 {
+        precondition(timeout > 0, "connect timeout must be positive")
         let interval = 0.25
-        let deadline = Date().addingTimeInterval(spec.timeout)
-        let maxAttempts = max(1, Int((spec.timeout / interval).rounded(.up)) + 1)
-        for _ in 0..<maxAttempts {  // bounded loop: attempts derived from --timeout
-            if let fd = connectOnce(), fd >= 0 {
-                return try VsockClient(fileDescriptor: fd)
+        let deadline = Date().addingTimeInterval(timeout)
+        let maxAttempts = max(1, Int((timeout / interval).rounded(.up)) + 1)
+        for _ in 0..<maxAttempts {  // bounded loop: attempts derived from timeout
+            if let fd = connectOnce(port: port), fd >= 0 {
+                return fd
             }
             if Date() >= deadline { break }
             Thread.sleep(forTimeInterval: interval)
         }
-        throw MSLError.timedOut("vsock port \(Proto.port) after \(spec.timeout)s")
+        throw MSLError.timedOut("vsock port \(port) after \(timeout)s")
     }
 
     /// Force-stop the VM and block until the stop completes; returns the wrapped
@@ -162,9 +209,9 @@ public final class VMHost: @unchecked Sendable {
         return box.value
     }
 
-    private func connectOnce() -> Int32? {
+    private func connectOnce(port: UInt32) -> Int32? {
         let attempt = ConnectAttempt()
-        queue.async { self.startConnect(attempt) }
+        queue.async { self.startConnect(attempt, port: port) }
         let waited = attempt.semaphore.wait(
             timeout: .now() + .milliseconds(connectAttemptTimeoutMs))
         if waited == .timedOut {
@@ -173,7 +220,7 @@ public final class VMHost: @unchecked Sendable {
         return attempt.fd >= 0 ? attempt.fd : nil
     }
 
-    private func startConnect(_ attempt: ConnectAttempt) {
+    private func startConnect(_ attempt: ConnectAttempt, port: UInt32) {
         guard let vm = self.machine,
             let device = vm.socketDevices.first as? VZVirtioSocketDevice
         else {
@@ -181,7 +228,7 @@ public final class VMHost: @unchecked Sendable {
             attempt.semaphore.signal()
             return
         }
-        device.connect(toPort: Proto.port) { result in
+        device.connect(toPort: port) { result in
             guard !attempt.resolved else {
                 if case .success(let conn) = result { conn.close() }
                 return
@@ -220,7 +267,42 @@ public final class VMHost: @unchecked Sendable {
         let network = VZVirtioNetworkDeviceConfiguration()
         network.attachment = VZNATNetworkDeviceAttachment()
         config.networkDevices = [network]
+        config.storageDevices = try makeDisks()
+        config.directorySharingDevices = try makeShares()
         return config
+    }
+
+    private func makeDisks() throws -> [VZStorageDeviceConfiguration] {
+        var devices: [VZStorageDeviceConfiguration] = []
+        for url in spec.diskURLs {  // bounded: BootSpec caps disks at 26
+            let attachment: VZDiskImageStorageDeviceAttachment
+            do {
+                attachment = try VZDiskImageStorageDeviceAttachment(
+                    url: url, readOnly: false, cachingMode: .automatic,
+                    synchronizationMode: .full)
+            } catch {
+                throw MSLError.fromVZ("VZDiskImageStorageDeviceAttachment(\(url.path))", error)
+            }
+            devices.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))
+        }
+        return devices
+    }
+
+    private func makeShares() throws -> [VZDirectorySharingDeviceConfiguration] {
+        var devices: [VZDirectorySharingDeviceConfiguration] = []
+        for share in spec.shares {  // bounded: caller-supplied share list
+            do {
+                try VZVirtioFileSystemDeviceConfiguration.validateTag(share.tag)
+            } catch {
+                throw MSLError.fromVZ("validateTag(\(share.tag))", error)
+            }
+            let device = VZVirtioFileSystemDeviceConfiguration(tag: share.tag)
+            let directory = VZSharedDirectory(
+                url: URL(fileURLWithPath: share.hostPath), readOnly: share.readOnly)
+            device.share = VZSingleDirectoryShare(directory: directory)
+            devices.append(device)
+        }
+        return devices
     }
 
     private func makeConsole() throws -> VZVirtioConsoleDeviceSerialPortConfiguration {

@@ -28,5 +28,10 @@ let package = Package(
             ],
             swiftSettings: swiftSettings
         ),
+        .testTarget(
+            name: "MSLCoreTests",
+            dependencies: ["MSLCore"],
+            swiftSettings: swiftSettings
+        ),
     ]
 )
