@@ -42,7 +42,7 @@ pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_frame, write_frame, MAX_FRAME};
+    use super::{MAX_FRAME, read_frame, write_frame};
     use std::io::Cursor;
 
     #[test]

@@ -10,13 +10,13 @@ mod frame;
 mod proto;
 mod sys;
 
-use proto::{PingData, Request, AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS};
+use proto::{AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, PingData, Request};
 use serde_json::Value;
 
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 #[cfg(target_os = "linux")]
-use vsock::{VsockAddr, VsockListener, VsockStream, VMADDR_CID_ANY};
+use vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
 #[cfg(target_os = "linux")]
 const VSOCK_PORT: u32 = 5000;
@@ -180,10 +180,12 @@ mod tests {
         let value = call(r#"{"id":3,"op":"exec","argv":["echo","hi"]}"#);
         assert_eq!(value["id"], 3);
         assert_eq!(value["ok"], false);
-        assert!(value["error"]
-            .as_str()
-            .expect("error string")
-            .contains("absolute"));
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("error string")
+                .contains("absolute")
+        );
     }
 
     #[test]
