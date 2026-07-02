@@ -16,3 +16,6 @@ new-worktree.sh
 
 # Rust
 target/
+
+# Swift
+.build/
