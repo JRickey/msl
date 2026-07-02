@@ -1,0 +1,25 @@
+# Dependency policy (ADR 0007: msl itself is Apache-2.0; permissive deps OK).
+# Copyleft (GPL/LGPL/MPL...) is absent from this list on purpose — adding one
+# is an ADR-level decision, not a config tweak.
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[advisories]
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
