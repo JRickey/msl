@@ -1,0 +1,15 @@
+# Agent/user working files (per global project guidelines)
+CLAUDE.md
+AGENTS.md
+docs/
+new-worktree.sh
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+
+# Claude Code local settings
+.claude/settings.local.json
