@@ -1,0 +1,31 @@
+# Strict SwiftLint config for the msl host. Default rule set; no rules
+# disabled. Analyzer paths limited to our sources.
+strict: true
+
+included:
+  - Sources
+
+# Opt-in rules that reinforce the project coding standards.
+opt_in_rules:
+  - empty_count
+  - explicit_init
+  - first_where
+  - force_unwrapping
+  - redundant_nil_coalescing
+
+# Keep function length aligned with the project cap (60 logical lines).
+function_body_length:
+  warning: 60
+  error: 60
+
+# Allow two-character idiomatic names (fd, vm, op, ok, id, io) common to
+# systems and wire code; one-character names still warn.
+identifier_name:
+  min_length:
+    warning: 2
+    error: 0
+
+# swift-format's TrailingComma rule REQUIRES trailing commas in multiline
+# literals; align SwiftLint with it so the two gates cannot disagree.
+trailing_comma:
+  mandatory_comma: true
