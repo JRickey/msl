@@ -19,3 +19,6 @@ target/
 
 # Swift
 .build/
+
+# Integration build outputs
+build/
