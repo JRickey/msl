@@ -59,18 +59,24 @@ kernel:
 	@set -eu; \
 	$(MAKE) -C "$(KERNEL_DIR)" fetch
 
-.PHONY: initramfs
-initramfs: guest
+# Real file targets: `guest` is phony (cargo owns incremental rebuilds), so the
+# cpio always regenerates, but consumers can now depend on the concrete file.
+$(INITRAMFS): guest tools/mk-initramfs.sh
 	@set -eu; \
 	tools/mk-initramfs.sh
 
-.PHONY: builder-initramfs
-builder-initramfs: guest
+$(BUILDER_INITRAMFS): guest tools/mk-builder-initramfs.sh
 	@set -eu; \
 	tools/mk-builder-initramfs.sh
 
+.PHONY: initramfs
+initramfs: $(INITRAMFS)
+
+.PHONY: builder-initramfs
+builder-initramfs: $(BUILDER_INITRAMFS)
+
 .PHONY: rootfs
-rootfs: builder-initramfs
+rootfs: kernel host sign $(BUILDER_INITRAMFS)
 	@set -eu; \
 	if [ -f "$(ROOTFS_IMG)" ] && [ -z "$${MSL_REBUILD_ROOTFS:-}" ]; then \
 	  echo "rootfs: $(ROOTFS_IMG) exists; skip (MSL_REBUILD_ROOTFS=1 forces)"; \
@@ -79,7 +85,7 @@ rootfs: builder-initramfs
 	fi
 
 .PHONY: all
-all: kernel guest host sign initramfs
+all: kernel guest host sign $(INITRAMFS)
 
 .PHONY: smoke
 smoke: all

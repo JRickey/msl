@@ -148,6 +148,15 @@ public struct SetTimeReq: Encodable, Sendable {
     public let usec: Int64
 }
 
+/// `req` body for `distro_down` (v1.1); the agent clamps `timeout_ms` itself.
+public struct DistroDownReq: Encodable, Sendable {
+    public let timeoutMs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case timeoutMs = "timeout_ms"
+    }
+}
+
 /// Framed handshake sent on the data plane (5001) before raw byte streaming.
 public struct DataHandshake: Encodable, Sendable {
     public let sessionID: UInt64

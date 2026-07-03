@@ -126,6 +126,7 @@ public final class VMHost: @unchecked Sendable {
     private var machine: VZVirtualMachine?
     private var delegate: VMDelegate?
     private var stopRequested = false
+    private var imageLocks: [ImageLock] = []
 
     public init(spec: BootSpec) {
         self.spec = spec
@@ -275,6 +276,7 @@ public final class VMHost: @unchecked Sendable {
     private func makeDisks() throws -> [VZStorageDeviceConfiguration] {
         var devices: [VZStorageDeviceConfiguration] = []
         for url in spec.diskURLs {  // bounded: BootSpec caps disks at 26
+            imageLocks.append(try ImageLock.acquire(path: url.path))
             let attachment: VZDiskImageStorageDeviceAttachment
             do {
                 attachment = try VZDiskImageStorageDeviceAttachment(

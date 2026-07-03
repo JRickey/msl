@@ -17,7 +17,11 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CMSLSys"
+        ),
+        .target(
             name: "MSLCore",
+            dependencies: ["CMSLSys"],
             swiftSettings: swiftSettings
         ),
         .executableTarget(

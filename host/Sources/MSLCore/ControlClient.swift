@@ -7,12 +7,14 @@ public final class ControlClient: @unchecked Sendable {
     private let client: VsockClient
     private let lock = NSLock()
     private var nextID: UInt64 = 1
+    private let baseReceiveTimeout: Double
 
     /// Bounds every control round-trip with a receive timeout so a wedged agent
     /// can never leave a caller (e.g. SessionAttach's teardown) blocked forever.
     public init(client: VsockClient, receiveTimeout: Double = 10) throws {
         precondition(receiveTimeout > 0, "control receive timeout must be positive")
         self.client = client
+        self.baseReceiveTimeout = receiveTimeout
         try client.setReceiveTimeout(seconds: receiveTimeout)
     }
 
@@ -61,6 +63,17 @@ public final class ControlClient: @unchecked Sendable {
         let _: EmptyData = try roundTrip(makeOp("set_time", req))
     }
 
+    /// Graceful distro shutdown (v1.1). The guest worst case is timeout_ms +
+    /// 2s kill-grace + an unbounded sync/unmount, so the v1.1.1 timing contract
+    /// requires a receive timeout of at least timeout_ms + 15s (sync budget)
+    /// before the host may power-yank; raise it for this call, then restore.
+    public func distroDown(timeoutMs: UInt64) throws -> DistroData {
+        precondition(timeoutMs > 0, "distro_down timeout must be positive")
+        let receiveTimeout = Double(timeoutMs) / 1000.0 + 15
+        let req = DistroDownReq(timeoutMs: timeoutMs)
+        return try roundTrip(receiveTimeout: receiveTimeout, makeOp("distro_down", req))
+    }
+
     /// Encode + send + receive + decode under the lock; `id` is assigned here so
     /// every in-flight request carries a unique, monotonically increasing id.
     private func roundTrip<Payload: Decodable & Sendable>(
@@ -68,6 +81,26 @@ public final class ControlClient: @unchecked Sendable {
     ) throws -> Payload {
         lock.lock()
         defer { lock.unlock() }
+        return try sendReceive(encode)
+    }
+
+    /// Round-trip with a one-shot receive timeout (for ops that can legitimately
+    /// take longer than the base timeout); restores the base timeout after.
+    private func roundTrip<Payload: Decodable & Sendable>(
+        receiveTimeout: Double, _ encode: @Sendable (UInt64) throws -> Data
+    ) throws -> Payload {
+        precondition(receiveTimeout > 0, "receive timeout must be positive")
+        lock.lock()
+        defer { lock.unlock() }
+        try client.setReceiveTimeout(seconds: receiveTimeout)
+        defer { try? client.setReceiveTimeout(seconds: baseReceiveTimeout) }
+        return try sendReceive(encode)
+    }
+
+    /// Send/receive/decode one framed request; caller must hold `lock`.
+    private func sendReceive<Payload: Decodable & Sendable>(
+        _ encode: @Sendable (UInt64) throws -> Data
+    ) throws -> Payload {
         let id = nextID
         nextID &+= 1
         let payload = try encode(id)
