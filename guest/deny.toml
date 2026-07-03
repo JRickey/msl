@@ -16,6 +16,17 @@ allow = [
 
 [advisories]
 yanked = "deny"
+# Transitive-only advisories forced by the Smithay compositor tree (ADR 0011);
+# no upgrade exists without forking upstream. Re-audit on every Smithay bump.
+ignore = [
+    # cgmath is unmaintained (math types pulled by smithay); no known vulnerability.
+    "RUSTSEC-2026-0196",
+    # quick-xml DoS advisories are reachable only through wayland-scanner, a
+    # build-time proc-macro that parses trusted vendored Wayland protocol XML —
+    # never runtime/attacker input. Pinned to 0.39 by wayland-scanner.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [bans]
 multiple-versions = "warn"

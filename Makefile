@@ -8,6 +8,8 @@ BUILD_DIR    := build
 
 GUEST_TARGET := aarch64-unknown-linux-musl
 GUEST_BIN    := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-agent
+WAY_BIN      := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-way
+XKB_MUSL_LIB := $(GUEST_DIR)/target/xkb-musl/libxkbcommon.a
 HOST_BIN     := $(HOST_DIR)/.build/release/msl
 KERNEL_IMAGE := $(KERNEL_DIR)/build/Image
 INITRAMFS    := $(BUILD_DIR)/initramfs.cpio
@@ -21,7 +23,9 @@ ENTITLEMENTS := entitlements/dev.entitlements
 .PHONY: help
 help:
 	@echo "msl M0 targets:"; \
-	echo "  make guest      - build the aarch64-musl guest agent"; \
+	echo "  make guest      - build the aarch64-musl guest agent (excludes msl-way)"; \
+	echo "  make xkb        - cross-build the static libxkbcommon for msl-way"; \
+	echo "  make msl-way    - build the aarch64-musl msl-way GUI compositor (needs xkb)"; \
 	echo "  make host       - build the host msl VMM (release)"; \
 	echo "  make sign       - codesign msl with the virtualization entitlement"; \
 	echo "  make kernel     - fetch the pinned arm64 kernel Image"; \
@@ -36,7 +40,24 @@ help:
 guest:
 	@set -eu; \
 	cd "$(GUEST_DIR)"; \
-	cargo zigbuild --target "$(GUEST_TARGET)" --release
+	cargo zigbuild --target "$(GUEST_TARGET)" --release --workspace --exclude msl-way
+
+# Static libxkbcommon for msl-way (idempotent; the script skips when the .a exists).
+$(XKB_MUSL_LIB): tools/mk-libxkbcommon.sh
+	@set -eu; \
+	tools/mk-libxkbcommon.sh
+
+.PHONY: xkb
+xkb: $(XKB_MUSL_LIB)
+
+# msl-way links the static libxkbcommon via a -L search path; the agent build
+# above stays untouched (msl-way is excluded from the default guest target).
+.PHONY: msl-way
+msl-way: $(XKB_MUSL_LIB)
+	@set -eu; \
+	cd "$(GUEST_DIR)"; \
+	RUSTFLAGS="-L native=target/xkb-musl" \
+	  cargo zigbuild --target "$(GUEST_TARGET)" --release -p msl-way
 
 .PHONY: host
 host:
