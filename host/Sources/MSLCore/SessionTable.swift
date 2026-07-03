@@ -14,6 +14,8 @@ public struct SessionTable: Sendable, Equatable {
         public var tokenUsed: Bool
         public var attached: Bool
         public let openedAt: Date
+        public var finished: Bool = false
+        public var exitCode: Int32?
     }
 
     private var records: [UInt64: Record] = [:]
@@ -61,9 +63,8 @@ public struct SessionTable: Sendable, Equatable {
     public func expiredPending(now: Date, deadline: TimeInterval) -> [UInt64] {
         precondition(deadline > 0, "attach deadline must be positive")
         return records.compactMap { key, record in
-            guard !record.attached, now.timeIntervalSince(record.openedAt) >= deadline else {
-                return nil
-            }
+            let stale = now.timeIntervalSince(record.openedAt) >= deadline
+            guard stale, record.finished || !record.attached else { return nil }
             return key
         }
     }
@@ -73,9 +74,26 @@ public struct SessionTable: Sendable, Equatable {
     public func liveCountForIdle(now: Date, deadline: TimeInterval) -> Int {
         precondition(deadline > 0, "attach deadline must be positive")
         return records.values.reduce(0) { total, record in
+            guard !record.finished else { return total }
             let live = record.attached || now.timeIntervalSince(record.openedAt) < deadline
             return total + (live ? 1 : 0)
         }
+    }
+
+    /// Cache a finished session's exit code until the client's wait consumes it.
+    public mutating func markFinished(sessionID: UInt64, exitCode: Int32?) {
+        guard var record = records[sessionID] else { return }
+        record.finished = true
+        record.exitCode = exitCode
+        records[sessionID] = record
+    }
+
+    /// Consume a finished session: returns its cached exit code and removes it;
+    /// nil when the session is absent or not finished yet.
+    public mutating func consumeFinished(sessionID: UInt64) -> Int32?? {
+        guard let record = records[sessionID], record.finished else { return nil }
+        records.removeValue(forKey: sessionID)
+        return .some(record.exitCode)
     }
 
     /// Look up a session's owning distro without mutating state.

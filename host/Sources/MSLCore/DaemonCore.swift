@@ -137,12 +137,26 @@ public final class DaemonCore: @unchecked Sendable {
         reap(sessionID: sessionID, kill: true)
     }
 
+    // Two-phase teardown: reap the guest side now, cache the exit code locally
+    // until the client's wait consumes it (the orphan reaper clears strays).
     private func reap(sessionID: UInt64, kill: Bool) {
+        if withLock({ sessions.consumeFinished(sessionID: sessionID) }) != nil {
+            withLock { lastActivity = Date() }
+            return
+        }
         let control = withLock { self.control }
         if kill { try? control?.sessionSignal(sessionID: sessionID, signal: SIGKILL) }
-        _ = try? control?.sessionWait(sessionID: sessionID)
+        var exit: Int32?
+        for _ in 0..<50 {  // bounded: at most 50 * 10ms for the guest reap
+            guard let waited = try? control?.sessionWait(sessionID: sessionID) else { break }
+            if waited.done {
+                exit = waited.exitCode
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
         withLock {
-            sessions.remove(sessionID: sessionID)
+            sessions.markFinished(sessionID: sessionID, exitCode: exit)
             lastActivity = Date()
         }
     }
@@ -164,12 +178,30 @@ public final class DaemonCore: @unchecked Sendable {
     }
 
     public func wait(sessionID: UInt64) throws -> LocalWaitData {
+        let cached = withLock { sessions.consumeFinished(sessionID: sessionID) }
+        if let cached {
+            withLock { lastActivity = Date() }
+            return LocalWaitData(done: true, exitCode: cached)
+        }
         guard let control = withLock({ self.control }) else {
             throw MSLError.configuration("VM not running")
         }
-        let waited = try control.sessionWait(sessionID: sessionID)
-        withLock { lastActivity = Date() }
-        return LocalWaitData(done: waited.done, exitCode: waited.exitCode)
+        do {
+            let waited = try control.sessionWait(sessionID: sessionID)
+            withLock { lastActivity = Date() }
+            return LocalWaitData(done: waited.done, exitCode: waited.exitCode)
+        } catch {
+            // The relay-end reap may have consumed the guest entry but not yet
+            // cached the code locally; give that in-flight reap a moment.
+            for _ in 0..<50 {  // bounded: at most 50 * 10ms
+                if let cached = withLock({ sessions.consumeFinished(sessionID: sessionID) }) {
+                    withLock { lastActivity = Date() }
+                    return LocalWaitData(done: true, exitCode: cached)
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            throw error
+        }
     }
 
     /// Graceful teardown for `msl shutdown`: down-all + VM stop. The caller exits.
