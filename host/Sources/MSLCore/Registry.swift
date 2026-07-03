@@ -7,12 +7,21 @@ public struct DistroEntry: Codable, Sendable, Equatable {
     public let image: String
     public let hostname: String
     public let createdAt: String
+    /// Login user shells run as (nil = root). Synthesized Codable omits it when nil.
+    public let defaultUser: String?
+    /// Mac-home share override: true/false force it, nil inherits the global default.
+    public let macShare: Bool?
 
-    public init(name: String, image: String, hostname: String, createdAt: String) {
+    public init(
+        name: String, image: String, hostname: String, createdAt: String,
+        defaultUser: String? = nil, macShare: Bool? = nil
+    ) {
         self.name = name
         self.image = image
         self.hostname = hostname
         self.createdAt = createdAt
+        self.defaultUser = defaultUser
+        self.macShare = macShare
     }
 }
 
@@ -53,6 +62,40 @@ public struct Registry: Codable, Sendable, Equatable {
         return true
     }
 
+    /// Hostname grammar mirroring the guest rule: `^[a-z0-9][a-z0-9-]{0,63}$`.
+    public static func isValidHostname(_ hostname: String) -> Bool {
+        guard (1...64).contains(hostname.unicodeScalars.count) else { return false }
+        var isFirst = true
+        for ch in hostname.unicodeScalars {  // bounded: at most 64 scalars
+            let lower = ("a"..."z").contains(ch)
+            let digit = ("0"..."9").contains(ch)
+            if isFirst {
+                guard lower || digit else { return false }
+                isFirst = false
+            } else {
+                guard lower || digit || ch == "-" else { return false }
+            }
+        }
+        return true
+    }
+
+    /// Login-user grammar: `^[a-z_][a-z0-9_-]{0,31}$`.
+    public static func isValidUser(_ user: String) -> Bool {
+        guard (1...32).contains(user.unicodeScalars.count) else { return false }
+        var isFirst = true
+        for ch in user.unicodeScalars {  // bounded: at most 32 scalars
+            let lower = ("a"..."z").contains(ch)
+            let digit = ("0"..."9").contains(ch)
+            if isFirst {
+                guard lower || ch == "_" else { return false }
+                isFirst = false
+            } else {
+                guard lower || digit || ch == "_" || ch == "-" else { return false }
+            }
+        }
+        return true
+    }
+
     public func entry(name: String) -> DistroEntry? {
         return distros.first { $0.name == name }
     }
@@ -86,6 +129,54 @@ public struct Registry: Codable, Sendable, Equatable {
             throw MSLError.invalidArgument("no such distro: \(name)")
         }
         defaultDistro = name
+    }
+
+    /// Change a distro's hostname (validated); throws on an unknown name.
+    public mutating func setHostname(name: String, hostname: String) throws {
+        guard Self.isValidHostname(hostname) else {
+            throw MSLError.invalidArgument("invalid hostname: \(hostname)")
+        }
+        try mutateEntry(name: name) { current in
+            DistroEntry(
+                name: current.name, image: current.image, hostname: hostname,
+                createdAt: current.createdAt, defaultUser: current.defaultUser,
+                macShare: current.macShare)
+        }
+    }
+
+    /// Set (or clear, with nil) the login user shells run as; unknown name throws.
+    public mutating func setDefaultUser(name: String, user: String?) throws {
+        if let user {
+            guard Self.isValidUser(user) else {
+                throw MSLError.invalidArgument("invalid user name: \(user)")
+            }
+        }
+        try mutateEntry(name: name) { current in
+            DistroEntry(
+                name: current.name, image: current.image, hostname: current.hostname,
+                createdAt: current.createdAt, defaultUser: user, macShare: current.macShare)
+        }
+    }
+
+    /// Set the mac-share override (nil = inherit the global default); unknown name throws.
+    public mutating func setMacShare(name: String, share: Bool?) throws {
+        try mutateEntry(name: name) { current in
+            DistroEntry(
+                name: current.name, image: current.image, hostname: current.hostname,
+                createdAt: current.createdAt, defaultUser: current.defaultUser, macShare: share)
+        }
+    }
+
+    private mutating func mutateEntry(
+        name: String, _ transform: (DistroEntry) -> DistroEntry
+    ) throws {
+        guard let index = distros.firstIndex(where: { $0.name == name }) else {
+            throw MSLError.invalidArgument("no such distro: \(name)")
+        }
+        assert(distros[index].name == name, "index must point at the named distro")
+        let updated = transform(distros[index])
+        assert(updated.name == name, "a setter must never rename its distro")
+        distros[index] = updated
     }
 
     /// Resolve which distro `msl up` should boot: an explicit `--distro`

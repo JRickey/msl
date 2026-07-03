@@ -7,8 +7,8 @@ struct MSL: ParsableCommand {
         abstract: "WSL2-like Linux subsystem for macOS (M2 host).",
         subcommands: [
             BootCommand.self, UpCommand.self, InstallCommand.self, ListCommand.self,
-            RemoveCommand.self, DefaultCommand.self, DaemonCommand.self, ShellCommand.self,
-            RunCommand.self, StatusCommand.self, StopCommand.self, ShutdownCommand.self,
-            ExportCommand.self,
+            RemoveCommand.self, DefaultCommand.self, ConfigCommand.self, DaemonCommand.self,
+            ShellCommand.self, RunCommand.self, StatusCommand.self, StopCommand.self,
+            ShutdownCommand.self, ExportCommand.self,
         ])
 }
