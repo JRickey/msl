@@ -6,11 +6,13 @@ import Foundation
 public enum TarCompression: Sendable, Equatable {
     case xz
     case gzip
+    case none
 
     var tarExtractFlag: String {
         switch self {
         case .xz: return "J"
         case .gzip: return "z"
+        case .none: return ""
         }
     }
 
@@ -21,6 +23,7 @@ public enum TarCompression: Sendable, Equatable {
         switch self {
         case .xz: return "rootfs.tar.xz"
         case .gzip: return "rootfs.tar.gz"
+        case .none: return "rootfs.tar"
         }
     }
 }
@@ -71,8 +74,9 @@ public struct InstallPlan: Sendable, Equatable {
         if lower.hasSuffix(".img") { return .image(url) }
         if lower.hasSuffix(".tar.xz") || lower.hasSuffix(".txz") { return .tarball(url, .xz) }
         if lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz") { return .tarball(url, .gzip) }
+        if lower.hasSuffix(".tar") { return .tarball(url, .none) }
         throw MSLError.invalidArgument(
-            "unsupported --from type (want .img, .tar.xz, or .tar.gz): \(path)")
+            "unsupported --from type (want .img, .tar.xz, .tar.gz, or .tar): \(path)")
     }
 }
 
