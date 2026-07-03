@@ -61,17 +61,63 @@ extension DaemonCore {
     private func finishBoot(host: VMHost, control: ControlClient, entries: [DeviceEntry]) {
         let wake = PowerWake(onWake: { [weak self] in self?.syncTimeIfRunning() })
         wake.start()
+        let forwarder = PortForwarder(
+            connectGuest: makeForwardConnect(host: host),
+            logger: { [weak self] message in self?.log(message) })
         withLock {
             self.host = host
             self.control = control
             self.attached = entries
             self.distrosUp = []
             self.powerWake = wake
+            self.forwarder = forwarder
             self.running = true
             self.lastActivity = Date()
         }
         syncTime(control)
+        startMemoryLadder(host: host)
+        forwarder.start()
+        startPollTimer()
         log("VM booted with \(entries.count) image(s) attached")
+    }
+
+    /// Drop the balloon target to the floor once control is up; on a device that
+    /// refuses the target, park the ladder at the configured max (no ballooning).
+    private func startMemoryLadder(host: VMHost) {
+        let floor = config.memoryFloorMiB
+        let seated = host.setBalloonTarget(mib: floor)
+        withLock { balloonTargetMiB = seated ? floor : config.memoryMiB }
+        assert(config.memoryFloorMiB <= config.memoryMiB, "floor must not exceed max")
+    }
+
+    private func startPollTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: pollQueue)
+        let interval = config.pollIntervalS
+        assert(interval > 0, "poll interval must be positive")
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in self?.pollTick() }
+        timer.resume()
+        withLock { pollTimer = timer }
+    }
+
+    /// Build the closure `PortForwarder` uses to reach the guest: connect vsock
+    /// 5003, send the `ForwardHello`, verify the reply, and hand back the raw fd.
+    private func makeForwardConnect(host: VMHost) -> @Sendable (UInt16) throws -> Int32 {
+        let timeout = min(config.bootTimeout, 15)
+        return { port in
+            precondition(port > 0, "forward port must be positive")
+            let fd = try host.connectRaw(port: Proto.forwardPort, timeout: timeout)
+            let framed = try VsockClient(fileDescriptor: fd)
+            try framed.setReceiveTimeout(seconds: timeout)
+            try framed.send(try ForwardHello(port: port).encoded())
+            let reply = try DataHandshakeReply.decode(try framed.receive())
+            guard reply.ok else {
+                framed.close()
+                throw MSLError.protocolMismatch(
+                    "forward handshake rejected: \(reply.error ?? "unknown")")
+            }
+            return framed.detachDescriptor()
+        }
     }
 
     /// Bring one distro up on the guest (idempotent). Caller is on the lifecycle
@@ -108,18 +154,26 @@ extension DaemonCore {
     }
 
     private func teardownState() {
-        let wake = withLock { () -> PowerWake? in
-            let saved = powerWake
+        let saved = withLock { () -> TeardownBundle in
+            let bundle = TeardownBundle(wake: powerWake, forwarder: forwarder, pollTimer: pollTimer)
             host = nil
             control = nil
             attached = []
             distrosUp = []
             sessions = SessionTable()
             powerWake = nil
+            forwarder = nil
+            pollTimer = nil
+            balloonTargetMiB = 0
+            comfortTicks = 0
+            reclaimedThisIdle = false
+            lastMemStats = nil
             running = false
-            return saved
+            return bundle
         }
-        wake?.stop()
+        saved.pollTimer?.cancel()
+        saved.forwarder?.stop()
+        saved.wake?.stop()
     }
 
     /// Unexpected guest stop (crash): mark the VM down so the next op re-boots.
@@ -149,6 +203,76 @@ extension DaemonCore {
         lifecycleQueue.async { [weak self] in self?.performStop() }
     }
 
+    /// 2 s telemetry tick: mirror guest listeners, feed the balloon ladder, and
+    /// run the once-per-idle hygiene pass. Control errors skip the tick.
+    func pollTick() {
+        let snap = withLock {
+            (running, control, host, forwarder)
+        }
+        guard snap.0, let control = snap.1, let host = snap.2 else { return }
+        guard let stats = try? control.memStats() else { return }
+        if let listeners = try? control.netListeners() {
+            snap.3?.update(ports: listeners.ports)
+        }
+        withLock { lastMemStats = stats }
+        updateComfort(stats: stats)
+        let justReclaimed = runIdleHygiene(control: control)
+        stepLadder(control: control, host: host, stats: stats, justReclaimed: justReclaimed)
+    }
+
+    private func updateComfort(stats: MemStatsData) {
+        let target = withLock { balloonTargetMiB }
+        assert(target >= 0, "balloon target is unsigned")
+        let comfortable = stats.memAvailableKiB / 1024 > target / 2
+        withLock { comfortTicks = comfortable ? min(comfortTicks + 1, 1_000_000) : 0 }
+    }
+
+    /// Fire `mem_reclaim` at most once per idle period (no live sessions, no
+    /// pending ops, ≥30 s idle). Returns whether reclaim ran on this tick.
+    private func runIdleHygiene(control: ControlClient) -> Bool {
+        let now = Date()
+        let idle = withLock { () -> Bool in
+            let live = sessions.liveCountForIdle(now: now, deadline: attachDeadline)
+            return live == 0 && pendingOps == 0 && now.timeIntervalSince(lastActivity) >= 30
+        }
+        guard idle else {
+            withLock { reclaimedThisIdle = false }
+            return false
+        }
+        guard withLock({ !reclaimedThisIdle }) else { return false }
+        let didReclaim = (try? control.memReclaim()) != nil
+        withLock { reclaimedThisIdle = true }
+        return didReclaim
+    }
+
+    private func stepLadder(
+        control: ControlClient, host: VMHost, stats: MemStatsData, justReclaimed: Bool
+    ) {
+        let inputs = withLock {
+            MemoryLadder.Inputs(
+                targetMiB: balloonTargetMiB, floorMiB: config.memoryFloorMiB,
+                maxMiB: config.memoryMiB, availableMiB: stats.memAvailableKiB / 1024,
+                psiSomeAvg10: stats.psiSomeAvg10, comfortTicks: comfortTicks,
+                justReclaimed: justReclaimed)
+        }
+        let action = MemoryLadder.decide(inputs)
+        guard let next = Self.ladderTarget(action) else { return }
+        assert(next >= config.memoryFloorMiB, "ladder target must respect the floor")
+        guard host.setBalloonTarget(mib: next) else { return }
+        withLock {
+            balloonTargetMiB = next
+            if case .shrink = action { comfortTicks = 0 }
+        }
+    }
+
+    private static func ladderTarget(_ action: MemoryLadder.Action) -> UInt64? {
+        switch action {
+        case .hold: return nil
+        case .grow(let toMiB): return toMiB
+        case .shrink(let toMiB): return toMiB
+        }
+    }
+
     func buildStatus(
         registry: Registry, attached: [DeviceEntry], guestStates: [DistroStateEntry]
     ) -> StatusData {
@@ -162,7 +286,15 @@ extension DaemonCore {
             let count = withLock { sessions.sessions(forName: entry.name) }
             return DistroStatus(name: entry.name, state: state, sessions: count)
         }
-        return StatusData(vm: "running", distros: distros, idleTimeoutS: config.idleTimeoutS)
+        let memory = withLock { () -> MemoryStatus in
+            MemoryStatus(
+                targetMiB: balloonTargetMiB, maxMiB: config.memoryMiB,
+                availableMiB: (lastMemStats?.memAvailableKiB ?? 0) / 1024)
+        }
+        let ports = withLock { forwarder }?.mirroredPorts()
+        return StatusData(
+            vm: "running", distros: distros, idleTimeoutS: config.idleTimeoutS,
+            memory: memory, forwardedPorts: ports)
     }
 
     private func makeBootSpec(diskPaths: [String]) throws -> BootSpec {
@@ -175,7 +307,7 @@ extension DaemonCore {
             kernelPath: config.kernelPath, initramfsPath: config.initramfsPath,
             commandLine: config.cmdline, cpuCount: config.cpus, memoryMiB: config.memoryMiB,
             consoleLogPath: logPath, execCommand: nil, timeout: config.bootTimeout,
-            diskPaths: diskPaths, shares: shares)
+            diskPaths: diskPaths, shares: shares, balloonEnabled: true)
     }
 
     func resolveName(_ requested: String?) throws -> String {
@@ -208,4 +340,12 @@ extension DaemonCore {
 
     func beginOp() { withLock { pendingOps += 1 } }
     func endOp() { withLock { pendingOps = max(0, pendingOps - 1) } }
+}
+
+/// The per-boot resources `teardownState` detaches under the lock and then stops
+/// outside it (stopping a forwarder or timer must never hold `stateLock`).
+private struct TeardownBundle {
+    let wake: PowerWake?
+    let forwarder: PortForwarder?
+    let pollTimer: DispatchSourceTimer?
 }

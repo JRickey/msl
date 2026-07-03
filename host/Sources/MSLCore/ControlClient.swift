@@ -48,6 +48,21 @@ public final class ControlClient: @unchecked Sendable {
         return try roundTrip(makeOp("distro_state", Optional<EmptyReq>.none))
     }
 
+    /// Guest memory telemetry (v1.3): /proc/meminfo + /proc/pressure/memory.
+    public func memStats() throws -> MemStatsData {
+        return try roundTrip(makeOp("mem_stats", Optional<EmptyReq>.none))
+    }
+
+    /// Best-effort guest hygiene pass (v1.3): sync + compact + drop_caches.
+    public func memReclaim() throws {
+        let _: EmptyData = try roundTrip(makeOp("mem_reclaim", Optional<EmptyReq>.none))
+    }
+
+    /// Guest TCP listener ports on wildcard/loopback addresses (v1.3).
+    public func netListeners() throws -> NetListenersData {
+        return try roundTrip(makeOp("net_listeners", Optional<EmptyReq>.none))
+    }
+
     /// Buffered command execution. `distro` names the distro to run inside
     /// (nil = the agent's own context, used by the install builder VM). The
     /// receive timeout is widened for long builds via `receiveTimeout`.
