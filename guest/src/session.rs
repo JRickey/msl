@@ -264,8 +264,8 @@ mod linux {
         req: &SessionOpenReq,
         init_pid: Option<i32>,
     ) -> Result<(RawFd, SlaveSource, Vec<RawFd>), String> {
-        if req.distro {
-            let pid = init_pid.ok_or("distro not running")?;
+        // A resolved init pid means a distro-scoped session; None is builder mode.
+        if let Some(pid) = init_pid {
             let ns_fds = sys::open_ns_fds(pid).map_err(|e| format!("open ns: {e}"))?;
             let (master, slave_path) = sys::open_distro_pty(pid, req.rows, req.cols)
                 .inspect_err(|_| sys::close_all(&ns_fds))

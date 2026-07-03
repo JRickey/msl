@@ -9,12 +9,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::distro::{self, Distro};
+use crate::distro::{self, Distros};
 use crate::exec::{self, ExecOpts};
 use crate::proto::{
-    self, AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, DistroDownReq, DistroUpReq, Empty,
-    MkfsReq, PROTOCOL_VERSION, PingData, Request, SessionOpenReq, SessionRefReq, SessionResizeReq,
-    SessionSignalReq, SetTimeReq,
+    self, AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, DistroDownReq, DistroStateReq,
+    DistroUpReq, Empty, MkfsReq, PROTOCOL_VERSION, PingData, Request, SessionOpenReq,
+    SessionRefReq, SessionResizeReq, SessionSignalReq, SetTimeReq,
 };
 use crate::session::{self, Sessions};
 use crate::sys;
@@ -24,7 +24,7 @@ const MKFS_TIMEOUT_MS: u64 = 120_000;
 
 pub struct Agent {
     sessions: Mutex<Sessions>,
-    distro: Mutex<Distro>,
+    distros: Mutex<Distros>,
 }
 
 impl Default for Agent {
@@ -38,7 +38,7 @@ impl Agent {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(Sessions::new()),
-            distro: Mutex::new(Distro::new()),
+            distros: Mutex::new(Distros::new()),
         }
     }
 
@@ -47,18 +47,21 @@ impl Agent {
         &self.sessions
     }
 
+    // The running init pid of a named distro (None if unknown or not running);
+    // the exec/session join target for `distro: <name>`.
     #[must_use]
-    pub fn distro_pid(&self) -> Option<i32> {
-        self.distro.lock().ok().and_then(|g| g.running_pid())
+    pub fn distro_pid(&self, name: &str) -> Option<i32> {
+        assert!(!name.is_empty(), "distro_pid needs a name");
+        self.distros.lock().ok().and_then(|g| g.running_pid(name))
     }
 
-    // Classify a reaped child: distro init, a session, or an unknown orphan.
+    // Classify a reaped child: a distro init, a session, or an unknown orphan.
     pub fn note_reaped(&self, pid: i32, code: i32) {
         assert!(pid > 0, "reaped pid must be positive");
-        if let Ok(mut guard) = self.distro.lock()
-            && guard.on_init_exit(pid)
+        if let Ok(mut guard) = self.distros.lock()
+            && let Some(name) = guard.on_init_exit(pid)
         {
-            crate::log::warn(&format!("distro init {pid} exited ({code})"));
+            crate::log::warn(&format!("distro '{name}' init {pid} exited ({code})"));
             return;
         }
         if let Ok(mut guard) = self.sessions.lock()
@@ -92,7 +95,7 @@ impl Agent {
             "exec" => self.handle_exec(req),
             "distro_up" => self.handle_distro_up(req),
             "distro_down" => self.handle_distro_down(req),
-            "distro_state" => respond(req.id, self.distro_state()),
+            "distro_state" => self.handle_distro_state(req),
             "session_open" => self.handle_session_open(req),
             "session_resize" => self.handle_session_resize(req),
             "session_signal" => self.handle_session_signal(req),
@@ -117,55 +120,105 @@ impl Agent {
 
     fn handle_exec(&self, req: &Request) -> Vec<u8> {
         let timeout = req.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-        let init_pid = if req.distro { self.distro_pid() } else { None };
-        if req.distro && init_pid.is_none() {
-            return proto::encode_err(req.id, "distro not running");
-        }
+        let init_pid = match self.resolve_distro(req.distro.as_deref()) {
+            Ok(pid) => pid,
+            Err(message) => return proto::encode_err(req.id, &message),
+        };
         let opts = ExecOpts {
-            distro: req.distro,
+            distro: req.distro.is_some(),
             cwd: req.cwd.as_deref(),
             init_pid,
         };
         respond(req.id, exec::run(&req.argv, &req.env, timeout, &opts))
     }
 
+    // Resolve an optional distro name to its running init pid: None → agent
+    // context; a known running name → its pid; unknown or non-running → error.
+    fn resolve_distro(&self, name: Option<&str>) -> Result<Option<i32>, String> {
+        match name {
+            None => Ok(None),
+            Some(target) => {
+                distro::validate_name(target)?;
+                self.distro_pid(target)
+                    .map(Some)
+                    .ok_or_else(|| "distro not running".to_string())
+            }
+        }
+    }
+
     fn handle_distro_up(&self, req: &Request) -> Vec<u8> {
         let parsed: Result<DistroUpReq, String> = parse(&req.req);
         let result = parsed.and_then(|up| {
+            distro::validate_name(&up.name)?;
             distro::validate_dev(&up.dev)?;
             distro::validate_hostname(&up.hostname)?;
-            do_distro_up(&self.distro, &up)
+            do_distro_up(&self.distros, &up)
         });
         respond(req.id, result)
     }
 
-    fn distro_state(&self) -> Result<proto::DistroStateData, String> {
-        let guard = self.distro.lock().map_err(|_| "distro lock".to_string())?;
-        Ok(guard.snapshot())
+    fn handle_distro_state(&self, req: &Request) -> Vec<u8> {
+        match parse_optional::<DistroStateReq>(&req.req) {
+            Err(message) => proto::encode_err(req.id, &message),
+            Ok(state_req) => self.distro_state_response(req.id, state_req.name.as_deref()),
+        }
+    }
+
+    // With a name → that distro's snapshot; without → the full (possibly empty)
+    // table listing per protocol v1.2.
+    fn distro_state_response(&self, id: u64, name: Option<&str>) -> Vec<u8> {
+        let Some(name) = name else {
+            return respond(id, self.distro_list());
+        };
+        if let Err(message) = distro::validate_name(name) {
+            return proto::encode_err(id, &message);
+        }
+        respond(id, self.distro_snapshot(name))
+    }
+
+    fn distro_snapshot(&self, name: &str) -> Result<proto::DistroStateData, String> {
+        assert!(!name.is_empty(), "snapshot needs a name");
+        let guard = self.distros.lock().map_err(|_| "distro lock".to_string())?;
+        Ok(guard.snapshot(name))
+    }
+
+    fn distro_list(&self) -> Result<proto::DistroListData, String> {
+        let distros = self
+            .distros
+            .lock()
+            .map_err(|_| "distro lock".to_string())?
+            .list();
+        Ok(proto::DistroListData { distros })
     }
 
     fn handle_distro_down(&self, req: &Request) -> Vec<u8> {
-        let timeout_ms = parse_down_timeout(&req.req);
-        respond(req.id, self.distro_down(timeout_ms))
+        let parsed: Result<DistroDownReq, String> = parse(&req.req);
+        let result = parsed.and_then(|down| {
+            distro::validate_name(&down.name)?;
+            let timeout_ms = distro::clamp_down_timeout(down.timeout_ms);
+            self.distro_down(&down.name, timeout_ms)
+        });
+        respond(req.id, result)
     }
 
-    // A live distro takes the poweroff/wait path; the sync/unmount teardown and
-    // Failed->Stopped settle then run unconditionally, holding no lock meanwhile.
-    fn distro_down(&self, timeout_ms: u64) -> Result<proto::DistroDownData, String> {
+    // A live distro takes the poweroff/wait path; the per-name sync/unmount
+    // teardown and Failed->Stopped settle then run unconditionally, no lock held.
+    fn distro_down(&self, name: &str, timeout_ms: u64) -> Result<proto::DistroDownData, String> {
+        assert!(!name.is_empty(), "distro_down needs a name");
         debug_assert!((distro::DOWN_MIN_MS..=distro::DOWN_MAX_MS).contains(&timeout_ms));
         let active = {
-            let guard = self.distro.lock().map_err(|_| "distro lock".to_string())?;
-            guard.active_pid()
+            let guard = self.distros.lock().map_err(|_| "distro lock".to_string())?;
+            guard.active_pid(name)
         };
         if let Some(pid) = active {
             assert!(pid > 0, "active init pid must be positive");
-            do_poweroff_and_wait(&self.distro, pid, timeout_ms);
+            do_poweroff_and_wait(&self.distros, name, pid, timeout_ms);
         }
-        do_teardown();
-        self.distro
+        do_teardown(name);
+        self.distros
             .lock()
             .map_err(|_| "distro lock".to_string())?
-            .settle_stopped();
+            .settle_and_remove(name);
         Ok(proto::DistroDownData { state: "stopped" })
     }
 
@@ -173,10 +226,7 @@ impl Agent {
         let parsed: Result<SessionOpenReq, String> = parse(&req.req);
         let result = parsed.and_then(|open| {
             session::validate_open(&open.argv, open.rows, open.cols)?;
-            let init_pid = if open.distro { self.distro_pid() } else { None };
-            if open.distro && init_pid.is_none() {
-                return Err("distro not running".to_string());
-            }
+            let init_pid = self.resolve_distro(open.distro.as_deref())?;
             do_session_open(&self.sessions, &open, init_pid)
         });
         respond(req.id, result)
@@ -280,24 +330,18 @@ fn validate_set_time(sec: i64) -> Result<(), String> {
     }
 }
 
-// A distro_down `req` is optional; a missing or malformed one falls back to the
-// default timeout. The result is always clamped into the valid window.
-fn parse_down_timeout(value: &Value) -> u64 {
-    let requested = if value.is_null() {
-        None
-    } else {
-        serde_json::from_value::<DistroDownReq>(value.clone())
-            .ok()
-            .and_then(|r| r.timeout_ms)
-    };
-    let clamped = distro::clamp_down_timeout(requested);
-    debug_assert!((distro::DOWN_MIN_MS..=distro::DOWN_MAX_MS).contains(&clamped));
-    clamped
-}
-
 fn parse<T: DeserializeOwned>(value: &Value) -> Result<T, String> {
     if value.is_null() {
         return Err("missing req object".to_string());
+    }
+    serde_json::from_value(value.clone()).map_err(|e| format!("bad req: {e}"))
+}
+
+// Like `parse`, but a wholly absent `req` yields the type's default (used by
+// distro_state, whose name filter is optional).
+fn parse_optional<T: DeserializeOwned + Default>(value: &Value) -> Result<T, String> {
+    if value.is_null() {
+        return Ok(T::default());
     }
     serde_json::from_value(value.clone()).map_err(|e| format!("bad req: {e}"))
 }
@@ -318,35 +362,41 @@ fn recover_id(payload: &[u8]) -> u64 {
 
 #[cfg(target_os = "linux")]
 fn do_distro_up(
-    distro: &Mutex<Distro>,
+    distros: &Mutex<Distros>,
     up: &DistroUpReq,
 ) -> Result<proto::DistroStateData, String> {
-    distro::distro_up(distro, up)
+    distro::distro_up(distros, up)
 }
 
 #[cfg(not(target_os = "linux"))]
 fn do_distro_up(
-    _distro: &Mutex<Distro>,
+    _distros: &Mutex<Distros>,
     _up: &DistroUpReq,
 ) -> Result<proto::DistroStateData, String> {
     Err("distro boot requires linux".to_string())
 }
 
 #[cfg(target_os = "linux")]
-fn do_poweroff_and_wait(distro: &Mutex<Distro>, init_pid: i32, timeout_ms: u64) {
-    distro::poweroff_and_wait(distro, init_pid, timeout_ms);
+fn do_poweroff_and_wait(distros: &Mutex<Distros>, name: &str, init_pid: i32, timeout_ms: u64) {
+    distro::poweroff_and_wait(distros, name, init_pid, timeout_ms);
 }
 
 #[cfg(not(target_os = "linux"))]
-const fn do_poweroff_and_wait(_distro: &Mutex<Distro>, _init_pid: i32, _timeout_ms: u64) {}
+const fn do_poweroff_and_wait(
+    _distros: &Mutex<Distros>,
+    _name: &str,
+    _init_pid: i32,
+    _timeout_ms: u64,
+) {
+}
 
 #[cfg(target_os = "linux")]
-fn do_teardown() {
-    distro::teardown();
+fn do_teardown(name: &str) {
+    distro::teardown(name);
 }
 
 #[cfg(not(target_os = "linux"))]
-const fn do_teardown() {}
+const fn do_teardown(_name: &str) {}
 
 #[cfg(target_os = "linux")]
 fn do_session_open(
@@ -409,17 +459,32 @@ mod tests {
     }
 
     #[test]
-    fn ping_reports_protocol_one() {
+    fn ping_reports_protocol_two() {
         let value = call(&Agent::new(), r#"{"id":7,"op":"ping"}"#);
         assert_eq!(value["id"], 7);
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["agent"], "msl-agent");
-        assert_eq!(value["data"]["protocol"], 1);
+        assert_eq!(value["data"]["protocol"], 2);
     }
 
     #[test]
-    fn distro_state_defaults_stopped() {
+    fn distro_state_no_name_lists_empty() {
         let value = call(&Agent::new(), r#"{"id":1,"op":"distro_state"}"#);
+        assert_eq!(value["ok"], true);
+        assert!(
+            value["data"]["distros"]
+                .as_array()
+                .expect("distros array")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn distro_state_named_defaults_stopped() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":1,"op":"distro_state","req":{"name":"ubuntu"}}"#,
+        );
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["state"], "stopped");
         assert!(value["data"]["init_pid"].is_null());
@@ -429,7 +494,7 @@ mod tests {
     fn distro_up_rejects_bad_dev() {
         let value = call(
             &Agent::new(),
-            r#"{"id":2,"op":"distro_up","req":{"dev":"/dev/sda","hostname":"ubuntu"}}"#,
+            r#"{"id":2,"op":"distro_up","req":{"name":"ubuntu","dev":"/dev/sda","hostname":"ubuntu"}}"#,
         );
         assert_eq!(value["ok"], false);
         assert!(
@@ -437,6 +502,21 @@ mod tests {
                 .as_str()
                 .expect("err")
                 .contains("dev must match")
+        );
+    }
+
+    #[test]
+    fn distro_up_rejects_bad_name() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":2,"op":"distro_up","req":{"name":"Ubuntu","dev":"/dev/vda","hostname":"ubuntu"}}"#,
+        );
+        assert_eq!(value["ok"], false);
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("err")
+                .contains("name must match")
         );
     }
 
@@ -529,8 +609,18 @@ mod tests {
     }
 
     #[test]
-    fn distro_down_idempotent_when_stopped() {
+    fn distro_down_requires_name() {
         let value = call(&Agent::new(), r#"{"id":21,"op":"distro_down"}"#);
+        assert_eq!(value["id"], 21);
+        assert_eq!(value["ok"], false);
+    }
+
+    #[test]
+    fn distro_down_idempotent_when_stopped() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":21,"op":"distro_down","req":{"name":"ubuntu"}}"#,
+        );
         assert_eq!(value["id"], 21);
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["state"], "stopped");
@@ -540,7 +630,7 @@ mod tests {
     fn distro_down_routes_with_req_timeout() {
         let value = call(
             &Agent::new(),
-            r#"{"id":22,"op":"distro_down","req":{"timeout_ms":50}}"#,
+            r#"{"id":22,"op":"distro_down","req":{"name":"ubuntu","timeout_ms":50}}"#,
         );
         assert_eq!(value["id"], 22);
         assert_eq!(value["ok"], true);
@@ -552,22 +642,85 @@ mod tests {
         let agent = Agent::new();
         {
             // A crashed boot lands in Failed (init exits inside the ready window).
-            let mut guard = agent.distro.lock().expect("distro lock");
-            guard.begin(4242);
-            let recorded = guard.on_init_exit(4242);
-            let state = guard.snapshot().state;
+            let mut guard = agent.distros.lock().expect("distro lock");
+            guard.reserve("ubuntu", "/dev/vda").expect("reserve");
+            guard.begin("ubuntu", 4242);
+            let name = guard.on_init_exit(4242);
+            let state = guard.snapshot("ubuntu").state;
             drop(guard);
-            assert!(recorded, "init exit recorded");
+            assert_eq!(name.as_deref(), Some("ubuntu"), "init exit recorded");
             assert_eq!(state, "failed");
         }
-        let first = call(&agent, r#"{"id":23,"op":"distro_down"}"#);
+        let first = call(
+            &agent,
+            r#"{"id":23,"op":"distro_down","req":{"name":"ubuntu"}}"#,
+        );
         assert_eq!(first["ok"], true);
         assert_eq!(first["data"]["state"], "stopped");
         // Settled to Stopped, so distro_state and a repeat call agree.
-        let state = call(&agent, r#"{"id":24,"op":"distro_state"}"#);
+        let state = call(
+            &agent,
+            r#"{"id":24,"op":"distro_state","req":{"name":"ubuntu"}}"#,
+        );
         assert_eq!(state["data"]["state"], "stopped");
-        let again = call(&agent, r#"{"id":25,"op":"distro_down"}"#);
+        let again = call(
+            &agent,
+            r#"{"id":25,"op":"distro_down","req":{"name":"ubuntu"}}"#,
+        );
         assert_eq!(again["data"]["state"], "stopped");
+    }
+
+    #[test]
+    fn exec_unknown_distro_name_errors() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":30,"op":"exec","argv":["/bin/echo","hi"],"distro":"ghost"}"#,
+        );
+        assert_eq!(value["ok"], false);
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("err")
+                .contains("not running")
+        );
+    }
+
+    #[test]
+    fn session_open_unknown_distro_name_errors() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":31,"op":"session_open","req":{"argv":["/bin/sh"],"rows":24,"cols":80,"distro":"ghost"}}"#,
+        );
+        assert_eq!(value["ok"], false);
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("err")
+                .contains("not running")
+        );
+    }
+
+    #[test]
+    fn distro_state_lists_named_entries() {
+        let agent = Agent::new();
+        {
+            let mut guard = agent.distros.lock().expect("distro lock");
+            guard.reserve("one", "/dev/vda").expect("reserve one");
+            guard.begin("one", 100);
+            guard.promote("one");
+            guard.reserve("two", "/dev/vdb").expect("reserve two");
+            guard.begin("two", 200);
+            guard.promote("two");
+        }
+        let value = call(&agent, r#"{"id":32,"op":"distro_state"}"#);
+        let list = value["data"]["distros"].as_array().expect("distros array");
+        assert_eq!(list.len(), 2);
+        let named = call(
+            &agent,
+            r#"{"id":33,"op":"distro_state","req":{"name":"one"}}"#,
+        );
+        assert_eq!(named["data"]["state"], "running");
+        assert_eq!(named["data"]["init_pid"], 100);
     }
 
     #[test]

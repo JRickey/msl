@@ -1,16 +1,22 @@
-//! Distro lifecycle: the boot state machine (host-testable) and the Linux
-//! `clone`-into-namespaces boot that mounts an ext4 root, sets up the guest
-//! filesystems, `pivot_root`s and execs `/sbin/init`.
+//! Distro lifecycle: the per-name boot state machine and its table
+//! (host-testable) plus the Linux `clone`-into-namespaces boot that mounts an
+//! ext4 root, sets up the guest filesystems, `pivot_root`s and execs
+//! `/sbin/init`. v1.2 runs up to 16 named distros concurrently in one VM.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::proto::DistroStateData;
+use crate::proto::{DistroListEntry, DistroStateData};
 
 pub const READY_WINDOW: Duration = Duration::from_secs(5);
 
 pub const DOWN_MIN_MS: u64 = 1_000;
 pub const DOWN_MAX_MS: u64 = 60_000;
 pub const DOWN_DEFAULT_MS: u64 = 15_000;
+
+// Concurrent-distro cap (ADR 0005) and the distro-name length bound.
+pub const MAX_DISTROS: usize = 16;
+pub const NAME_MAX_LEN: usize = 32;
 
 // Clamp a requested distro_down timeout into [1s, 60s], defaulting to 15s.
 #[must_use]
@@ -41,6 +47,7 @@ impl State {
 }
 
 pub struct Distro {
+    dev: String,
     state: State,
     init_pid: Option<i32>,
     started: Option<Instant>,
@@ -56,10 +63,16 @@ impl Distro {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            dev: String::new(),
             state: State::Stopped,
             init_pid: None,
             started: None,
         }
+    }
+
+    fn backs_dev(&self, dev: &str) -> bool {
+        assert!(!dev.is_empty(), "dev query must be non-empty");
+        !self.dev.is_empty() && self.dev == dev
     }
 
     #[must_use]
@@ -96,9 +109,28 @@ impl Distro {
         }
     }
 
+    // A bare reservation: Starting with the dev recorded but no init pid yet.
+    // It counts as active so admission (cap, dev reuse) rejects a racing peer.
+    fn reserve(&mut self, dev: &str) {
+        assert!(!dev.is_empty(), "distro dev required");
+        self.dev = dev.to_string();
+        self.state = State::Starting;
+        self.init_pid = None;
+        self.started = None;
+    }
+
+    #[must_use]
+    const fn is_reserved(&self) -> bool {
+        matches!(self.state, State::Starting) && self.init_pid.is_none()
+    }
+
+    // Fill a reserved entry with its spawned init pid, starting the ready clock.
     pub fn begin(&mut self, pid: i32) {
         assert!(pid > 0, "init pid must be positive");
-        self.state = State::Starting;
+        assert!(
+            self.is_reserved(),
+            "begin requires an outstanding reservation"
+        );
         self.init_pid = Some(pid);
         self.started = Some(Instant::now());
     }
@@ -132,6 +164,152 @@ impl Distro {
         }
         debug_assert!(self.state != State::Failed);
         debug_assert!(self.state != State::Stopped || self.init_pid.is_none());
+    }
+}
+
+// The named-distro table: at most MAX_DISTROS live entries keyed by name. An
+// entry exists only while a distro is starting/running/terminal-pending; a
+// clean teardown drops it so absent names read back as the stopped default.
+#[derive(Default)]
+pub struct Distros {
+    map: HashMap<String, Distro>,
+}
+
+impl Distros {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self, name: &str) -> DistroStateData {
+        self.map.get(name).map_or(
+            DistroStateData {
+                state: State::Stopped.as_str(),
+                init_pid: None,
+            },
+            Distro::snapshot,
+        )
+    }
+
+    #[must_use]
+    pub fn list(&self) -> Vec<DistroListEntry> {
+        let mut out = Vec::with_capacity(self.map.len());
+        // bounded: at most MAX_DISTROS entries
+        for (name, distro) in &self.map {
+            let snap = distro.snapshot();
+            out.push(DistroListEntry {
+                name: name.clone(),
+                state: snap.state,
+                init_pid: snap.init_pid,
+            });
+        }
+        debug_assert!(out.len() <= MAX_DISTROS);
+        out
+    }
+
+    #[must_use]
+    pub fn is_active(&self, name: &str) -> bool {
+        self.map.get(name).is_some_and(Distro::is_active)
+    }
+
+    #[must_use]
+    pub fn running_pid(&self, name: &str) -> Option<i32> {
+        self.map.get(name).and_then(Distro::running_pid)
+    }
+
+    #[must_use]
+    pub fn active_pid(&self, name: &str) -> Option<i32> {
+        self.map.get(name).and_then(Distro::active_pid)
+    }
+
+    fn active_count(&self) -> usize {
+        self.map.values().filter(|d| d.is_active()).count()
+    }
+
+    // Reserve a not-yet-active name under one lock (cap + dev-uniqueness, with
+    // reservations counted), blocking a racing distro_up from double-admitting.
+    pub fn reserve(&mut self, name: &str, dev: &str) -> Result<(), String> {
+        assert!(!name.is_empty(), "reserve needs a name");
+        assert!(!dev.is_empty(), "reserve needs a dev");
+        if !self.is_active(name) && self.active_count() >= MAX_DISTROS {
+            return Err("too many distros (max 16)".to_string());
+        }
+        // bounded: at most MAX_DISTROS entries
+        for (other, distro) in &self.map {
+            if other != name && distro.is_active() && distro.backs_dev(dev) {
+                return Err(format!("dev {dev} already backs an active distro"));
+            }
+        }
+        self.map.entry(name.to_string()).or_default().reserve(dev);
+        debug_assert!(self.is_active(name));
+        Ok(())
+    }
+
+    // Drop an outstanding reservation (spawn/prepare failure); never touches a
+    // live entry that already has an init pid.
+    pub fn release_reservation(&mut self, name: &str) {
+        assert!(!name.is_empty(), "release needs a name");
+        if self.map.get(name).is_some_and(Distro::is_reserved) {
+            let _ = self.map.remove(name);
+        }
+    }
+
+    pub fn begin(&mut self, name: &str, pid: i32) {
+        assert!(pid > 0, "init pid must be positive");
+        assert!(!name.is_empty(), "distro name required");
+        if let Some(distro) = self.map.get_mut(name) {
+            distro.begin(pid);
+        }
+    }
+
+    pub fn promote(&mut self, name: &str) {
+        assert!(!name.is_empty(), "promote needs a name");
+        if let Some(distro) = self.map.get_mut(name) {
+            distro.promote();
+        }
+    }
+
+    // Reaper-side pid → name resolution across all entries (O(entries)); records
+    // the init death on the matching entry and returns its name for logging.
+    pub fn on_init_exit(&mut self, pid: i32) -> Option<String> {
+        assert!(pid > 0, "reaped pid must be positive");
+        // bounded: at most MAX_DISTROS entries
+        for (name, distro) in &mut self.map {
+            if distro.on_init_exit(pid) {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    // Failed → Stopped settle, then drop the terminal entry so the table tracks
+    // only live distros and a name query falls back to the stopped default.
+    pub fn settle_and_remove(&mut self, name: &str) {
+        assert!(!name.is_empty(), "settle needs a name");
+        if let Some(distro) = self.map.get_mut(name) {
+            distro.settle_stopped();
+            if !distro.is_active() {
+                let _ = self.map.remove(name);
+            }
+        }
+        debug_assert!(!self.map.contains_key(name) || self.is_active(name));
+    }
+}
+
+// Distro name key per protocol v1.2: ^[a-z][a-z0-9-]{0,31}$.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    let bytes = name.as_bytes();
+    let head_ok = bytes.first().is_some_and(u8::is_ascii_lowercase);
+    let body_ok = bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+    if head_ok && body_ok && bytes.len() <= NAME_MAX_LEN {
+        Ok(())
+    } else {
+        Err("name must match ^[a-z][a-z0-9-]{0,31}$".to_string())
     }
 }
 
@@ -171,12 +349,12 @@ mod linux {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{DOWN_MAX_MS, Distro, validate_dev, validate_hostname};
+    use super::{DOWN_MAX_MS, Distros, validate_dev, validate_hostname, validate_name};
     use crate::exec::{self, ExecOpts};
     use crate::proto::{DistroStateData, DistroUpReq};
     use crate::sys::{self, BootSpec, MountOp};
 
-    const NEWROOT: &str = "/run/msl/newroot";
+    const DISTRO_ROOT: &str = "/run/msl/distros";
     const MAC_SRC: &str = "/run/msl/mac";
     const READY_TICKS: u32 = 50;
     const TICK: Duration = Duration::from_millis(100);
@@ -188,42 +366,60 @@ mod linux {
     // `systemctl poweroff` only requests shutdown and returns immediately.
     const POWEROFF_EXEC_MS: u64 = 3_000;
 
-    pub fn distro_up(distro: &Mutex<Distro>, req: &DistroUpReq) -> Result<DistroStateData, String> {
+    pub fn distro_up(
+        distros: &Mutex<Distros>,
+        req: &DistroUpReq,
+    ) -> Result<DistroStateData, String> {
         validate_dev(&req.dev)?;
         validate_hostname(&req.hostname)?;
+        validate_name(&req.name)?;
         {
-            let guard = distro.lock().map_err(|_| "distro lock".to_string())?;
-            if guard.is_active() {
-                return Ok(guard.snapshot());
+            // Reserve under one lock: idempotent for a live name, else insert a
+            // Starting placeholder that blocks a racing distro_up's admission.
+            let mut guard = distros.lock().map_err(|_| "distro lock".to_string())?;
+            if guard.is_active(&req.name) {
+                return Ok(guard.snapshot(&req.name));
+            }
+            guard.reserve(&req.name, &req.dev)?;
+        }
+        match boot_reserved(distros, req) {
+            Ok(()) => Ok(await_ready(distros, &req.name)),
+            Err(e) => {
+                if let Ok(mut guard) = distros.lock() {
+                    guard.release_reservation(&req.name);
+                }
+                Err(e)
             }
         }
-        let spec = prepare_boot(req)?;
-        {
-            // Hold the spawn lock across fork+register so the reaper cannot see
-            // the init pid before begin() records it.
-            let _spawn = crate::wait::spawn_lock();
-            let pid = sys::spawn_distro_init(&spec).map_err(|e| format!("distro boot: {e}"))?;
-            distro
-                .lock()
-                .map_err(|_| "distro lock".to_string())?
-                .begin(pid);
-        }
-        Ok(await_ready(distro))
     }
 
-    fn await_ready(distro: &Mutex<Distro>) -> DistroStateData {
+    // Boot into the reserved slot: prepare mounts, clone init, record the pid.
+    // The spawn lock keeps {fork, begin} atomic against the reaper.
+    fn boot_reserved(distros: &Mutex<Distros>, req: &DistroUpReq) -> Result<(), String> {
+        let spec = prepare_boot(req)?;
+        let _spawn = crate::wait::spawn_lock();
+        let pid = sys::spawn_distro_init(&spec).map_err(|e| format!("distro boot: {e}"))?;
+        distros
+            .lock()
+            .map_err(|_| "distro lock".to_string())?
+            .begin(&req.name, pid);
+        Ok(())
+    }
+
+    fn await_ready(distros: &Mutex<Distros>, name: &str) -> DistroStateData {
+        assert!(!name.is_empty(), "await_ready needs a name");
         // bounded: at most READY_TICKS polls of the ready window
         for _ in 0..READY_TICKS {
             thread::sleep(TICK);
-            if let Ok(guard) = distro.lock()
-                && !guard.is_active()
+            if let Ok(guard) = distros.lock()
+                && !guard.is_active(name)
             {
-                return guard.snapshot();
+                return guard.snapshot(name);
             }
         }
-        if let Ok(mut guard) = distro.lock() {
-            guard.promote();
-            return guard.snapshot();
+        if let Ok(mut guard) = distros.lock() {
+            guard.promote(name);
+            return guard.snapshot(name);
         }
         DistroStateData {
             state: "failed",
@@ -231,23 +427,24 @@ mod linux {
         }
     }
 
-    // Poweroff inside the distro ns, wait for init exit via the reaper-updated
-    // state machine, SIGKILL on timeout. The caller owns the teardown.
-    pub fn poweroff_and_wait(distro: &Mutex<Distro>, init_pid: i32, timeout_ms: u64) {
+    // Poweroff inside the named distro's ns, wait for init exit via the
+    // reaper-updated state machine, SIGKILL on timeout. Caller owns teardown.
+    pub fn poweroff_and_wait(distros: &Mutex<Distros>, name: &str, init_pid: i32, timeout_ms: u64) {
         assert!(init_pid > 0, "poweroff_and_wait needs a live init pid");
         assert!(timeout_ms >= 1, "timeout must be positive");
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         fire_poweroff(init_pid);
-        if !poll_stopped(distro, deadline) {
+        if !poll_stopped(distros, name, deadline) {
             let _ = sys::send_signal(init_pid, libc::SIGKILL);
-            let _ = poll_stopped(distro, Instant::now() + KILL_GRACE);
+            let _ = poll_stopped(distros, name, Instant::now() + KILL_GRACE);
         }
     }
 
     // sync(2) flushes the shared page cache to the block device (mandatory even
-    // for a failed boot that dirtied it); the unmount is best-effort.
-    pub fn teardown() {
-        let _ = sys::sync_and_unmount(NEWROOT);
+    // for a failed boot that dirtied it); the per-name unmount is best-effort.
+    pub fn teardown(name: &str) {
+        assert!(!name.is_empty(), "teardown needs a distro name");
+        let _ = sys::sync_and_unmount(&newroot_for(name));
     }
 
     // Best-effort buffered poweroff on a fixed 3s budget (it only *requests*
@@ -275,16 +472,16 @@ mod linux {
         }
     }
 
-    // Poll the reaper-written state machine until stopped or the deadline; the
-    // lock is held only to sample, never across the sleep (no reaper deadlock).
-    fn poll_stopped(distro: &Mutex<Distro>, deadline: Instant) -> bool {
+    // Poll the reaper-written state machine until the named distro stops or the
+    // deadline; the lock is sampled only, never held across the sleep.
+    fn poll_stopped(distros: &Mutex<Distros>, name: &str, deadline: Instant) -> bool {
         debug_assert!(
             u128::from(DOWN_MAX_TICKS) * DOWN_TICK.as_millis() >= u128::from(DOWN_MAX_MS)
         );
         // bounded: DOWN_MAX_TICKS caps iterations; the deadline caps wall time
         for _ in 0..DOWN_MAX_TICKS {
-            if let Ok(guard) = distro.lock()
-                && !guard.is_active()
+            if let Ok(guard) = distros.lock()
+                && !guard.is_active(name)
             {
                 return true;
             }
@@ -296,17 +493,23 @@ mod linux {
         false
     }
 
+    fn newroot_for(name: &str) -> String {
+        assert!(!name.is_empty(), "newroot needs a distro name");
+        format!("{DISTRO_ROOT}/{name}")
+    }
+
     fn prepare_boot(req: &DistroUpReq) -> Result<BootSpec, String> {
-        std::fs::create_dir_all(NEWROOT).map_err(|e| format!("newroot: {e}"))?;
+        let newroot = newroot_for(&req.name);
+        std::fs::create_dir_all(&newroot).map_err(|e| format!("newroot: {e}"))?;
         let mac = if req.mac_share && Path::new(MAC_SRC).exists() {
-            Some((cstr(MAC_SRC)?, cstr(&format!("{NEWROOT}/mnt/mac"))?))
+            Some((cstr(MAC_SRC)?, cstr(&format!("{newroot}/mnt/mac"))?))
         } else {
             None
         };
         Ok(BootSpec {
             dev: cstr(&req.dev)?,
-            newroot: cstr(NEWROOT)?,
-            mounts: guest_mounts()?,
+            newroot: cstr(&newroot)?,
+            mounts: guest_mounts(&newroot)?,
             mac,
             hostname: cstr(&req.hostname)?,
             argv: vec![cstr("/sbin/init")?],
@@ -317,24 +520,27 @@ mod linux {
         })
     }
 
-    fn guest_mounts() -> Result<Vec<MountOp>, String> {
+    fn guest_mounts(newroot: &str) -> Result<Vec<MountOp>, String> {
+        assert!(!newroot.is_empty(), "mounts need a newroot");
         Ok(vec![
-            mnt("proc", "/proc", "proc", None)?,
-            mnt("sysfs", "/sys", "sysfs", None)?,
-            mnt("devtmpfs", "/dev", "devtmpfs", None)?,
+            mnt(newroot, "proc", "/proc", "proc", None)?,
+            mnt(newroot, "sysfs", "/sys", "sysfs", None)?,
+            mnt(newroot, "devtmpfs", "/dev", "devtmpfs", None)?,
             mnt(
+                newroot,
                 "devpts",
                 "/dev/pts",
                 "devpts",
                 Some("mode=0620,ptmxmode=0666"),
             )?,
-            mnt("tmpfs", "/dev/shm", "tmpfs", Some("mode=1777"))?,
-            mnt("tmpfs", "/run", "tmpfs", Some("mode=0755"))?,
-            mnt("cgroup2", "/sys/fs/cgroup", "cgroup2", None)?,
+            mnt(newroot, "tmpfs", "/dev/shm", "tmpfs", Some("mode=1777"))?,
+            mnt(newroot, "tmpfs", "/run", "tmpfs", Some("mode=0755"))?,
+            mnt(newroot, "cgroup2", "/sys/fs/cgroup", "cgroup2", None)?,
         ])
     }
 
     fn mnt(
+        newroot: &str,
         source: &str,
         target: &str,
         fstype: &str,
@@ -346,7 +552,7 @@ mod linux {
         };
         Ok(MountOp {
             source: cstr(source)?,
-            target: cstr(&format!("{NEWROOT}{target}"))?,
+            target: cstr(&format!("{newroot}{target}"))?,
             fstype: cstr(fstype)?,
             flags: 0,
             data,
@@ -360,11 +566,24 @@ mod linux {
 
 #[cfg(test)]
 mod tests {
-    use super::{DOWN_DEFAULT_MS, DOWN_MAX_MS, DOWN_MIN_MS, Distro, clamp_down_timeout};
+    use super::{
+        DOWN_DEFAULT_MS, DOWN_MAX_MS, DOWN_MIN_MS, Distro, Distros, MAX_DISTROS,
+        clamp_down_timeout, validate_name,
+    };
+
+    const DEV_A: &str = "/dev/vda";
+    const DEV_B: &str = "/dev/vdb";
+
+    // Reserve-then-begin, the two-step admission a live distro goes through.
+    fn up(table: &mut Distros, name: &str, dev: &str, pid: i32) {
+        table.reserve(name, dev).expect("reserve under cap");
+        table.begin(name, pid);
+    }
 
     #[test]
     fn settle_collapses_failed_to_stopped() {
         let mut distro = Distro::new();
+        distro.reserve(DEV_A);
         distro.begin(4242);
         assert!(distro.on_init_exit(4242), "recorded init exit");
         assert_eq!(distro.snapshot().state, "failed");
@@ -378,6 +597,109 @@ mod tests {
         let mut distro = Distro::new();
         distro.settle_stopped();
         assert_eq!(distro.snapshot().state, "stopped");
+    }
+
+    #[test]
+    fn absent_name_reads_stopped_default() {
+        let table = Distros::new();
+        assert_eq!(table.snapshot("ghost").state, "stopped");
+        assert!(table.snapshot("ghost").init_pid.is_none());
+        assert!(!table.is_active("ghost"));
+        assert!(table.list().is_empty());
+    }
+
+    #[test]
+    fn two_names_run_independent_lifecycles() {
+        let mut table = Distros::new();
+        up(&mut table, "one", DEV_A, 100);
+        up(&mut table, "two", DEV_B, 200);
+        table.promote("one");
+        table.promote("two");
+        assert_eq!(table.running_pid("one"), Some(100));
+        assert_eq!(table.running_pid("two"), Some(200));
+        // one clean shutdown (outside the ready window) leaves two untouched.
+        assert_eq!(table.on_init_exit(100).as_deref(), Some("one"));
+        assert!(!table.is_active("one"));
+        assert!(table.is_active("two"));
+        assert_eq!(table.running_pid("two"), Some(200));
+        table.settle_and_remove("one");
+        assert_eq!(table.snapshot("one").state, "stopped");
+        assert_eq!(table.list().len(), 1);
+    }
+
+    #[test]
+    fn dev_reuse_rejected_among_active() {
+        let mut table = Distros::new();
+        up(&mut table, "one", DEV_A, 100);
+        assert!(table.reserve("two", DEV_A).is_err(), "dev A already active");
+        assert!(table.reserve("two", DEV_B).is_ok(), "distinct dev admitted");
+        table.begin("two", 200);
+        // once the holder exits and tears down, its dev is free to reuse.
+        assert!(table.on_init_exit(100).is_some());
+        table.settle_and_remove("one");
+        assert!(
+            table.reserve("three", DEV_A).is_ok(),
+            "dev freed after teardown"
+        );
+    }
+
+    // A reservation counts before any pid exists, so a concurrent distro_up for
+    // the same dev cannot double-pass admission — the fix for the earlier TOCTOU.
+    #[test]
+    fn reservation_blocks_concurrent_admission() {
+        let mut table = Distros::new();
+        table.reserve("ubuntu", DEV_A).expect("first reservation");
+        // The bare reservation is visible as active with no pid yet.
+        assert!(table.is_active("ubuntu"), "reservation counts as active");
+        assert_eq!(table.snapshot("ubuntu").state, "starting");
+        assert!(table.snapshot("ubuntu").init_pid.is_none());
+        // A racing peer reusing the dev is rejected before it can spawn.
+        assert!(
+            table.reserve("other", DEV_A).is_err(),
+            "dev held by reservation"
+        );
+        // Abandoning the reservation frees the dev again.
+        table.release_reservation("ubuntu");
+        assert!(!table.is_active("ubuntu"));
+        assert!(
+            table.reserve("other", DEV_A).is_ok(),
+            "dev freed on release"
+        );
+    }
+
+    #[test]
+    fn cap_enforced_at_sixteen_active() {
+        let mut table = Distros::new();
+        // bounded: fills exactly the concurrency cap
+        for i in 0..MAX_DISTROS {
+            let name = format!("d{i}");
+            let dev = format!(
+                "/dev/vd{}",
+                (b'a' + u8::try_from(i).expect("small")) as char
+            );
+            up(
+                &mut table,
+                &name,
+                &dev,
+                1000 + i32::try_from(i).expect("small"),
+            );
+        }
+        assert!(
+            table.reserve("overflow", "/dev/vdz").is_err(),
+            "cap reached"
+        );
+        // an already-active name is not a new admission and stays allowed.
+        assert!(table.reserve("d0", "/dev/vda").is_ok(), "reentrant name ok");
+    }
+
+    #[test]
+    fn name_validation_matches_regex() {
+        for good in ["a", "ubuntu", "u1", "my-distro", "a0-b1"] {
+            assert!(validate_name(good).is_ok(), "{good} should be valid");
+        }
+        for bad in ["", "1abc", "-abc", "Ubuntu", "a_b", "a".repeat(33).as_str()] {
+            assert!(validate_name(bad).is_err(), "{bad} should be rejected");
+        }
     }
 
     #[test]

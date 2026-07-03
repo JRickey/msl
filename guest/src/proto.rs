@@ -8,7 +8,7 @@ use serde_json::Value;
 
 pub const AGENT_NAME: &str = "msl-agent";
 pub const AGENT_VERSION: &str = "0.0.1";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Deserialize)]
@@ -20,8 +20,9 @@ pub struct Request {
     #[serde(default)]
     pub env: HashMap<String, String>,
     pub timeout_ms: Option<u64>,
+    // v1.2: `distro` is the target distro name (absent/null = agent context).
     #[serde(default)]
-    pub distro: bool,
+    pub distro: Option<String>,
     pub cwd: Option<String>,
     #[serde(default)]
     pub req: Value,
@@ -29,10 +30,17 @@ pub struct Request {
 
 #[derive(Debug, Deserialize)]
 pub struct DistroUpReq {
+    pub name: String,
     pub dev: String,
     pub hostname: String,
     #[serde(default)]
     pub mac_share: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DistroStateReq {
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,8 +51,9 @@ pub struct SessionOpenReq {
     pub env: HashMap<String, String>,
     pub rows: u16,
     pub cols: u16,
+    // v1.2: target distro name (absent/null = agent context).
     #[serde(default)]
-    pub distro: bool,
+    pub distro: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,8 +85,9 @@ pub struct MkfsReq {
     pub dev: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct DistroDownReq {
+    pub name: String,
     pub timeout_ms: Option<u64>,
 }
 
@@ -107,6 +117,18 @@ pub struct ExecData {
 pub struct DistroStateData {
     pub state: &'static str,
     pub init_pid: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DistroListEntry {
+    pub name: String,
+    pub state: &'static str,
+    pub init_pid: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DistroListData {
+    pub distros: Vec<DistroListEntry>,
 }
 
 #[derive(Debug, Serialize)]
