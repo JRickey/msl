@@ -23,6 +23,13 @@ public final class DaemonCore: @unchecked Sendable {
     var lastActivity = Date()
     var pendingOps = 0
     var powerWake: PowerWake?
+    var forwarder: PortForwarder?
+    var balloonTargetMiB: UInt64 = 0
+    var comfortTicks = 0
+    var reclaimedThisIdle = false
+    var lastMemStats: MemStatsData?
+    var pollTimer: DispatchSourceTimer?
+    let pollQueue = DispatchQueue(label: "msl.daemon.poll", qos: .utility)
     private var idleTimer: DispatchSourceTimer?
 
     public init(config: DaemonConfig) {

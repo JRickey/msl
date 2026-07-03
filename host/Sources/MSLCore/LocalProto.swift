@@ -186,21 +186,49 @@ public struct DistroStatus: Sendable, Equatable, Codable {
     }
 }
 
-/// Payload of the `status` reply.
+/// Balloon memory summary in the `status` reply (nil when the VM is stopped).
+public struct MemoryStatus: Sendable, Equatable, Codable {
+    public let targetMiB: UInt64
+    public let maxMiB: UInt64
+    public let availableMiB: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case targetMiB = "target_mib"
+        case maxMiB = "max_mib"
+        case availableMiB = "available_mib"
+    }
+
+    public init(targetMiB: UInt64, maxMiB: UInt64, availableMiB: UInt64) {
+        self.targetMiB = targetMiB
+        self.maxMiB = maxMiB
+        self.availableMiB = availableMiB
+    }
+}
+
+/// Payload of the `status` reply. `memory` and `forwardedPorts` are optional so
+/// a v1.2 client decodes a v1.3 reply (and vice versa).
 public struct StatusData: Sendable, Equatable, Codable {
     public let vm: String
     public let distros: [DistroStatus]
     public let idleTimeoutS: Int
+    public let memory: MemoryStatus?
+    public let forwardedPorts: [UInt16]?
 
     enum CodingKeys: String, CodingKey {
-        case vm, distros
+        case vm, distros, memory
         case idleTimeoutS = "idle_timeout_s"
+        case forwardedPorts = "forwarded_ports"
     }
 
-    public init(vm: String, distros: [DistroStatus], idleTimeoutS: Int) {
+    public init(
+        vm: String, distros: [DistroStatus], idleTimeoutS: Int,
+        memory: MemoryStatus? = nil, forwardedPorts: [UInt16]? = nil
+    ) {
         self.vm = vm
         self.distros = distros
         self.idleTimeoutS = idleTimeoutS
+        self.memory = memory
+        self.forwardedPorts = forwardedPorts
     }
 }
 

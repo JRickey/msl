@@ -15,12 +15,13 @@ public struct BootSpec: Sendable {
     public let timeout: Double
     public let diskURLs: [URL]
     public let shares: [ShareSpec]
+    public let balloonEnabled: Bool
 
     public init(
         kernelPath: String, initramfsPath: String, commandLine: String,
         cpuCount: Int, memoryMiB: UInt64, consoleLogPath: String?,
         execCommand: String?, timeout: Double, diskPaths: [String] = [],
-        shares: [ShareSpec] = []
+        shares: [ShareSpec] = [], balloonEnabled: Bool = false
     ) throws {
         guard cpuCount >= 1 else { throw MSLError.invalidArgument("cpus must be >= 1") }
         guard memoryMiB >= 1 else { throw MSLError.invalidArgument("memory-mib must be >= 1") }
@@ -44,6 +45,7 @@ public struct BootSpec: Sendable {
         self.execCommand = execCommand
         self.timeout = timeout
         self.shares = shares
+        self.balloonEnabled = balloonEnabled
     }
 
     private static func validatedDisks(
@@ -270,7 +272,41 @@ public final class VMHost: @unchecked Sendable {
         config.networkDevices = [network]
         config.storageDevices = try makeDisks()
         config.directorySharingDevices = try makeShares()
+        if spec.balloonEnabled {
+            config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        }
         return config
+    }
+
+    /// Set the balloon inflation target to `mib` MiB, clamped to
+    /// [minimumAllowedMemorySize, configured max]. Returns false (never throws)
+    /// when the VM is stopped or has no balloon device.
+    public func setBalloonTarget(mib: UInt64) -> Bool {
+        guard mib >= 1 else { return false }
+        let target = clampBalloon(mib)
+        assert(target >= VZVirtualMachineConfiguration.minimumAllowedMemorySize, "clamp floor")
+        let box = Box<Bool>(false)
+        let semaphore = DispatchSemaphore(value: 0)
+        queue.async {
+            defer { semaphore.signal() }
+            guard let vm = self.machine,
+                let device = vm.memoryBalloonDevices.first
+                    as? VZVirtioTraditionalMemoryBalloonDevice
+            else { return }
+            device.targetVirtualMachineMemorySize = target
+            box.value = true
+        }
+        semaphore.wait()
+        return box.value
+    }
+
+    private func clampBalloon(_ mib: UInt64) -> UInt64 {
+        assert(mib >= 1, "balloon target validated by caller")
+        let bytes = mib &* 1024 &* 1024
+        let low = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        let high = clampMemory(spec.memoryMiB)
+        assert(low <= high, "configured memory must exceed the VZ minimum")
+        return min(max(bytes, low), high)
     }
 
     private func makeDisks() throws -> [VZStorageDeviceConfiguration] {

@@ -16,8 +16,11 @@ public enum Proto {
     /// Agent -> host log-event port (optional reader).
     public static let logsPort: UInt32 = 5002
 
-    /// Wire protocol version advertised by a v1.2 agent in the `ping` reply.
-    public static let version = 2
+    /// Forward data plane (v1.3): one proxied TCP connection per vsock connection.
+    public static let forwardPort: UInt32 = 5003
+
+    /// Wire protocol version advertised by a v1.3 agent in the `ping` reply.
+    public static let version = 3
 }
 
 /// Request sent host -> agent. `argv`, `env`, and `timeoutMs` apply to exec;
@@ -188,6 +191,26 @@ public struct DataHandshake: Encodable, Sendable {
     }
 }
 
+/// Framed handshake on the forward data plane (5003): the guest TCP port to
+/// proxy. The reply reuses `DataHandshakeReply` (`ok:false` closes on failure).
+public struct ForwardHello: Encodable, Sendable {
+    public let port: UInt16
+
+    public init(port: UInt16) {
+        precondition(port > 0, "forward port must be positive")
+        self.port = port
+    }
+
+    /// Encode to a UTF-8 JSON frame payload, enforcing the 4 MiB bound.
+    public func encoded() throws -> Data {
+        let data = try JSONEncoder().encode(self)
+        guard data.count <= Proto.maxPayload else {
+            throw MSLError.framing("handshake payload \(data.count) exceeds \(Proto.maxPayload)")
+        }
+        return data
+    }
+}
+
 /// Reply to the data handshake; `ok:false` carries an error and closes.
 public struct DataHandshakeReply: Decodable, Sendable {
     public let ok: Bool
@@ -252,6 +275,32 @@ public struct SessionWaitData: Decodable, Sendable {
 
 /// Empty `{}` payload for ops whose success carries no data.
 public struct EmptyData: Decodable, Sendable {}
+
+/// Payload of `mem_stats` (v1.3). The `psi_*` fields are optional: a kernel
+/// without PSI omits or zeroes them and the op still succeeds.
+public struct MemStatsData: Decodable, Sendable {
+    public let memTotalKiB: UInt64
+    public let memAvailableKiB: UInt64
+    public let swapTotalKiB: UInt64
+    public let swapFreeKiB: UInt64
+    public let psiSomeAvg10: Double?
+    public let psiFullAvg10: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case memTotalKiB = "mem_total_kib"
+        case memAvailableKiB = "mem_available_kib"
+        case swapTotalKiB = "swap_total_kib"
+        case swapFreeKiB = "swap_free_kib"
+        case psiSomeAvg10 = "psi_some_avg10"
+        case psiFullAvg10 = "psi_full_avg10"
+    }
+}
+
+/// Payload of `net_listeners` (v1.3): guest TCP listener ports bound on a
+/// wildcard or loopback address, sorted ascending and deduplicated.
+public struct NetListenersData: Decodable, Sendable {
+    public let ports: [UInt16]
+}
 
 /// Payload of `ping`; all fields optional so an older agent still parses.
 /// `protocolVersion` is the v1 addition (absent on a v0 agent).
