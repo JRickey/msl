@@ -80,9 +80,11 @@ public final class UpDriver: @unchecked Sendable {
             let ping = try control.ping()
             warnProtocolMismatch(ping)
             let macShare = spec.shares.contains { $0.tag == "mac" }
+            // The one-shot `msl up` path attaches no Rosetta share; rosetta is a
+            // daemon-only capability, so it is off here regardless of opt-in.
             let distro = try control.distroUp(
                 name: config.distroName, dev: "/dev/vda", hostname: config.hostname,
-                macShare: macShare)
+                macShare: macShare, rosetta: false)
             if distro.state != "running" { failToStart(state: distro.state) }
         } catch {
             reportAndExit(error, code: 1)

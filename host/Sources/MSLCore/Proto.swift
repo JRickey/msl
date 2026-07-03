@@ -22,8 +22,8 @@ public enum Proto {
     /// Reverse interop exec (mac_exec v1): the guest shim dials CID_HOST here.
     public static let interopPort: UInt32 = 5010
 
-    /// Wire protocol version advertised by a v1.3 agent in the `ping` reply.
-    public static let version = 3
+    /// Wire protocol version advertised by a v1.4 agent in the `ping` reply.
+    public static let version = 4
 }
 
 /// Request sent host -> agent. `argv`, `env`, and `timeoutMs` apply to exec;
@@ -95,15 +95,17 @@ public struct OpRequest<Req: Encodable & Sendable>: Encodable, Sendable {
     }
 }
 
-/// `req` body for `distro_up` (v1.2 adds the required distro `name`).
+/// `req` body for `distro_up` (v1.2 adds the required distro `name`; v1.4 adds
+/// `rosetta`, requesting x86-64 translation setup for this distro).
 public struct DistroUpReq: Encodable, Sendable {
     public let name: String
     public let dev: String
     public let hostname: String
     public let macShare: Bool
+    public let rosetta: Bool
 
     enum CodingKeys: String, CodingKey {
-        case name, dev, hostname
+        case name, dev, hostname, rosetta
         case macShare = "mac_share"
     }
 }

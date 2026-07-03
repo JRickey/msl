@@ -11,10 +11,12 @@ public struct DistroEntry: Codable, Sendable, Equatable {
     public let defaultUser: String?
     /// Mac-home share override: true/false force it, nil inherits the global default.
     public let macShare: Bool?
+    /// x86-64 Rosetta translation opt-in (nil = off). Synthesized Codable omits it when nil.
+    public let rosetta: Bool?
 
     public init(
         name: String, image: String, hostname: String, createdAt: String,
-        defaultUser: String? = nil, macShare: Bool? = nil
+        defaultUser: String? = nil, macShare: Bool? = nil, rosetta: Bool? = nil
     ) {
         self.name = name
         self.image = image
@@ -22,6 +24,7 @@ public struct DistroEntry: Codable, Sendable, Equatable {
         self.createdAt = createdAt
         self.defaultUser = defaultUser
         self.macShare = macShare
+        self.rosetta = rosetta
     }
 }
 
@@ -140,7 +143,7 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser,
-                macShare: current.macShare)
+                macShare: current.macShare, rosetta: current.rosetta)
         }
     }
 
@@ -154,7 +157,8 @@ public struct Registry: Codable, Sendable, Equatable {
         try mutateEntry(name: name) { current in
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
-                createdAt: current.createdAt, defaultUser: user, macShare: current.macShare)
+                createdAt: current.createdAt, defaultUser: user, macShare: current.macShare,
+                rosetta: current.rosetta)
         }
     }
 
@@ -163,7 +167,18 @@ public struct Registry: Codable, Sendable, Equatable {
         try mutateEntry(name: name) { current in
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
-                createdAt: current.createdAt, defaultUser: current.defaultUser, macShare: share)
+                createdAt: current.createdAt, defaultUser: current.defaultUser, macShare: share,
+                rosetta: current.rosetta)
+        }
+    }
+
+    /// Set the Rosetta x86-64 opt-in (nil/false = off); unknown name throws.
+    public mutating func setRosetta(name: String, on: Bool) throws {
+        try mutateEntry(name: name) { current in
+            DistroEntry(
+                name: current.name, image: current.image, hostname: current.hostname,
+                createdAt: current.createdAt, defaultUser: current.defaultUser,
+                macShare: current.macShare, rosetta: on)
         }
     }
 

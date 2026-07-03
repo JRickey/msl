@@ -4,9 +4,26 @@ import XCTest
 @testable import MSLCore
 
 final class ProtoV3Tests: XCTestCase {
-    func testVersionIsThree() {
-        XCTAssertEqual(Proto.version, 3)
+    func testVersionIsFour() {
+        XCTAssertEqual(Proto.version, 4)
         XCTAssertEqual(Proto.forwardPort, 5003)
+    }
+
+    func testDistroUpReqEncodesRosetta() throws {
+        let req = DistroUpReq(
+            name: "ubuntu", dev: "/dev/vda", hostname: "ubuntu", macShare: true, rosetta: true)
+        let data = try JSONEncoder().encode(req)
+        let json = try XCTUnwrap(String(bytes: data, encoding: .utf8))
+        XCTAssertTrue(json.contains("\"rosetta\":true"), json)
+        XCTAssertTrue(json.contains("\"mac_share\":true"), json)
+    }
+
+    func testDistroUpReqEncodesRosettaFalse() throws {
+        let req = DistroUpReq(
+            name: "ubuntu", dev: "/dev/vda", hostname: "ubuntu", macShare: false, rosetta: false)
+        let data = try JSONEncoder().encode(req)
+        let json = try XCTUnwrap(String(bytes: data, encoding: .utf8))
+        XCTAssertTrue(json.contains("\"rosetta\":false"), json)
     }
 
     func testMemStatsDecodesWithPSI() throws {

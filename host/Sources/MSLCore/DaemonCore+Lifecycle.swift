@@ -9,15 +9,16 @@ extension DaemonCore {
     /// so boot and distro_up are atomic with respect to down/stop.
     func ensureUp(_ name: String?) throws -> DeviceEntry {
         let resolved = try resolveName(name)
-        let settings = try distroSettings(resolved)
         return try lifecycleQueue.sync {
             try performBoot()
+            let settings = try distroSettings(resolved)
             guard let entry = withLock({ attached.first { $0.name == resolved } }) else {
                 throw MSLError.configuration(
                     "'\(resolved)' installed after boot; restart the daemon to attach it")
             }
             try performDistroUp(
-                entry: entry, hostname: settings.hostname, macShare: settings.macShare)
+                entry: entry, hostname: settings.hostname, macShare: settings.macShare,
+                rosetta: settings.rosetta)
             return entry
         }
     }
@@ -37,13 +38,16 @@ extension DaemonCore {
         guard !mapping.entries.isEmpty else {
             throw MSLError.configuration("no distro images to attach (install one first)")
         }
-        let newHost = VMHost(spec: try makeBootSpec(diskPaths: mapping.diskPaths))
+        let spec = try makeBootSpec(diskPaths: mapping.diskPaths)
+        let newHost = VMHost(spec: spec)
         try newHost.startAndWait(onStop: { [weak self] error, requested in
             self?.handleStop(error, requested: requested)
         })
         do {
             let newControl = try connectAndPing(host: newHost)
-            finishBoot(host: newHost, control: newControl, entries: mapping.entries)
+            finishBoot(
+                host: newHost, control: newControl, entries: mapping.entries,
+                rosettaAttached: spec.rosettaShare)
         } catch {
             _ = newHost.stopAndWait()
             throw error
@@ -59,7 +63,9 @@ extension DaemonCore {
         return client
     }
 
-    private func finishBoot(host: VMHost, control: ControlClient, entries: [DeviceEntry]) {
+    private func finishBoot(
+        host: VMHost, control: ControlClient, entries: [DeviceEntry], rosettaAttached: Bool
+    ) {
         let wake = PowerWake(onWake: { [weak self] in self?.syncTimeIfRunning() })
         wake.start()
         let forwarder = PortForwarder(
@@ -70,6 +76,7 @@ extension DaemonCore {
             self.control = control
             self.attached = entries
             self.distrosUp = []
+            self.rosettaAttached = rosettaAttached
             self.powerWake = wake
             self.forwarder = forwarder
             self.running = true
@@ -124,7 +131,9 @@ extension DaemonCore {
 
     /// Bring one distro up on the guest (idempotent). Caller is on the lifecycle
     /// queue, so the `distrosUp` bookkeeping cannot race with stop/down.
-    private func performDistroUp(entry: DeviceEntry, hostname: String, macShare: Bool) throws {
+    private func performDistroUp(
+        entry: DeviceEntry, hostname: String, macShare: Bool, rosetta: Bool
+    ) throws {
         assert(!entry.name.isEmpty, "device entry name must not be empty")
         assert(!hostname.isEmpty, "hostname must not be empty")
         if withLock({ distrosUp.contains(entry.name) }) { return }
@@ -132,7 +141,8 @@ extension DaemonCore {
             throw MSLError.configuration("VM not running")
         }
         let result = try control.distroUp(
-            name: entry.name, dev: entry.dev, hostname: hostname, macShare: macShare)
+            name: entry.name, dev: entry.dev, hostname: hostname, macShare: macShare,
+            rosetta: rosetta)
         guard result.state == "running" else {
             throw MSLError.configuration("distro '\(entry.name)' failed to start: \(result.state)")
         }
@@ -165,6 +175,7 @@ extension DaemonCore {
             control = nil
             attached = []
             distrosUp = []
+            rosettaAttached = false
             sessions = SessionTable()
             powerWake = nil
             forwarder = nil
@@ -311,11 +322,13 @@ extension DaemonCore {
             config.shareHomePath.map { [ShareSpec(tag: "mac", hostPath: $0, readOnly: false)] }
             ?? []
         let logPath = config.home.logsDirectory.appendingPathComponent("msld-console.log").path
+        let rosettaShare = try resolveRosettaShare()
         return try BootSpec(
             kernelPath: config.kernelPath, initramfsPath: config.initramfsPath,
             commandLine: config.cmdline, cpuCount: config.cpus, memoryMiB: config.memoryMiB,
             consoleLogPath: logPath, execCommand: nil, timeout: config.bootTimeout,
-            diskPaths: diskPaths, shares: shares, balloonEnabled: true)
+            diskPaths: diskPaths, shares: shares, balloonEnabled: true,
+            rosettaShare: rosettaShare)
     }
 
     func resolveName(_ requested: String?) throws -> String {
@@ -324,15 +337,17 @@ extension DaemonCore {
     }
 
     /// Per-distro boot settings from one registry load: hostname (default = the
-    /// distro name) and whether the mac home is shared (global default AND opt-in).
-    private func distroSettings(_ name: String) throws -> (hostname: String, macShare: Bool) {
+    /// distro name), mac-home sharing, and Rosetta. Rosetta is gated on the share
+    /// having actually attached this boot; the guest sets it up only if so.
+    private func distroSettings(_ name: String) throws -> DistroBootSettings {
         assert(!name.isEmpty, "distro name must not be empty")
         let registry = try Registry.load(from: config.home.registryURL)
         let entry = registry.entry(name: name)
         let hostname = entry?.hostname ?? name
         let macShare = config.shareHomePath != nil && (entry?.macShare ?? true)
+        let rosetta = (entry?.rosetta ?? false) && withLock { rosettaAttached }
         assert(!hostname.isEmpty, "resolved hostname must not be empty")
-        return (hostname, macShare)
+        return DistroBootSettings(hostname: hostname, macShare: macShare, rosetta: rosetta)
     }
 
     /// Session argv + cwd policy. A /mnt/mac cwd cannot exist in a distro that
