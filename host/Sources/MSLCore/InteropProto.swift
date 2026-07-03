@@ -25,12 +25,13 @@ public struct MacExecHello: Decodable, Sendable {
     public let tty: Bool
     public let rows: UInt16
     public let cols: UInt16
+    public let binfmt: Bool
 
     static let maxArgv = 1024
 
     enum CodingKeys: String, CodingKey {
         case ver = "v"
-        case op, argv, cwd, env, tty, rows, cols
+        case op, argv, cwd, env, tty, rows, cols, binfmt
     }
 
     public init(from decoder: Decoder) throws {
@@ -43,6 +44,7 @@ public struct MacExecHello: Decodable, Sendable {
         tty = try container.decodeIfPresent(Bool.self, forKey: .tty) ?? false
         rows = try container.decodeIfPresent(UInt16.self, forKey: .rows) ?? 0
         cols = try container.decodeIfPresent(UInt16.self, forKey: .cols) ?? 0
+        binfmt = try container.decodeIfPresent(Bool.self, forKey: .binfmt) ?? false
     }
 
     /// Reject anything the spawner cannot honor. Recovery is the throw itself:

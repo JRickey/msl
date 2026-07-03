@@ -149,16 +149,35 @@ extension DaemonCore {
         assert(!home.isEmpty, "mac home path must not be empty")
         let spawner: @Sendable (MacExecHello) throws -> MacProcess = { hello in
             let cwd = MacExec.translateCwd(hello.cwd, shareRoot: shareRoot, home: home)
+            let argv = try Self.resolveArgv(hello, shareRoot: shareRoot)
             var extra: [String: String] = [:]
             if let term = hello.env["TERM"] { extra["TERM"] = term }
             let tty = hello.tty ? TTYRequest(rows: hello.rows, cols: hello.cols) : nil
-            return try MacExec.spawn(argv: hello.argv, cwd: cwd, extraEnv: extra, tty: tty)
+            return try MacExec.spawn(argv: argv, cwd: cwd, extraEnv: extra, tty: tty)
         }
         return InteropListener(
             spawner: spawner,
             logger: { [weak self] message in self?.log(message) },
             beginActivity: { [weak self] in self?.markInteropActivity(begin: true) },
             endActivity: { [weak self] in self?.markInteropActivity(begin: false) })
+    }
+
+    /// Resolve the argv to spawn: pass through in explicit mode; in binfmt mode
+    /// translate argv[0] as a `/mnt/mac` share path and require it be executable.
+    static func resolveArgv(_ hello: MacExecHello, shareRoot: String?) throws -> [String] {
+        assert(!hello.argv.isEmpty, "hello.validate() already rejected empty argv")
+        guard !hello.argv.isEmpty else { throw MSLError.invalidArgument("mac_exec argv is empty") }
+        guard hello.binfmt else { return hello.argv }
+        guard let target = MacExec.translateBinary(hello.argv[0], shareRoot: shareRoot),
+            FileManager.default.isExecutableFile(atPath: target)
+        else {
+            throw MSLError.invalidArgument(
+                "binfmt target must be an executable under /mnt/mac: \(hello.argv[0])")
+        }
+        assert(!target.isEmpty, "translateBinary never yields an empty path")
+        var argv = hello.argv
+        argv[0] = target
+        return argv
     }
 
     /// Bracket one interop session as daemon activity: bump the pending-op count

@@ -36,6 +36,27 @@ final class InteropProtoTests: XCTestCase {
         XCTAssertTrue(hello.env.isEmpty)
     }
 
+    func testHelloDecodesBinfmtTrue() throws {
+        let json = Data(
+            #"{"v":1,"op":"mac_exec","argv":["/mnt/mac/Dev/tool"],"cwd":"/","binfmt":true}"#.utf8)
+        let hello = try MacExecHello.decode(json)
+        XCTAssertTrue(hello.binfmt)
+    }
+
+    func testHelloBinfmtDefaultsFalseWhenAbsent() throws {
+        let json = Data(#"{"v":1,"op":"mac_exec","argv":["ls"],"cwd":"/tmp"}"#.utf8)
+        let hello = try MacExecHello.decode(json)
+        XCTAssertFalse(hello.binfmt)
+    }
+
+    func testLegacyHelloWithoutBinfmtStillValidates() throws {
+        let json = Data(
+            #"{"v":1,"op":"mac_exec","argv":["open","."],"cwd":"/mnt/mac/Dev","tty":false}"#.utf8)
+        let hello = try MacExecHello.decode(json)
+        XCTAssertFalse(hello.binfmt)
+        XCTAssertEqual(hello.argv, ["open", "."])
+    }
+
     func testValidateRejectsBadVersion() {
         let hello = try? JSONDecoder().decode(
             MacExecHello.self, from: Data(#"{"v":2,"op":"mac_exec","argv":["ls"]}"#.utf8))
@@ -88,5 +109,46 @@ final class InteropHelloBoundTests: XCTestCase {
         let padding = String(repeating: "x", count: MacExecHello.maxHelloBytes)
         let json = #"{"v":1,"op":"mac_exec","argv":["true"],"cwd":"/"# + padding + #""}"#
         XCTAssertThrowsError(try MacExecHello.decode(Data(json.utf8)))
+    }
+}
+
+final class InteropResolveArgvTests: XCTestCase {
+    private func decodeHello(argv: [String], binfmt: Bool) throws -> MacExecHello {
+        let quoted = argv.map { "\"\($0)\"" }.joined(separator: ",")
+        let json =
+            "{\"v\":1,\"op\":\"mac_exec\",\"argv\":[\(quoted)],\"cwd\":\"/\","
+            + "\"binfmt\":\(binfmt)}"
+        return try MacExecHello.decode(Data(json.utf8))
+    }
+
+    func testExplicitModePassesArgvThrough() throws {
+        let hello = try decodeHello(argv: ["open", "."], binfmt: false)
+        XCTAssertEqual(try DaemonCore.resolveArgv(hello, shareRoot: "/Users/x"), ["open", "."])
+    }
+
+    func testBinfmtRewritesExecutableTarget() throws {
+        let dir = NSTemporaryDirectory() + "msl-binfmt-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: nil)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let exe = dir + "/tool"
+        XCTAssertTrue(FileManager.default.createFile(atPath: exe, contents: Data("x".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exe)
+        let hello = try decodeHello(argv: ["/mnt/mac/tool", "arg"], binfmt: true)
+        XCTAssertEqual(try DaemonCore.resolveArgv(hello, shareRoot: dir), [exe, "arg"])
+    }
+
+    func testBinfmtRejectsNonExecutableTarget() throws {
+        let dir = NSTemporaryDirectory() + "msl-binfmt-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: nil)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let hello = try decodeHello(argv: ["/mnt/mac/missing"], binfmt: true)
+        XCTAssertThrowsError(try DaemonCore.resolveArgv(hello, shareRoot: dir))
+    }
+
+    func testBinfmtRejectsOutsideShare() throws {
+        let hello = try decodeHello(argv: ["/usr/bin/true"], binfmt: true)
+        XCTAssertThrowsError(try DaemonCore.resolveArgv(hello, shareRoot: "/Users/x"))
     }
 }
