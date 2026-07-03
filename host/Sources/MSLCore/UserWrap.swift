@@ -33,4 +33,14 @@ public enum UserWrap {
         }
         return ["/bin/su", "-l", user, "-c", command]
     }
+
+    /// A mapped /mnt/mac cwd only exists when the share is mounted; without it
+    /// the guest's chdir is fatal, so fall back to /root.
+    public static func effectiveCwd(_ cwd: String, macShare: Bool) -> String {
+        assert(!cwd.isEmpty, "cwd must not be empty")
+        if macShare || !cwd.hasPrefix("/mnt/mac") {
+            return cwd
+        }
+        return "/root"
+    }
 }

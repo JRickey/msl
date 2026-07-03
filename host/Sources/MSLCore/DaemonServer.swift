@@ -48,6 +48,9 @@ public final class DaemonServer: @unchecked Sendable {
         case .attach(let sessionID, let token):
             return handleAttach(framed: framed, sessionID: sessionID, token: token)
         case .shutdown:
+            // Stop the VM (releasing image locks) before acknowledging, so the
+            // client's "shut down" means resources are actually free.
+            core.shutdown()
             _ = try? framed.send(okFrame(LocalEmpty()))
             framed.close()
             onShutdown()

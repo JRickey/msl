@@ -329,16 +329,21 @@ extension DaemonCore {
         return (hostname, macShare)
     }
 
-    /// Session argv: with a per-distro default user set, wrap the client argv
-    /// (nil = login shell) in `su -l`; otherwise the client argv or a login bash.
-    func resolveArgv(name: String, requested: [String]?, cwd: String) throws -> [String] {
+    /// Session argv + cwd policy. A /mnt/mac cwd cannot exist in a distro that
+    /// opted out of the share — fall back before the guest's fatal chdir.
+    func resolveSession(
+        name: String, requested: [String]?, cwd requestedCwd: String
+    ) throws -> (argv: [String], cwd: String) {
         assert(!name.isEmpty, "distro name must not be empty")
-        assert(!cwd.isEmpty, "cwd must not be empty")
+        assert(!requestedCwd.isEmpty, "cwd must not be empty")
         let registry = try Registry.load(from: config.home.registryURL)
-        guard let user = registry.entry(name: name)?.defaultUser else {
-            return requested ?? ["/bin/bash", "-l"]
+        let entry = registry.entry(name: name)
+        let shareOn = config.shareHomePath != nil && (entry?.macShare ?? true)
+        let cwd = UserWrap.effectiveCwd(requestedCwd, macShare: shareOn)
+        guard let user = entry?.defaultUser else {
+            return (requested ?? ["/bin/bash", "-l"], cwd)
         }
-        return UserWrap.wrap(user: user, argv: requested, cwd: cwd)
+        return (UserWrap.wrap(user: user, argv: requested, cwd: cwd), cwd)
     }
 
     func mergedEnv(_ env: [String: String]?) -> [String: String] {

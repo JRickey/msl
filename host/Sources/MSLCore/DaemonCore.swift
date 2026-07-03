@@ -96,11 +96,11 @@ public final class DaemonCore: @unchecked Sendable {
         guard let control = withLock({ self.control }) else {
             throw MSLError.configuration("VM not running")
         }
-        let cwd = req.cwd ?? "/root"
-        let argv = try resolveArgv(name: entry.name, requested: req.argv, cwd: cwd)
+        let session = try resolveSession(
+            name: entry.name, requested: req.argv, cwd: req.cwd ?? "/root")
         let open = SessionOpenReq(
-            argv: argv, cwd: cwd, env: mergedEnv(req.env), rows: req.rows, cols: req.cols,
-            distro: entry.name)
+            argv: session.argv, cwd: session.cwd, env: mergedEnv(req.env), rows: req.rows,
+            cols: req.cols, distro: entry.name)
         let opened = try control.sessionOpen(open)
         let localToken = Token.generate()
         try withLockThrowing {

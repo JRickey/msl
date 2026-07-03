@@ -53,3 +53,17 @@ final class UserWrapWrapTests: XCTestCase {
         XCTAssertEqual(result[4], "cd '/x' 2>/dev/null; exec 'sh' '-c' 'echo it'\\''s'")
     }
 }
+
+final class UserWrapCwdTests: XCTestCase {
+    func testMacCwdFallsBackWithoutShare() {
+        XCTAssertEqual(UserWrap.effectiveCwd("/mnt/mac/Dev/x", macShare: false), "/root")
+    }
+
+    func testMacCwdKeptWithShare() {
+        XCTAssertEqual(UserWrap.effectiveCwd("/mnt/mac/Dev/x", macShare: true), "/mnt/mac/Dev/x")
+    }
+
+    func testDistroCwdKeptWithoutShare() {
+        XCTAssertEqual(UserWrap.effectiveCwd("/var/log", macShare: false), "/var/log")
+    }
+}
