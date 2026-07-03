@@ -28,14 +28,44 @@ public final class ControlClient: @unchecked Sendable {
         return try roundTrip { id in try Request.ping(id: id).encoded() }
     }
 
-    public func distroUp(dev: String, hostname: String, macShare: Bool) throws -> DistroData {
+    public func distroUp(
+        name: String, dev: String, hostname: String, macShare: Bool
+    ) throws -> DistroData {
+        precondition(!name.isEmpty, "distro name must not be empty")
         precondition(!dev.isEmpty, "distro dev must not be empty")
-        let req = DistroUpReq(dev: dev, hostname: hostname, macShare: macShare)
+        let req = DistroUpReq(name: name, dev: dev, hostname: hostname, macShare: macShare)
         return try roundTrip(makeOp("distro_up", req))
     }
 
-    public func distroState() throws -> DistroData {
+    /// Name-scoped `distro_state` (v1.2): the state of one distro.
+    public func distroState(name: String) throws -> DistroData {
+        precondition(!name.isEmpty, "distro name must not be empty")
+        return try roundTrip(makeOp("distro_state", DistroStateReq(name: name)))
+    }
+
+    /// Unscoped `distro_state` (v1.2): every distro's state.
+    public func distroList() throws -> DistroListData {
         return try roundTrip(makeOp("distro_state", Optional<EmptyReq>.none))
+    }
+
+    /// Buffered command execution. `distro` names the distro to run inside
+    /// (nil = the agent's own context, used by the install builder VM). The
+    /// receive timeout is widened for long builds via `receiveTimeout`.
+    public func exec(
+        argv: [String], env: [String: String]? = nil, timeoutMs: UInt64,
+        distro: String? = nil, cwd: String? = nil, receiveTimeout: Double? = nil
+    ) throws -> ExecData {
+        precondition(!argv.isEmpty, "exec argv must not be empty")
+        precondition(timeoutMs > 0, "exec timeout must be positive")
+        let encode: @Sendable (UInt64) throws -> Data = { id in
+            try Request.exec(
+                id: id, argv: argv, env: env, timeoutMs: timeoutMs, distro: distro, cwd: cwd
+            ).encoded()
+        }
+        if let receiveTimeout {
+            return try roundTrip(receiveTimeout: receiveTimeout, encode)
+        }
+        return try roundTrip(encode)
     }
 
     public func sessionOpen(_ req: SessionOpenReq) throws -> SessionOpenData {
@@ -67,10 +97,11 @@ public final class ControlClient: @unchecked Sendable {
     /// 2s kill-grace + an unbounded sync/unmount, so the v1.1.1 timing contract
     /// requires a receive timeout of at least timeout_ms + 15s (sync budget)
     /// before the host may power-yank; raise it for this call, then restore.
-    public func distroDown(timeoutMs: UInt64) throws -> DistroData {
+    public func distroDown(name: String, timeoutMs: UInt64) throws -> DistroData {
+        precondition(!name.isEmpty, "distro name must not be empty")
         precondition(timeoutMs > 0, "distro_down timeout must be positive")
         let receiveTimeout = Double(timeoutMs) / 1000.0 + 15
-        let req = DistroDownReq(timeoutMs: timeoutMs)
+        let req = DistroDownReq(name: name, timeoutMs: timeoutMs)
         return try roundTrip(receiveTimeout: receiveTimeout, makeOp("distro_down", req))
     }
 

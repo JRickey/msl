@@ -41,4 +41,27 @@ public final class ImageLock: @unchecked Sendable {
         }
         return ImageLock(fd: fd, path: path)
     }
+
+    /// Delete an image and its sidecar while HOLDING the sidecar lock across both
+    /// unlinks: a concurrent `msl up` either blocks here (in-use error) or, if it
+    /// starts after the image is gone, fails at its own `fileExists` check. A
+    /// missing image is nothing to lock; `keepImage` drops only the sidecar path.
+    public static func deleteHoldingLock(imagePath: String, keepImage: Bool) throws {
+        precondition(!imagePath.isEmpty, "image path must not be empty")
+        let fileManager = FileManager.default
+        let sidecar = imagePath + ".lock"
+        guard fileManager.fileExists(atPath: imagePath) else {
+            if !keepImage, fileManager.fileExists(atPath: sidecar) {
+                try fileManager.removeItem(atPath: sidecar)
+            }
+            return
+        }
+        let lock = try acquire(path: imagePath)
+        defer { withExtendedLifetime(lock) {} }
+        guard !keepImage else { return }
+        try fileManager.removeItem(atPath: imagePath)
+        if fileManager.fileExists(atPath: sidecar) {
+            try fileManager.removeItem(atPath: sidecar)
+        }
+    }
 }

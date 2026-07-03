@@ -5,22 +5,25 @@ import MSLCore
 struct UpCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "up",
-        abstract: "Boot a rootfs, bring the distro up, and (with --shell) attach a shell.")
+        abstract: "Boot a registered distro (or a one-off rootfs) and attach a shell.")
 
-    @Option(name: .long, help: "Root filesystem image (becomes /dev/vda).")
-    var rootfs: String
+    @Option(name: .long, help: "Registered distro to boot (default: the registry default).")
+    var distro: String?
 
-    @Option(name: .long, help: "Kernel image (default: $MSL_KERNEL or ./kernel).")
+    @Option(name: .long, help: "Boot an unregistered rootfs image directly (anonymous one-off).")
+    var rootfs: String?
+
+    @Option(name: .long, help: "Kernel image (default: MSL home, then $MSL_KERNEL or ./kernel).")
     var kernel: String?
 
-    @Option(name: .long, help: "initramfs image (default: $MSL_INITRAMFS or ./initramfs.cpio.gz).")
+    @Option(name: .long, help: "initramfs image (default: MSL home, then $MSL_INITRAMFS).")
     var initramfs: String?
 
     @Option(name: .long, help: "Kernel command line.")
     var cmdline: String = "console=hvc0"
 
-    @Option(name: .long, help: "Guest hostname.")
-    var hostname: String = "ubuntu"
+    @Option(name: .long, help: "Override the guest hostname (default: the distro's hostname).")
+    var hostname: String?
 
     @Flag(name: .long, help: "Share $HOME into the guest as the 'mac' virtiofs tag.")
     var shareHome: Bool = false
@@ -50,40 +53,72 @@ struct UpCommand: ParsableCommand {
     nonisolated(unsafe) private static var retainedDriver: UpDriver?
 
     func run() throws {
-        let home = NSHomeDirectory()
-        let shares = shareHome ? [ShareSpec(tag: "mac", hostPath: home, readOnly: false)] : []
+        let home = MSLHome.resolve()
+        let target = try resolveTarget(home: home)
+        let userHome = NSHomeDirectory()
+        let shares = shareHome ? [ShareSpec(tag: "mac", hostPath: userHome, readOnly: false)] : []
         let spec = try BootSpec(
-            kernelPath: resolvedKernel(),
-            initramfsPath: resolvedInitramfs(),
-            commandLine: cmdline,
-            cpuCount: cpus,
-            memoryMiB: memoryMib,
-            consoleLogPath: consoleLog,
-            execCommand: nil,
-            timeout: timeout,
-            diskPaths: [rootfs],
-            shares: shares)
+            kernelPath: resolvedKernel(home), initramfsPath: resolvedInitramfs(home),
+            commandLine: cmdline, cpuCount: cpus, memoryMiB: memoryMib,
+            consoleLogPath: consoleLog, execCommand: nil, timeout: timeout,
+            diskPaths: [target.imagePath], shares: shares)
         let config = UpConfig(
-            hostname: hostname,
+            distroName: target.distroName, hostname: target.hostname,
             shell: shell || !command.isEmpty,
-            shellArgv: command.isEmpty ? ["/bin/bash", "-l"] : command,
-            home: home,
+            shellArgv: command.isEmpty ? ["/bin/bash", "-l"] : command, home: userHome,
             hostCwd: FileManager.default.currentDirectoryPath,
             term: ProcessInfo.processInfo.environment["TERM"] ?? "xterm-256color")
-        let host = VMHost(spec: spec)
-        let driver = UpDriver(host: host, spec: spec, config: config)
+        let driver = UpDriver(host: VMHost(spec: spec), spec: spec, config: config)
         Self.retainedDriver = driver
         driver.launch()
         dispatchMain()
     }
 
-    private func resolvedKernel() -> String {
-        if let kernel { return kernel }
-        return ProcessInfo.processInfo.environment["MSL_KERNEL"] ?? "kernel"
+    private struct Target {
+        let imagePath: String
+        let distroName: String
+        let hostname: String
     }
 
-    private func resolvedInitramfs() -> String {
-        if let initramfs { return initramfs }
-        return ProcessInfo.processInfo.environment["MSL_INITRAMFS"] ?? "initramfs.cpio.gz"
+    /// Resolve the disk, distro name, and hostname from `--rootfs` (anonymous
+    /// one-off) or the registry (`--distro`, else the registry default).
+    private func resolveTarget(home: MSLHome) throws -> Target {
+        if let rootfs {
+            let name = anonymousName()
+            guard Registry.isValidName(name) else {
+                throw MSLError.invalidArgument("invalid distro name: \(name)")
+            }
+            return Target(imagePath: rootfs, distroName: name, hostname: hostname ?? name)
+        }
+        let registry = try Registry.load(from: home.registryURL)
+        let entry = try registry.resolveDefault(requested: distro)
+        let image = home.imageURL(name: entry.name).path
+        guard FileManager.default.isReadableFile(atPath: image) else {
+            throw MSLError.io("distro image missing: \(image)")
+        }
+        return Target(
+            imagePath: image, distroName: entry.name, hostname: hostname ?? entry.hostname)
+    }
+
+    /// Distro name for an anonymous `--rootfs` boot: `--distro` if given, else
+    /// the hostname when it is a valid distro name, else a neutral fallback.
+    private func anonymousName() -> String {
+        if let distro { return distro }
+        if let hostname, Registry.isValidName(hostname) { return hostname }
+        return "linux"
+    }
+
+    private func resolvedKernel(_ home: MSLHome) -> String {
+        let env = ProcessInfo.processInfo.environment
+        return home.resolvePath(
+            flag: kernel, homeCandidate: home.kernelPath, devEnv: env["MSL_KERNEL"],
+            devDefault: "kernel")
+    }
+
+    private func resolvedInitramfs(_ home: MSLHome) -> String {
+        let env = ProcessInfo.processInfo.environment
+        return home.resolvePath(
+            flag: initramfs, homeCandidate: home.initramfsPath, devEnv: env["MSL_INITRAMFS"],
+            devDefault: "initramfs.cpio.gz")
     }
 }

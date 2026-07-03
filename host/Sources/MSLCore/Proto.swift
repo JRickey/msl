@@ -16,19 +16,20 @@ public enum Proto {
     /// Agent -> host log-event port (optional reader).
     public static let logsPort: UInt32 = 5002
 
-    /// Wire protocol version advertised by a v1 agent in the `ping` reply.
-    public static let version = 1
+    /// Wire protocol version advertised by a v1.2 agent in the `ping` reply.
+    public static let version = 2
 }
 
 /// Request sent host -> agent. `argv`, `env`, and `timeoutMs` apply to exec;
-/// `distro`/`cwd` are v1 exec additions (run inside the distro namespaces).
+/// `distro` (a distro name, v1.2) and `cwd` are exec additions that run the
+/// command inside that distro's namespaces (absent = the agent's own context).
 public struct Request: Encodable, Sendable {
     public let id: UInt64
     public let op: String
     public let argv: [String]?
     public let env: [String: String]?
     public let timeoutMs: UInt64?
-    public let distro: Bool?
+    public let distro: String?
     public let cwd: String?
 
     enum CodingKeys: String, CodingKey {
@@ -44,7 +45,7 @@ public struct Request: Encodable, Sendable {
 
     public static func exec(
         id: UInt64, argv: [String], env: [String: String]?, timeoutMs: UInt64,
-        distro: Bool? = nil, cwd: String? = nil
+        distro: String? = nil, cwd: String? = nil
     ) -> Request {
         precondition(id > 0, "request id must be positive")
         precondition(!argv.isEmpty, "argv must be non-empty")
@@ -88,26 +89,33 @@ public struct OpRequest<Req: Encodable & Sendable>: Encodable, Sendable {
     }
 }
 
-/// `req` body for `distro_up`.
+/// `req` body for `distro_up` (v1.2 adds the required distro `name`).
 public struct DistroUpReq: Encodable, Sendable {
+    public let name: String
     public let dev: String
     public let hostname: String
     public let macShare: Bool
 
     enum CodingKeys: String, CodingKey {
-        case dev, hostname
+        case name, dev, hostname
         case macShare = "mac_share"
     }
 }
 
-/// `req` body for `session_open`.
+/// `req` body for `distro_state` when scoped to one distro by name (v1.2).
+public struct DistroStateReq: Encodable, Sendable {
+    public let name: String
+}
+
+/// `req` body for `session_open`. `distro` is the v1.2 distro name (absent =
+/// the agent's own context); JSON encoding omits it when nil.
 public struct SessionOpenReq: Encodable, Sendable {
     public let argv: [String]
     public let cwd: String
     public let env: [String: String]
     public let rows: UInt16
     public let cols: UInt16
-    public let distro: Bool
+    public let distro: String?
 }
 
 /// `req` body for `session_resize`.
@@ -148,11 +156,14 @@ public struct SetTimeReq: Encodable, Sendable {
     public let usec: Int64
 }
 
-/// `req` body for `distro_down` (v1.1); the agent clamps `timeout_ms` itself.
+/// `req` body for `distro_down` (v1.2 adds `name`); the agent clamps
+/// `timeout_ms` itself per the v1.1.1 timing contract.
 public struct DistroDownReq: Encodable, Sendable {
+    public let name: String
     public let timeoutMs: UInt64
 
     enum CodingKeys: String, CodingKey {
+        case name
         case timeoutMs = "timeout_ms"
     }
 }
@@ -189,7 +200,7 @@ public struct DataHandshakeReply: Decodable, Sendable {
     }
 }
 
-/// Payload of `distro_up` / `distro_state`.
+/// Payload of `distro_up` / name-scoped `distro_state`.
 public struct DistroData: Decodable, Sendable {
     public let state: String
     public let initPid: UInt32?
@@ -198,6 +209,23 @@ public struct DistroData: Decodable, Sendable {
         case state
         case initPid = "init_pid"
     }
+}
+
+/// One entry in the unscoped `distro_state` list form (v1.2).
+public struct DistroStateEntry: Decodable, Sendable {
+    public let name: String
+    public let state: String
+    public let initPid: UInt32?
+
+    enum CodingKeys: String, CodingKey {
+        case name, state
+        case initPid = "init_pid"
+    }
+}
+
+/// Payload of `distro_state` with no name: every distro's state (possibly empty).
+public struct DistroListData: Decodable, Sendable {
+    public let distros: [DistroStateEntry]
 }
 
 /// Payload of `session_open`.
