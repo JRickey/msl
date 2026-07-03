@@ -22,10 +22,14 @@ const LOG_PORT: u32 = 5002;
 const FORWARD_PORT: u32 = 5003;
 const MAX_CONTROL_CONNS: usize = 16;
 const MAX_FORWARD_CONNS: usize = 64;
+// Sessions cap at 64; the extra headroom absorbs handshake churn.
+const MAX_DATA_CONNS: usize = 80;
+const HELLO_TIMEOUT_SECS: u32 = 10;
 const IDLE_POLL: Duration = Duration::from_millis(100);
 const REBIND_PAUSE: Duration = Duration::from_secs(1);
 
 static CONTROL_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static DATA_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static FORWARD_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Serialize)]
@@ -102,6 +106,7 @@ pub fn serve_control(agent: &Arc<Agent>) -> io::Result<()> {
 }
 
 fn reject_control(mut stream: VsockStream) {
+    let _ = sys::set_send_timeout(stream.as_raw_fd(), HELLO_TIMEOUT_SECS);
     let body = proto::encode_err(0, "too many control connections");
     let _ = frame::write_frame(&mut stream, &body);
 }
@@ -139,11 +144,24 @@ fn data_accept_loop(agent: &Arc<Agent>, listener: &VsockListener) {
             return;
         };
         let _ = sys::set_cloexec(stream.as_raw_fd());
+        let Some(slot) = conn::try_reserve(&DATA_ACTIVE, MAX_DATA_CONNS) else {
+            reject_data(stream);
+            continue;
+        };
+        let _ = sys::set_recv_timeout(stream.as_raw_fd(), HELLO_TIMEOUT_SECS);
         let agent = Arc::clone(agent);
         let _ = thread::Builder::new()
             .name("pty".to_string())
-            .spawn(move || handle_data(&agent, stream));
+            .spawn(move || {
+                let _slot = slot;
+                handle_data(&agent, stream);
+            });
     }
+}
+
+fn reject_data(mut stream: VsockStream) {
+    let _ = sys::set_send_timeout(stream.as_raw_fd(), HELLO_TIMEOUT_SECS);
+    write_hello(&mut stream, Some("too many data connections"));
 }
 
 fn handle_data(agent: &Arc<Agent>, mut stream: VsockStream) {
@@ -193,24 +211,33 @@ fn forward_accept_loop(listener: &VsockListener) {
             return;
         };
         let _ = sys::set_cloexec(stream.as_raw_fd());
+        let Some(slot) = conn::try_reserve(&FORWARD_ACTIVE, MAX_FORWARD_CONNS) else {
+            reject_forward(stream);
+            continue;
+        };
+        let _ = sys::set_recv_timeout(stream.as_raw_fd(), HELLO_TIMEOUT_SECS);
         let _ = thread::Builder::new()
             .name("fwd".to_string())
-            .spawn(move || handle_forward(stream));
+            .spawn(move || {
+                let _slot = slot;
+                handle_forward(stream);
+            });
     }
 }
 
+fn reject_forward(mut stream: VsockStream) {
+    let _ = sys::set_send_timeout(stream.as_raw_fd(), HELLO_TIMEOUT_SECS);
+    write_hello(&mut stream, Some("too many forwarded connections"));
+}
+
 // One guest TCP connection proxied per vsock connection: framed {"port"} hello,
-// cap check, dial loopback, then relay raw bytes until either side closes.
+// dial loopback, then relay raw bytes until either side closes.
 fn handle_forward(mut stream: VsockStream) {
     let Ok(payload) = frame::read_frame(&mut stream) else {
         return;
     };
     let Ok(hello) = serde_json::from_slice::<ForwardHello>(&payload) else {
         write_hello(&mut stream, Some("bad forward handshake"));
-        return;
-    };
-    let Some(_slot) = conn::try_reserve(&FORWARD_ACTIVE, MAX_FORWARD_CONNS) else {
-        write_hello(&mut stream, Some("too many forwarded connections"));
         return;
     };
     match net::forward_connect(hello.port) {

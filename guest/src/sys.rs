@@ -294,6 +294,49 @@ pub fn set_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+// Bound a blocking recv so a stalled peer cannot pin the handler thread; the
+// pump switches to nonblocking after the handshake, so this only times the hello.
+#[cfg(target_os = "linux")]
+pub fn set_recv_timeout(fd: RawFd, secs: u32) -> io::Result<()> {
+    set_sock_timeout(fd, secs, libc::SO_RCVTIMEO)
+}
+
+// Bound a blocking send so a rejection write on the accept thread cannot stall.
+#[cfg(target_os = "linux")]
+pub fn set_send_timeout(fd: RawFd, secs: u32) -> io::Result<()> {
+    set_sock_timeout(fd, secs, libc::SO_SNDTIMEO)
+}
+
+#[cfg(target_os = "linux")]
+fn set_sock_timeout(fd: RawFd, secs: u32, opt: libc::c_int) -> io::Result<()> {
+    if fd < 0 {
+        return Err(invalid("bad socket-timeout fd"));
+    }
+    if secs == 0 {
+        return Err(invalid("zero socket timeout"));
+    }
+    let tv = libc::timeval {
+        tv_sec: i64::from(secs),
+        tv_usec: 0,
+    };
+    debug_assert!(tv.tv_sec > 0);
+    let len = libc::socklen_t::try_from(std::mem::size_of::<libc::timeval>())
+        .map_err(|_| invalid("timeval size overflow"))?;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            opt,
+            (&raw const tv).cast::<libc::c_void>(),
+            len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 const fn decode_status(status: c_int) -> i32 {
     if libc::WIFEXITED(status) {
