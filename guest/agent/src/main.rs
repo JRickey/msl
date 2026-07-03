@@ -7,6 +7,7 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod agent;
+mod binfmt;
 mod conn;
 mod distro;
 mod exec;
@@ -52,6 +53,7 @@ fn run_forever() -> ! {
     }
     mount_shares();
     mem::boot_tuning();
+    binfmt::register();
     let agent = Arc::new(Agent::new());
     server::spawn_background(&agent);
     // outer loop is intentional: PID 1 must never return; rebind on failure

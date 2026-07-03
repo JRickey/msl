@@ -91,6 +91,7 @@ mkdir -m 0777 -p "$stage/tmp"
 install -m 0755 "$AGENT" "$stage/init"
 install -m 0755 "$BB" "$stage/bin/busybox"
 install -m 0755 "$SHIM" "$stage/tools/mac"
+ln -s mac "$stage/tools/mac-binfmt"
 
 n=0
 for applet in $APPLETS; do

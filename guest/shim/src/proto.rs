@@ -27,6 +27,7 @@ pub struct Hello {
     pub tty: bool,
     pub rows: u16,
     pub cols: u16,
+    pub binfmt: bool,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +60,19 @@ pub fn validate_argv(argv: &[String]) -> Result<(), &'static str> {
     Ok(())
 }
 
+// Interpreter mode iff argv[0]'s basename is `mac-binfmt`; None (no argv[0])
+// and the explicit `mac` name both read as explicit mode.
+#[must_use]
+pub fn is_binfmt_mode(argv0: Option<&str>) -> bool {
+    let Some(path) = argv0 else {
+        return false;
+    };
+    let base = path.rsplit('/').next().unwrap_or(path);
+    debug_assert!(!base.contains('/'), "basename retains no separator");
+    debug_assert!(base.len() <= path.len(), "basename within path");
+    base == "mac-binfmt"
+}
+
 pub fn build_hello(
     argv: Vec<String>,
     cwd: String,
@@ -66,6 +80,7 @@ pub fn build_hello(
     tty: bool,
     rows: u16,
     cols: u16,
+    binfmt: bool,
 ) -> Hello {
     assert!(!argv.is_empty(), "hello needs a command");
     assert!(
@@ -85,6 +100,7 @@ pub fn build_hello(
         tty,
         rows,
         cols,
+        binfmt,
     }
 }
 
@@ -130,7 +146,8 @@ pub fn winch_json(rows: u16, cols: u16) -> Vec<u8> {
 mod tests {
     use super::{
         DATA_MAX, MAX_ARGV, PROTO_V, TAG_EXIT, TAG_STDERR, TAG_STDIN, TAG_STDIN_EOF, TAG_STDOUT,
-        TAG_WINCH, build_hello, frame_with_tag, hello_bytes, parse_exit_code, validate_argv,
+        TAG_WINCH, build_hello, frame_with_tag, hello_bytes, is_binfmt_mode, parse_exit_code,
+        validate_argv,
     };
     use serde_json::Value;
 
@@ -162,6 +179,7 @@ mod tests {
             true,
             40,
             120,
+            false,
         );
         let bytes = hello_bytes(&hello).expect("serialize");
         let value: Value = serde_json::from_slice(&bytes).expect("json");
@@ -173,15 +191,41 @@ mod tests {
         assert_eq!(value["tty"], true);
         assert_eq!(value["rows"], 40);
         assert_eq!(value["cols"], 120);
+        assert_eq!(value["binfmt"], false);
     }
 
     #[test]
     fn non_tty_hello_omits_term_when_unset() {
-        let hello = build_hello(args(&["ls"]), "/".to_string(), None, false, 0, 0);
+        let hello = build_hello(args(&["ls"]), "/".to_string(), None, false, 0, 0, false);
         let bytes = hello_bytes(&hello).expect("serialize");
         let value: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(value["tty"], false);
         assert!(value["env"].as_object().expect("env object").is_empty());
+    }
+
+    #[test]
+    fn binfmt_hello_sets_flag() {
+        let hello = build_hello(
+            args(&["/mnt/mac/Dev/tool", "arg"]),
+            "/".to_string(),
+            None,
+            false,
+            0,
+            0,
+            true,
+        );
+        let bytes = hello_bytes(&hello).expect("serialize");
+        let value: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["binfmt"], true);
+        assert_eq!(value["argv"][0], "/mnt/mac/Dev/tool");
+    }
+
+    #[test]
+    fn binfmt_mode_detects_interpreter_name() {
+        assert!(is_binfmt_mode(Some("/tools/mac-binfmt")));
+        assert!(!is_binfmt_mode(Some("mac")));
+        assert!(!is_binfmt_mode(Some("/usr/local/bin/mac")));
+        assert!(!is_binfmt_mode(None));
     }
 
     #[test]

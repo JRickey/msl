@@ -32,7 +32,9 @@ enum Sock {
 }
 
 pub fn run() -> i32 {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut cmdline = std::env::args();
+    let binfmt = proto::is_binfmt_mode(cmdline.next().as_deref());
+    let argv: Vec<String> = cmdline.collect();
     if let Err(msg) = proto::validate_argv(&argv) {
         eprintln!("mac: {msg}\nusage: mac <command> [args...]");
         return EXIT_USAGE;
@@ -41,7 +43,15 @@ pub fn run() -> i32 {
     let (rows, cols) = if tty_on { tty::winsize() } else { (0, 0) };
     let cwd = std::env::current_dir()
         .map_or_else(|_| "/".to_string(), |p| p.to_string_lossy().into_owned());
-    let hello = proto::build_hello(argv, cwd, std::env::var("TERM").ok(), tty_on, rows, cols);
+    let hello = proto::build_hello(
+        argv,
+        cwd,
+        std::env::var("TERM").ok(),
+        tty_on,
+        rows,
+        cols,
+        binfmt,
+    );
     let bytes = match proto::hello_bytes(&hello) {
         Ok(bytes) => bytes,
         Err(e) => return fail_local(&format!("hello encode: {e}")),
