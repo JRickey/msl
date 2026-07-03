@@ -11,6 +11,8 @@ GUEST_BIN    := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-agent
 HOST_BIN     := $(HOST_DIR)/.build/release/msl
 KERNEL_IMAGE := $(KERNEL_DIR)/build/Image
 INITRAMFS    := $(BUILD_DIR)/initramfs.cpio
+BUILDER_INITRAMFS := $(BUILD_DIR)/builder-initramfs.cpio
+ROOTFS_IMG   := $(BUILD_DIR)/ubuntu.img
 CONSOLE_LOG  := $(BUILD_DIR)/console.log
 ENTITLEMENTS := entitlements/dev.entitlements
 
@@ -24,6 +26,8 @@ help:
 	echo "  make sign       - codesign msl with the virtualization entitlement"; \
 	echo "  make kernel     - fetch the pinned arm64 kernel Image"; \
 	echo "  make initramfs  - assemble $(INITRAMFS) (needs guest)"; \
+	echo "  make builder-initramfs - assemble $(BUILDER_INITRAMFS) (needs guest)"; \
+	echo "  make rootfs     - build $(ROOTFS_IMG) in the builder VM (MSL_REBUILD_ROOTFS=1 forces)"; \
 	echo "  make all        - kernel guest host sign initramfs"; \
 	echo "  make smoke      - boot the VM and assert 'echo m0-ok' works"; \
 	echo "  make clean      - remove $(BUILD_DIR)/ and per-subtree build outputs"
@@ -59,6 +63,20 @@ kernel:
 initramfs: guest
 	@set -eu; \
 	tools/mk-initramfs.sh
+
+.PHONY: builder-initramfs
+builder-initramfs: guest
+	@set -eu; \
+	tools/mk-builder-initramfs.sh
+
+.PHONY: rootfs
+rootfs: builder-initramfs
+	@set -eu; \
+	if [ -f "$(ROOTFS_IMG)" ] && [ -z "$${MSL_REBUILD_ROOTFS:-}" ]; then \
+	  echo "rootfs: $(ROOTFS_IMG) exists; skip (MSL_REBUILD_ROOTFS=1 forces)"; \
+	else \
+	  tools/mk-rootfs.sh; \
+	fi
 
 .PHONY: all
 all: kernel guest host sign initramfs
