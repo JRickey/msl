@@ -76,8 +76,9 @@ public final class UpDriver: @unchecked Sendable {
         do {
             _ = try control.ping()
             let macShare = spec.shares.contains { $0.tag == "mac" }
-            _ = try control.distroUp(
+            let distro = try control.distroUp(
                 dev: "/dev/vda", hostname: config.hostname, macShare: macShare)
+            if distro.state != "running" { failToStart(state: distro.state) }
         } catch {
             reportAndExit(error, code: 1)
         }
@@ -85,17 +86,42 @@ public final class UpDriver: @unchecked Sendable {
         startPowerWake(control)
     }
 
+    /// distro_up reported a non-running state: surface it and the console log,
+    /// then tear down through the graceful path (distro_down is idempotent).
+    private func failToStart(state: String) -> Never {
+        let console = host.consolePath ?? "(no console log)"
+        write(
+            line: "msl: distro failed to start (state: \(state)); console log: \(console)",
+            to: FileHandle.standardError)
+        shutdownAndExit(1)
+    }
+
     private func runShell(_ control: ControlClient) -> Never {
         do {
             let outcome = try openAndAttach(control)
-            _ = host.stopAndWait()
             switch outcome {
-            case .exited(let code): exit(code)
-            case .signaled(let sig): exit(128 &+ sig)
+            case .exited(let code): shutdownAndExit(code)
+            case .signaled(let sig): shutdownAndExit(128 &+ sig)
             }
         } catch {
             reportAndExit(error, code: 1)
         }
+    }
+
+    /// Graceful teardown for every exit taken after the distro may be up:
+    /// best-effort distro_down (log failure, proceed), then stop and exit.
+    private func shutdownAndExit(_ code: Int32) -> Never {
+        if let control {
+            do {
+                _ = try control.distroDown(timeoutMs: 15000)
+            } catch {
+                write(
+                    line: "msl: distro_down failed: \(describe(error))",
+                    to: FileHandle.standardError)
+            }
+        }
+        _ = host.stopAndWait()
+        exit(code)
     }
 
     private func openAndAttach(_ control: ControlClient) throws -> AttachOutcome {
@@ -156,8 +182,7 @@ public final class UpDriver: @unchecked Sendable {
         let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
         source.setEventHandler { [weak self] in
             guard let self else { exit(0) }
-            _ = self.host.stopAndWait()
-            exit(0)
+            self.shutdownAndExit(0)
         }
         source.resume()
         self.signalSource = source
@@ -173,8 +198,7 @@ public final class UpDriver: @unchecked Sendable {
 
     private func reportAndExit(_ error: Error, code: Int32) -> Never {
         write(line: "msl: \(describe(error))", to: FileHandle.standardError)
-        _ = host.stopAndWait()
-        exit(code)
+        shutdownAndExit(code)
     }
 
     private func describe(_ error: Error) -> String {
