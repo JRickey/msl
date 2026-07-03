@@ -19,13 +19,17 @@ public final class ImageLock: @unchecked Sendable {
         if fd >= 0 { _ = Darwin.close(fd) }
     }
 
-    /// Open `path` O_RDWR and take a non-blocking exclusive advisory lock.
-    /// Throws if the file cannot be opened or another msl process holds the lock.
+    /// Lock a sidecar `<path>.lock`, NOT the image itself: Virtualization takes
+    /// its own lock on the image at attach time, and a competing flock there
+    /// makes the storage attachment invalid (VZErrorDomain code=2).
     public static func acquire(path: String) throws -> ImageLock {
         precondition(!path.isEmpty, "image path must not be empty")
-        let fd = Darwin.open(path, O_RDWR)
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw MSLError.io("image does not exist: \(path)")
+        }
+        let fd = Darwin.open(path + ".lock", O_RDWR | O_CREAT, 0o644)
         guard fd >= 0 else {
-            throw MSLError.io("cannot open image for locking: \(path) (errno=\(errno))")
+            throw MSLError.io("cannot open image lockfile: \(path).lock (errno=\(errno))")
         }
         guard msl_flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             let err = errno
