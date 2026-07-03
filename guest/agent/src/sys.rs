@@ -3,110 +3,16 @@
 #![allow(unsafe_code)]
 
 use std::io;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
 
-const MAX_POLL_TARGETS: usize = 8;
-const MAX_POLL_RETRIES: usize = 64;
+pub use msl_wire::{PollTarget, poll_fds, set_nonblocking};
 
-#[allow(clippy::struct_excessive_bools)] // poll descriptor: intent + result flags
-pub struct PollTarget {
-    fd: RawFd,
-    want: bool,
-    want_write: bool,
-    pub ready: bool,
-    pub writable: bool,
-    pub hup: bool,
-}
+#[cfg(target_os = "linux")]
+use msl_wire::MAX_POLL_RETRIES;
 
-impl PollTarget {
-    pub const fn read(fd: RawFd, done: bool) -> Self {
-        Self {
-            fd,
-            want: !done,
-            want_write: false,
-            ready: false,
-            writable: false,
-            hup: false,
-        }
-    }
-
-    pub const fn read_write(fd: RawFd, want_read: bool, want_write: bool) -> Self {
-        Self {
-            fd,
-            want: want_read,
-            want_write,
-            ready: false,
-            writable: false,
-            hup: false,
-        }
-    }
-}
-
-pub fn poll_fds(targets: &mut [PollTarget], timeout_ms: i32) -> io::Result<()> {
-    if targets.is_empty() || targets.len() > MAX_POLL_TARGETS {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "bad poll target count",
-        ));
-    }
-    let mut pfds: Vec<libc::pollfd> = targets
-        .iter()
-        .map(|t| libc::pollfd {
-            fd: t.fd,
-            events: poll_events(t),
-            revents: 0,
-        })
-        .collect();
-    let count = libc::nfds_t::try_from(pfds.len()).unwrap_or(0);
-    let mut rc: libc::c_int = -1;
-    let mut last_err: Option<io::Error> = None;
-    // bounded EINTR retry: poll can be interrupted by any delivered signal
-    for _ in 0..MAX_POLL_RETRIES {
-        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), count, timeout_ms) };
-        if ret >= 0 {
-            rc = ret;
-            break;
-        }
-        let err = io::Error::last_os_error();
-        let interrupted = err.raw_os_error() == Some(libc::EINTR);
-        last_err = Some(err);
-        if !interrupted {
-            break;
-        }
-    }
-    if rc < 0 {
-        return Err(last_err.unwrap_or_else(|| io::Error::other("poll failed")));
-    }
-    for (target, pfd) in targets.iter_mut().zip(pfds.iter()) {
-        target.ready = pfd.revents & libc::POLLIN != 0;
-        target.writable = pfd.revents & libc::POLLOUT != 0;
-        target.hup = pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0;
-    }
-    Ok(())
-}
-
-const fn poll_events(t: &PollTarget) -> libc::c_short {
-    let mut events: libc::c_short = 0;
-    if t.want {
-        events |= libc::POLLIN;
-    }
-    if t.want_write {
-        events |= libc::POLLOUT;
-    }
-    events
-}
-
-pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
+#[cfg(target_os = "linux")]
+pub use msl_wire::{close_fd, read_fd, write_fd};
 
 // Decode the 4-byte native-endian pid the session intermediate reports.
 #[must_use]
@@ -485,12 +391,23 @@ pub struct MountOp {
     pub data: Option<CString>,
 }
 
+// Projection of the initramfs /tools dir into a distro: a read-only bind at
+// `target` (parent mkdir'd first) plus a fixed /usr/local/bin/mac symlink.
+#[cfg(target_os = "linux")]
+pub struct ToolsBind {
+    pub src: CString,
+    pub parent: CString,
+    pub target: CString,
+    pub link: CString,
+}
+
 #[cfg(target_os = "linux")]
 pub struct BootSpec {
     pub dev: CString,
     pub newroot: CString,
     pub mounts: Vec<MountOp>,
     pub mac: Option<(CString, CString)>,
+    pub tools: Option<ToolsBind>,
     pub hostname: CString,
     pub argv: Vec<CString>,
     pub envp: Vec<CString>,
@@ -580,6 +497,41 @@ unsafe fn child_mounts(spec: &BootSpec) {
                 std::ptr::null(),
             );
         }
+        if let Some(tools) = &spec.tools {
+            bind_tools(tools);
+        }
+    }
+}
+
+// Read-only tools bind + mac symlink. A failed ro-remount unwinds the bind:
+// a writable bind would let one distro rewrite the shim shared by all.
+#[cfg(target_os = "linux")]
+unsafe fn bind_tools(tools: &ToolsBind) {
+    unsafe {
+        libc::mkdir(tools.parent.as_ptr(), 0o755);
+        libc::mkdir(tools.target.as_ptr(), 0o755);
+        if libc::mount(
+            tools.src.as_ptr(),
+            tools.target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        ) != 0
+        {
+            return;
+        }
+        if libc::mount(
+            std::ptr::null(),
+            tools.target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY,
+            std::ptr::null(),
+        ) != 0
+        {
+            libc::umount(tools.target.as_ptr());
+            return;
+        }
+        libc::symlink(c"/run/msl/tools/mac".as_ptr(), tools.link.as_ptr());
     }
 }
 
@@ -814,39 +766,6 @@ unsafe fn child_session_exec(
         }
         libc::execve(argv[0], argv.as_ptr(), envp.as_ptr());
         libc::_exit(127);
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    if fd < 0 {
-        return Err(invalid("bad read fd"));
-    }
-    let rc = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    usize::try_from(rc).map_err(|_| invalid("read size overflow"))
-}
-
-#[cfg(target_os = "linux")]
-pub fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
-    if fd < 0 {
-        return Err(invalid("bad write fd"));
-    }
-    let rc = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    usize::try_from(rc).map_err(|_| invalid("write size overflow"))
-}
-
-#[cfg(target_os = "linux")]
-pub fn close_fd(fd: RawFd) {
-    if fd >= 0 {
-        unsafe {
-            libc::close(fd);
-        }
     }
 }
 

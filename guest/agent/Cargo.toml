@@ -1,0 +1,22 @@
+[package]
+name = "msl-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "msl-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+msl-wire = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = { workspace = true }
+
+[lints]
+workspace = true

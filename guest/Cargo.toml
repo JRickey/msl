@@ -1,21 +1,18 @@
-[package]
-name = "msl-agent"
+[workspace]
+members = ["agent", "wire", "shim"]
+resolver = "3"
+
+[workspace.package]
 version = "0.0.1"
 edition = "2024"
 license = "Apache-2.0"
-publish = false
 
-[[bin]]
-name = "msl-agent"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
 vsock = "0.5"
+msl-wire = { path = "wire" }
 
 [profile.release]
 opt-level = "z"
@@ -23,9 +20,9 @@ lto = true
 strip = true
 panic = "abort"
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }

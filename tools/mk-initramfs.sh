@@ -10,6 +10,7 @@ BUILD_DIR="$REPO_ROOT/build"
 CACHE_DIR="$BUILD_DIR/cache"
 OUT="$BUILD_DIR/initramfs.cpio"
 AGENT="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-agent"
+SHIM="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/mac"
 
 # Pinned busybox: Alpine v3.21 aarch64 static build. The multiarch busybox.net
 # binaries ship only 32-bit armv8l for ARM, which will not run on this kernel.
@@ -34,6 +35,12 @@ verify_sha256() {
 if [ ! -f "$AGENT" ]; then
 	echo "mk-initramfs: missing guest agent: $AGENT" >&2
 	echo "  build it first: (cd guest && cargo zigbuild --target aarch64-unknown-linux-musl --release)" >&2
+	exit 1
+fi
+
+if [ ! -f "$SHIM" ]; then
+	echo "mk-initramfs: missing interop shim: $SHIM" >&2
+	echo "  build it first: (cd guest && cargo zigbuild --workspace --target aarch64-unknown-linux-musl --release)" >&2
 	exit 1
 fi
 
@@ -78,11 +85,12 @@ esac
 stage=$(mktemp -d "$BUILD_DIR/initramfs.XXXXXX")
 trap 'rm -rf "$stage"' EXIT INT TERM
 
-mkdir -p "$stage/proc" "$stage/sys" "$stage/dev" "$stage/bin"
+mkdir -p "$stage/proc" "$stage/sys" "$stage/dev" "$stage/bin" "$stage/tools"
 mkdir -m 0777 -p "$stage/tmp"
 
 install -m 0755 "$AGENT" "$stage/init"
 install -m 0755 "$BB" "$stage/bin/busybox"
+install -m 0755 "$SHIM" "$stage/tools/mac"
 
 n=0
 for applet in $APPLETS; do

@@ -352,10 +352,12 @@ mod linux {
     use super::{DOWN_MAX_MS, Distros, validate_dev, validate_hostname, validate_name};
     use crate::exec::{self, ExecOpts};
     use crate::proto::{DistroStateData, DistroUpReq};
-    use crate::sys::{self, BootSpec, MountOp};
+    use crate::sys::{self, BootSpec, MountOp, ToolsBind};
 
     const DISTRO_ROOT: &str = "/run/msl/distros";
     const MAC_SRC: &str = "/run/msl/mac";
+    // The initramfs directory holding the projected interop shim (ADR 0008).
+    const TOOLS_SRC: &str = "/tools";
     const READY_TICKS: u32 = 50;
     const TICK: Duration = Duration::from_millis(100);
     const DOWN_TICK: Duration = Duration::from_millis(100);
@@ -506,11 +508,13 @@ mod linux {
         } else {
             None
         };
+        let tools = prepare_tools(&newroot)?;
         Ok(BootSpec {
             dev: cstr(&req.dev)?,
             newroot: cstr(&newroot)?,
             mounts: guest_mounts(&newroot)?,
             mac,
+            tools,
             hostname: cstr(&req.hostname)?,
             argv: vec![cstr("/sbin/init")?],
             envp: vec![
@@ -518,6 +522,21 @@ mod linux {
                 cstr("container=msl")?,
             ],
         })
+    }
+
+    // Project the initramfs shim into the distro when present; absent /tools
+    // (an older initramfs) is not an error, the distro simply lacks `mac`.
+    fn prepare_tools(newroot: &str) -> Result<Option<ToolsBind>, String> {
+        assert!(!newroot.is_empty(), "tools projection needs a newroot");
+        if !Path::new(TOOLS_SRC).exists() {
+            return Ok(None);
+        }
+        Ok(Some(ToolsBind {
+            src: cstr(TOOLS_SRC)?,
+            parent: cstr(&format!("{newroot}/run/msl"))?,
+            target: cstr(&format!("{newroot}/run/msl/tools"))?,
+            link: cstr(&format!("{newroot}/usr/local/bin/mac"))?,
+        }))
     }
 
     fn guest_mounts(newroot: &str) -> Result<Vec<MountOp>, String> {

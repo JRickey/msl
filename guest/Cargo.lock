@@ -58,9 +58,28 @@ name = "msl-agent"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "msl-wire",
  "serde",
  "serde_json",
  "vsock",
+]
+
+[[package]]
+name = "msl-shim"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "msl-wire",
+ "serde",
+ "serde_json",
+ "vsock",
+]
+
+[[package]]
+name = "msl-wire"
+version = "0.0.1"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
