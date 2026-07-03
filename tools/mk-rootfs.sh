@@ -81,6 +81,8 @@ echo ubuntu > /mnt/etc/hostname
 printf "/dev/vda / ext4 defaults 0 1\n" > /mnt/etc/fstab
 mkdir -p /mnt/mnt/mac
 touch /mnt/etc/cloud/cloud-init.disabled
+printf "network:\n  version: 2\n  ethernets:\n    all:\n      match: {name: \"e*\"}\n      dhcp4: true\n" > /mnt/etc/netplan/01-msl.yaml
+chmod 600 /mnt/etc/netplan/01-msl.yaml
 /usr/sbin/chroot /mnt /usr/bin/passwd -d root
 ln -sf /dev/null /mnt/etc/systemd/system/systemd-networkd-wait-online.service
 echo "builder: [$(($(date +%s)-T0))s] sync+umount"
