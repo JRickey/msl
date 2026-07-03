@@ -1,12 +1,14 @@
-//! Wire types for the M0 protocol: the request read from the host and the
+//! Wire types for the M0/M1 protocol: the request read from the host and the
 //! response envelopes written back, plus their JSON (de)serialization.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const AGENT_NAME: &str = "msl-agent";
 pub const AGENT_VERSION: &str = "0.0.1";
+pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Deserialize)]
@@ -18,12 +20,73 @@ pub struct Request {
     #[serde(default)]
     pub env: HashMap<String, String>,
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub distro: bool,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub req: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DistroUpReq {
+    pub dev: String,
+    pub hostname: String,
+    #[serde(default)]
+    pub mac_share: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionOpenReq {
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub rows: u16,
+    pub cols: u16,
+    #[serde(default)]
+    pub distro: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionRefReq {
+    pub session_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionResizeReq {
+    pub session_id: u64,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionSignalReq {
+    pub session_id: u64,
+    pub signal: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetTimeReq {
+    pub sec: i64,
+    pub usec: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MkfsReq {
+    pub dev: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DataHello {
+    pub session_id: u64,
+    pub token: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PingData {
     pub agent: &'static str,
     pub version: &'static str,
+    pub protocol: u32,
     pub kernel: String,
 }
 
@@ -34,6 +97,27 @@ pub struct ExecData {
     pub stderr: String,
     pub truncated: bool,
 }
+
+#[derive(Debug, Serialize)]
+pub struct DistroStateData {
+    pub state: &'static str,
+    pub init_pid: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionOpenData {
+    pub session_id: u64,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionWaitData {
+    pub done: bool,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Empty {}
 
 #[derive(Serialize)]
 struct OkEnvelope<'a, T> {

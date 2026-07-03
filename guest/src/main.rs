@@ -1,25 +1,32 @@
 //! msl-agent: runs as PID 1 in the initramfs. It mounts the pseudo
-//! filesystems, then serves the M0 vsock protocol one request at a time.
+//! filesystems, then serves the M1 vsock protocol: a threaded control plane on
+//! 5000, PTY sessions on 5001, and a log stream on 5002.
 
-// The vsock server path is linux-only; the host build compiles the portable
-// modules for tests, leaving the server helpers legitimately unused there.
+// Many portable helpers are exercised only by the Linux server; the host build
+// compiles them for the unit tests, leaving them legitimately unused there.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+mod agent;
+mod conn;
+mod distro;
 mod exec;
 mod frame;
+mod log;
 mod proto;
+mod session;
 mod sys;
+mod wait;
 
-use proto::{AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, PingData, Request};
-use serde_json::Value;
+#[cfg(target_os = "linux")]
+mod server;
 
+use agent::Agent;
+
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
-#[cfg(target_os = "linux")]
-use vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
-#[cfg(target_os = "linux")]
-const VSOCK_PORT: u32 = 5000;
 #[cfg(target_os = "linux")]
 const FATAL_PAUSE_TICKS: u32 = 5;
 
@@ -32,102 +39,35 @@ fn main() {
 fn main() {
     // The host build exists only to run the unit tests; exercise the handler
     // so it is not dead code, then exit.
-    let _ = handle_payload(br#"{"id":0,"op":"ping"}"#);
+    let _ = Agent::new().handle_payload(br#"{"id":0,"op":"ping"}"#);
     eprintln!("msl-agent: host build is for tests only; PID-1 server needs linux");
-}
-
-fn handle_payload(payload: &[u8]) -> Vec<u8> {
-    debug_assert!(payload.len() <= frame::MAX_FRAME);
-    match proto::parse_request(payload) {
-        Ok(req) => dispatch(&req),
-        Err(message) => proto::encode_err(recover_id(payload), &message),
-    }
-}
-
-fn recover_id(payload: &[u8]) -> u64 {
-    serde_json::from_slice::<Value>(payload)
-        .ok()
-        .and_then(|value| value.get("id").and_then(Value::as_u64))
-        .unwrap_or(0)
-}
-
-fn dispatch(req: &Request) -> Vec<u8> {
-    match req.op.as_str() {
-        "ping" => handle_ping(req.id),
-        "exec" => handle_exec(req),
-        other => proto::encode_err(req.id, &format!("unknown op: {other}")),
-    }
-}
-
-fn handle_ping(id: u64) -> Vec<u8> {
-    let kernel = sys::kernel_release().unwrap_or_else(|_| "unknown".to_string());
-    debug_assert!(!AGENT_NAME.is_empty());
-    let data = PingData {
-        agent: AGENT_NAME,
-        version: AGENT_VERSION,
-        kernel,
-    };
-    proto::encode_ok(id, &data).unwrap_or_else(|message| proto::encode_err(id, &message))
-}
-
-fn handle_exec(req: &Request) -> Vec<u8> {
-    let timeout_ms = req.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-    match exec::run(&req.argv, &req.env, timeout_ms) {
-        Ok(data) => proto::encode_ok(req.id, &data)
-            .unwrap_or_else(|message| proto::encode_err(req.id, &message)),
-        Err(message) => proto::encode_err(req.id, &message),
-    }
 }
 
 #[cfg(target_os = "linux")]
 fn run_forever() -> ! {
-    // outer loop is intentional: PID 1 must never return
+    if let Err(e) = sys::mount_early() {
+        log::error(&format!("early mount failed: {e}"));
+    }
+    mount_shares();
+    let agent = Arc::new(Agent::new());
+    server::spawn_background(&agent);
+    // outer loop is intentional: PID 1 must never return; rebind on failure
     loop {
-        if let Err(e) = sys::mount_early() {
-            log_console(&format!("mount failed, not serving: {e}"));
+        if let Err(e) = server::serve_control(&agent) {
+            log::error(&format!("control listener failed: {e}"));
             fatal_pause();
-        } else if let Err(e) = serve() {
-            log_console(&format!("listener failed: {e}"));
-            fatal_pause();
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn serve() -> std::io::Result<()> {
-    let listener = VsockListener::bind(&VsockAddr::new(VMADDR_CID_ANY, VSOCK_PORT))?;
-    accept_loop(&listener);
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn accept_loop(listener: &VsockListener) {
-    // sanctioned infinite accept loop: sequential M0 server, one connection at a time
-    loop {
-        match listener.accept() {
-            Ok((stream, _addr)) => serve_connection(stream),
-            Err(e) => {
-                log_console(&format!("accept failed: {e}"));
-                return;
-            }
-        }
-        let _ = sys::reap_zombies();
+fn mount_shares() {
+    let _ = std::fs::create_dir_all("/run/msl/mac");
+    let _ = std::fs::create_dir_all("/run/msl/staging");
+    if sys::mount_share("mac", "/run/msl/mac").is_ok() {
+        log::info("mounted virtiofs share 'mac' at /run/msl/mac");
     }
-}
-
-#[cfg(target_os = "linux")]
-fn serve_connection(mut stream: VsockStream) {
-    // sanctioned per-connection serve loop: one request in flight at a time
-    loop {
-        let Ok(payload) = frame::read_frame(&mut stream) else {
-            return;
-        };
-        let response = handle_payload(&payload);
-        if frame::write_frame(&mut stream, &response).is_err() {
-            return;
-        }
-        let _ = sys::reap_zombies();
-    }
+    let _ = sys::mount_share("staging", "/run/msl/staging");
 }
 
 #[cfg(target_os = "linux")]
@@ -138,21 +78,13 @@ fn fatal_pause() {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn log_console(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open("/dev/console") {
-        let _ = writeln!(file, "msl-agent: {msg}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::handle_payload;
+    use crate::agent::Agent;
     use serde_json::Value;
 
     fn call(request: &str) -> Value {
-        let response = handle_payload(request.as_bytes());
+        let response = Agent::new().handle_payload(request.as_bytes());
         serde_json::from_slice(&response).expect("response is valid json")
     }
 
