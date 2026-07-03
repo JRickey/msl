@@ -19,6 +19,7 @@ public final class DaemonCore: @unchecked Sendable {
     var control: ControlClient?
     var attached: [DeviceEntry] = []
     var distrosUp: Set<String> = []
+    var rosettaAttached = false
     var sessions = SessionTable()
     var lastActivity = Date()
     var pendingOps = 0

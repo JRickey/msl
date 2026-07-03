@@ -5,7 +5,7 @@ import MSLCore
 struct ConfigCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
-        abstract: "Show or change per-distro settings (default user, mac-share, hostname).",
+        abstract: "Show or change per-distro settings (user, mac-share, hostname, rosetta).",
         discussion: """
             With no options, prints the distro's current settings. Hostname and \
             mac-share changes take effect on the next distro boot — run 'msl stop' \
@@ -23,6 +23,14 @@ struct ConfigCommand: ParsableCommand {
 
     @Option(name: .customLong("mac-share"), help: "Mac home sharing: on | off | inherit.")
     var macShare: String?
+
+    @Option(
+        name: .customLong("rosetta"),
+        help: """
+            x86-64 translation: on | off. Takes effect on the next distro boot. \
+            If the host lacks Rosetta, run 'softwareupdate --install-rosetta'.
+            """)
+    var rosetta: String?
 
     func run() throws {
         assert(!name.isEmpty, "distro name argument must not be empty")
@@ -52,6 +60,10 @@ struct ConfigCommand: ParsableCommand {
             try registry.setMacShare(name: name, share: Self.parseMacShare(macShare))
             changed = true
         }
+        if let rosetta {
+            try registry.setRosetta(name: name, on: Self.parseRosetta(rosetta))
+            changed = true
+        }
         return changed
     }
 
@@ -65,6 +77,15 @@ struct ConfigCommand: ParsableCommand {
         }
     }
 
+    private static func parseRosetta(_ value: String) throws -> Bool {
+        switch value {
+        case "on": return true
+        case "off": return false
+        default:
+            throw MSLError.invalidArgument("--rosetta must be on|off, got: \(value)")
+        }
+    }
+
     private func printEntry(_ registry: Registry) throws {
         guard let entry = registry.entry(name: name) else {
             throw MSLError.invalidArgument("no such distro: \(name)")
@@ -72,10 +93,12 @@ struct ConfigCommand: ParsableCommand {
         assert(entry.name == name, "printed entry must match the requested name")
         let user = entry.defaultUser ?? "root (unset)"
         let share = entry.macShare.map { $0 ? "on" : "off" } ?? "inherit"
+        let rosetta = (entry.rosetta ?? false) ? "on" : "off"
         print("name:          \(entry.name)")
         print("hostname:      \(entry.hostname)")
         print("default user:  \(user)")
         print("mac-share:     \(share)")
+        print("rosetta:       \(rosetta)")
         print("image:         \(entry.image)")
         print("created:       \(entry.createdAt)")
     }

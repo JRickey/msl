@@ -16,12 +16,16 @@ public struct BootSpec: Sendable {
     public let diskURLs: [URL]
     public let shares: [ShareSpec]
     public let balloonEnabled: Bool
+    /// Attach a VZLinuxRosettaDirectoryshare (tag "rosetta") when set. The caller
+    /// must gate this on VMHost.rosettaAvailable(); a false value is the default.
+    public let rosettaShare: Bool
 
     public init(
         kernelPath: String, initramfsPath: String, commandLine: String,
         cpuCount: Int, memoryMiB: UInt64, consoleLogPath: String?,
         execCommand: String?, timeout: Double, diskPaths: [String] = [],
-        shares: [ShareSpec] = [], balloonEnabled: Bool = false
+        shares: [ShareSpec] = [], balloonEnabled: Bool = false,
+        rosettaShare: Bool = false
     ) throws {
         guard cpuCount >= 1 else { throw MSLError.invalidArgument("cpus must be >= 1") }
         guard memoryMiB >= 1 else { throw MSLError.invalidArgument("memory-mib must be >= 1") }
@@ -46,6 +50,7 @@ public struct BootSpec: Sendable {
         self.timeout = timeout
         self.shares = shares
         self.balloonEnabled = balloonEnabled
+        self.rosettaShare = rosettaShare
     }
 
     private static func validatedDisks(
@@ -341,6 +346,9 @@ public final class VMHost: @unchecked Sendable {
                 url: URL(fileURLWithPath: share.hostPath), readOnly: share.readOnly)
             device.share = VZSingleDirectoryShare(directory: directory)
             devices.append(device)
+        }
+        if spec.rosettaShare {
+            devices.append(try Self.makeRosettaShare())
         }
         return devices
     }

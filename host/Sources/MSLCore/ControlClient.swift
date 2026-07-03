@@ -29,11 +29,12 @@ public final class ControlClient: @unchecked Sendable {
     }
 
     public func distroUp(
-        name: String, dev: String, hostname: String, macShare: Bool
+        name: String, dev: String, hostname: String, macShare: Bool, rosetta: Bool
     ) throws -> DistroData {
         precondition(!name.isEmpty, "distro name must not be empty")
         precondition(!dev.isEmpty, "distro dev must not be empty")
-        let req = DistroUpReq(name: name, dev: dev, hostname: hostname, macShare: macShare)
+        let req = DistroUpReq(
+            name: name, dev: dev, hostname: hostname, macShare: macShare, rosetta: rosetta)
         return try roundTrip(makeOp("distro_up", req))
     }
 
