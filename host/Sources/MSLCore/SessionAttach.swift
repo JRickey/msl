@@ -55,8 +55,9 @@ public final class SessionAttach: @unchecked Sendable {
         Thread.detachNewThread { [self] in pumpDataToOut() }
     }
 
-    /// stdin -> data socket. On stdin EOF, half-close the socket so the guest
-    /// child sees EOF; the session still ends via the data-read side.
+    /// stdin -> data socket. A PTY has no stdin-EOF concept (Ctrl-D travels
+    /// as a byte), so stdin EOF only stops this pump — half-closing the
+    /// socket would make the agent hang up the PTY and SIGHUP the child.
     private func pumpInToData() {
         var buffer = [UInt8](repeating: 0, count: 65536)
         while true {  // stream pump: terminates on stdin EOF/error
@@ -66,7 +67,6 @@ public final class SessionAttach: @unchecked Sendable {
             if count > 0 {
                 if !writeAll(dataFD, buffer, count) { break }
             } else if count == 0 {
-                _ = Darwin.shutdown(dataFD, SHUT_WR)
                 break
             } else if errno == EINTR {
                 continue

@@ -65,7 +65,7 @@ struct UpCommand: ParsableCommand {
             shares: shares)
         let config = UpConfig(
             hostname: hostname,
-            shell: shell,
+            shell: shell || !command.isEmpty,
             shellArgv: command.isEmpty ? ["/bin/bash", "-l"] : command,
             home: home,
             hostCwd: FileManager.default.currentDirectoryPath,

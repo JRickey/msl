@@ -519,16 +519,25 @@ unsafe fn child_mounts(spec: &BootSpec) {
     }
 }
 
+// switch_root sequence, not pivot_root(2): the agent's root is the initramfs
+// (rootfs), which pivot_root rejects with EINVAL unconditionally.
 #[cfg(target_os = "linux")]
 unsafe fn pivot_into(newroot: *const c_char) -> c_int {
     unsafe {
         if libc::chdir(newroot) != 0 {
             return -1;
         }
-        if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) != 0 {
+        if libc::mount(
+            c".".as_ptr(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_MOVE,
+            std::ptr::null(),
+        ) != 0
+        {
             return -1;
         }
-        if libc::umount2(c".".as_ptr(), libc::MNT_DETACH) != 0 {
+        if libc::chroot(c".".as_ptr()) != 0 {
             return -1;
         }
         if libc::chdir(c"/".as_ptr()) != 0 {
