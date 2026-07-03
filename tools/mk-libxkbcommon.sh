@@ -112,6 +112,7 @@ $MESON setup "$BUILD_DIR" "$SRC_DIR" \
     --cross-file "$CROSS_FILE" \
     --buildtype release \
     -Ddefault_library=static \
+    -Dxkb-config-root=/usr/share/X11/xkb \
     -Denable-x11=false \
     -Denable-wayland=false \
     -Denable-xkbregistry=false \

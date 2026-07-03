@@ -9,6 +9,7 @@ use std::time::Instant;
 use smithay::input::keyboard::KeyboardHandle;
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
+use smithay::output::{Mode as OutputMode, Output, Scale};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_callback::WlCallback;
@@ -20,17 +21,29 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, with_states,
 };
+use smithay::wayland::output::OutputHandler;
+use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::selection::data_device::{
+    ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
     XdgToplevelSurfaceData,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::viewporter::ViewporterState;
 
 use crate::frames;
 use crate::ledger::Ledger;
 use crate::remote::{OutFrame, PROTOCOL_VERSION};
 
 const MAX_OUT_QUEUE: usize = 4096;
+
+/// Virtual output geometry advertised from startup; the host presents each
+/// toplevel in its own native window, so the resolution is nominal.
+pub const OUTPUT_W: i32 = 1920;
+pub const OUTPUT_H: i32 = 1080;
+pub const DEFAULT_REFRESH_HZ: u32 = 60;
 
 /// One remoted toplevel: its Wayland handles, current attributes mirrored to the
 /// host, held frame callbacks (released on `present_ack`), and pacing state.
@@ -79,6 +92,9 @@ pub struct State {
     pub seat: Seat<Self>,
     pub keyboard: KeyboardHandle<Self>,
     pub pointer: PointerHandle<Self>,
+    pub output: Output,
+    pub data_device: DataDeviceState,
+    pub viewporter: ViewporterState,
     pub windows: HashMap<u32, Win>,
     pub surface_win: HashMap<WlSurface, u32>,
     pub focus: Option<u32>,
@@ -129,6 +145,36 @@ impl State {
     #[must_use]
     pub fn win_id_of(&self, surface: &WlSurface) -> Option<u32> {
         self.surface_win.get(surface).copied()
+    }
+
+    /// Push the current scale/refresh onto the `wl_output` global; Smithay emits
+    /// the updated mode/scale and a `done` to bound clients.
+    pub fn sync_output(&self) {
+        debug_assert!(self.refresh_hz > 0, "refresh must be positive");
+        debug_assert!(self.scale > 0.0, "scale must be positive");
+        let refresh = i32::try_from(self.refresh_hz.saturating_mul(1000)).unwrap_or(60_000);
+        let mode = OutputMode {
+            size: (OUTPUT_W, OUTPUT_H).into(),
+            refresh,
+        };
+        self.output.change_current_state(
+            Some(mode),
+            None,
+            Some(Scale::Integer(output_scale(self.scale))),
+            None,
+        );
+    }
+}
+
+fn output_scale(scale: f64) -> i32 {
+    let s = scale.round();
+    if s.is_finite() && (1.0..=16.0).contains(&s) {
+        // s is bounded to [1, 16] by the guard, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let v = s as i32;
+        v
+    } else {
+        1
     }
 }
 
@@ -279,7 +325,25 @@ pub const fn protocol_version() -> u32 {
     PROTOCOL_VERSION
 }
 
+impl OutputHandler for State {}
+
+impl SelectionHandler for State {
+    type SelectionUserData = ();
+}
+
+impl ClientDndGrabHandler for State {}
+impl ServerDndGrabHandler for State {}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device
+    }
+}
+
 smithay::delegate_compositor!(State);
 smithay::delegate_shm!(State);
 smithay::delegate_xdg_shell!(State);
 smithay::delegate_seat!(State);
+smithay::delegate_output!(State);
+smithay::delegate_data_device!(State);
+smithay::delegate_viewporter!(State);

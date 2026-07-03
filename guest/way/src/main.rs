@@ -18,17 +18,23 @@ mod linux {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use std::path::Path;
+
     use smithay::input::keyboard::XkbConfig;
     use smithay::input::{Seat, SeatState};
+    use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
     use smithay::reexports::calloop::EventLoop;
     use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
-    use smithay::reexports::wayland_server::Display;
+    use smithay::reexports::wayland_server::{Display, DisplayHandle};
+    use smithay::utils::Transform;
     use smithay::wayland::compositor::CompositorState;
+    use smithay::wayland::selection::data_device::DataDeviceState;
     use smithay::wayland::shell::xdg::XdgShellState;
     use smithay::wayland::shm::ShmState;
+    use smithay::wayland::viewporter::ViewporterState;
     use vsock::VsockStream;
 
-    use msl_way::comp::{ClientState, State};
+    use msl_way::comp::{self, ClientState, State};
     use msl_way::ledger::Ledger;
     use msl_way::remote::{
         Configure, Hello, HelloAck, HostMsg, Key, PROTOCOL_VERSION, Pointer, T_HELLO, T_HELLO_ACK,
@@ -80,12 +86,58 @@ mod linux {
         rx: Receiver<HostMsg>,
     }
 
+    /// The XKB dataset must exist before `add_keyboard`, which otherwise aborts
+    /// inside libxkbcommon rather than returning an error.
+    fn ensure_xkb_dataset() -> io::Result<()> {
+        let root =
+            std::env::var("XKB_CONFIG_ROOT").unwrap_or_else(|_| "/usr/share/X11/xkb".to_string());
+        if Path::new(&root).is_dir() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("XKB data not found at {root}; install xkb-data or set XKB_CONFIG_ROOT"),
+            ))
+        }
+    }
+
+    fn install_globals(dh: &DisplayHandle) -> (Output, DataDeviceState, ViewporterState) {
+        let output = Output::new(
+            "MSL-1".to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "msl".to_string(),
+                model: "virtual".to_string(),
+            },
+        );
+        let _global = output.create_global::<State>(dh);
+        let mode = OutputMode {
+            size: (comp::OUTPUT_W, comp::OUTPUT_H).into(),
+            refresh: i32::try_from(comp::DEFAULT_REFRESH_HZ * 1000).unwrap_or(60_000),
+        };
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            Some(Scale::Integer(1)),
+            Some((0, 0).into()),
+        );
+        output.set_preferred(mode);
+        (
+            output,
+            DataDeviceState::new::<State>(dh),
+            ViewporterState::new::<State>(dh),
+        )
+    }
+
     fn build_state(display: &Display<State>, layout: &str) -> io::Result<State> {
         debug_assert!(!layout.is_empty(), "keyboard layout must be non-empty");
+        ensure_xkb_dataset()?;
         let dh = display.handle();
         let compositor = CompositorState::new::<State>(&dh);
         let shm = ShmState::new::<State>(&dh, Vec::new());
         let xdg = XdgShellState::new::<State>(&dh);
+        let (output, data_device, viewporter) = install_globals(&dh);
         let mut seats = SeatState::<State>::new();
         let mut seat: Seat<State> = seats.new_wl_seat(&dh, "seat0");
         let xkb = XkbConfig {
@@ -108,13 +160,16 @@ mod linux {
             seat,
             keyboard,
             pointer,
+            output,
+            data_device,
+            viewporter,
             windows: HashMap::new(),
             surface_win: HashMap::new(),
             focus: None,
             next_win: 1,
             seq: 0,
             scale: 1.0,
-            refresh_hz: 60,
+            refresh_hz: comp::DEFAULT_REFRESH_HZ,
             epoch: Instant::now(),
             ledger: Ledger::new(),
             out: Vec::new(),
@@ -145,6 +200,7 @@ mod linux {
         }
         state.scale = if ack.scale > 0.0 { ack.scale } else { 1.0 };
         state.refresh_hz = ack.refresh_hz.max(1);
+        state.sync_output();
         let reader = stream.try_clone()?;
         let (tx, rx) = mpsc::sync_channel(HOST_QUEUE_CAP);
         thread::spawn(move || reader_loop(reader, &tx));
@@ -249,7 +305,50 @@ mod linux {
         Drain::More
     }
 
+    const USAGE: &str = "\
+Usage: msl-way [OPTIONS]
+  --wayland-socket <name>  Wayland socket name (default: auto)
+  --vsock-port <port>      host presenter vsock port (default: 5020)
+  --layout <layout>        xkb keyboard layout (default: us)
+  --list-globals           print the advertised Wayland globals and exit
+  --version                print version and exit
+  --help                   print this help and exit";
+
+    /// Intercept informational flags before any compositor or xkb initialization
+    /// so `--help`/`--version`/`--list-globals` never start serving.
+    fn early_exit() -> Option<i32> {
+        let mut wants_help = false;
+        let mut wants_version = false;
+        let mut wants_globals = false;
+        for a in std::env::args().skip(1) {
+            match a.as_str() {
+                "--help" | "-h" => wants_help = true,
+                "--version" | "-V" => wants_version = true,
+                "--list-globals" => wants_globals = true,
+                _ => {}
+            }
+        }
+        if wants_help {
+            println!("{USAGE}");
+            return Some(0);
+        }
+        if wants_version {
+            println!("msl-way {}", env!("CARGO_PKG_VERSION"));
+            return Some(0);
+        }
+        if wants_globals {
+            for g in msl_way::REQUIRED_GLOBALS {
+                println!("{g}");
+            }
+            return Some(0);
+        }
+        None
+    }
+
     pub fn run() -> i32 {
+        if let Some(code) = early_exit() {
+            return code;
+        }
         let args = parse_args();
         match run_inner(&args) {
             Ok(()) => 0,
