@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "msl-agent"
-version = "0.0.1"
+version = "0.8.0"
 dependencies = [
  "libc",
  "msl-wire",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "msl-shim"
-version = "0.0.1"
+version = "0.2.1"
 dependencies = [
  "libc",
  "msl-wire",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "msl-wire"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libc",
 ]
