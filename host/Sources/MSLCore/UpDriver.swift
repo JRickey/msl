@@ -30,7 +30,7 @@ public struct UpConfig: Sendable {
 
 /// Drives `msl up`: boot -> ping -> distro_up -> set_time, then either an
 /// attached interactive shell (shut the VM down on exit) or resident daemon
-/// mode. This process is the M1 daemon. `@unchecked Sendable`: mutable fields
+/// mode. This process is the one-shot up driver. `@unchecked Sendable`: mutable fields
 /// are set once during `launch()` before concurrent use.
 public final class UpDriver: @unchecked Sendable {
     private let host: VMHost
@@ -94,7 +94,7 @@ public final class UpDriver: @unchecked Sendable {
     }
 
     /// The agent ships in lockstep with this host, so a protocol other than 2 is
-    /// a warning, not a fatal error (per the M2b contract): log and proceed.
+    /// a warning, not a fatal error (the distro-registry contract): log and proceed.
     private func warnProtocolMismatch(_ ping: PingData) {
         let reported = ping.protocolVersion ?? 0
         guard reported != Proto.version else { return }

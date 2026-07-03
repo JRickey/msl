@@ -1,5 +1,5 @@
 //! msl-agent: runs as PID 1 in the initramfs. It mounts the pseudo
-//! filesystems, then serves the M1 vsock protocol: a threaded control plane on
+//! filesystems, then serves the vsock protocol: a threaded control plane on
 //! 5000, PTY sessions on 5001, and a log stream on 5002.
 
 // Many portable helpers are exercised only by the Linux server; the host build

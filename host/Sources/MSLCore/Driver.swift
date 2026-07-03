@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// Drives the M0 boot flow off the VM's serial queue: start, poll-connect,
+/// Drives the boot flow off the VM's serial queue: start, poll-connect,
 /// ping, optional exec, then stop. `exit(_:)` is the sanctioned termination
 /// point for the CLI (never `fatalError`). `@unchecked Sendable`: the only
 /// mutable field is set once during `launch()` before any concurrent use.

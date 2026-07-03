@@ -1,4 +1,4 @@
-//! Wire types for the M0/M1 protocol: the request read from the host and the
+//! Wire types for the agent control protocol: the request read from the host and the
 //! response envelopes written back, plus their JSON (de)serialization.
 
 use std::collections::HashMap;

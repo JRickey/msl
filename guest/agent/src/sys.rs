@@ -121,7 +121,7 @@ fn invalid(msg: &'static str) -> io::Error {
 }
 
 // ---------------------------------------------------------------------------
-// M1 additions (Linux only): wall-clock, signals, reaping, PTY allocation,
+// Linux syscall wrappers: wall-clock, signals, reaping, PTY allocation,
 // namespace join, distro `clone`+boot, and PTY session `fork`+exec. Every
 // child path between fork/clone and execve calls only async-signal-safe libc.
 // ---------------------------------------------------------------------------

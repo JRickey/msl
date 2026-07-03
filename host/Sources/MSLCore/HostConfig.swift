@@ -53,7 +53,7 @@ public struct ShareSpec: Sendable, Equatable {
 
 /// Map a host cwd to the guest session cwd per the protocol: a path under
 /// `$HOME` becomes `/mnt/mac/<relative>` when the mac share is present;
-/// otherwise the distro user's home (`/root` in M1).
+/// otherwise the distro user's home (`/root`).
 public func mapSessionCwd(hostCwd: String, home: String, hasMacShare: Bool) -> String {
     let distroHome = "/root"
     guard hasMacShare, !home.isEmpty else { return distroHome }
