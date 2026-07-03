@@ -399,7 +399,16 @@ pub struct ToolsBind {
     pub parent: CString,
     pub target: CString,
     pub link: CString,
+    pub binfmt_dir: CString,
+    pub binfmt_conf: CString,
 }
+
+// systemd binfmt.d drop-in: the distro's own systemd-binfmt owns its
+// binfmt_misc set, so registration must live in the distro, not the agent's
+// namespace. F pins /run/msl/tools/mac-binfmt (present before init) at boot.
+#[cfg(target_os = "linux")]
+pub const BINFMT_CONF: &[u8] = b":msl-macho:M::\\xcf\\xfa\\xed\\xfe::/run/msl/tools/mac-binfmt:F\n\
+:msl-macho-fat:M::\\xca\\xfe\\xba\\xbe::/run/msl/tools/mac-binfmt:F\n";
 
 #[cfg(target_os = "linux")]
 pub struct BootSpec {
@@ -532,6 +541,27 @@ unsafe fn bind_tools(tools: &ToolsBind) {
             return;
         }
         libc::symlink(c"/run/msl/tools/mac".as_ptr(), tools.link.as_ptr());
+        seed_binfmt(tools);
+    }
+}
+
+// Drop the systemd binfmt.d config so the distro registers the Mach-O handlers
+// itself at boot. Best-effort: a write failure just leaves transparent exec off.
+#[cfg(target_os = "linux")]
+unsafe fn seed_binfmt(tools: &ToolsBind) {
+    unsafe {
+        libc::mkdir(tools.binfmt_dir.as_ptr(), 0o755);
+        let fd = libc::open(
+            tools.binfmt_conf.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        );
+        if fd < 0 {
+            return;
+        }
+        let rc = libc::write(fd, BINFMT_CONF.as_ptr().cast(), BINFMT_CONF.len());
+        debug_assert!(rc <= BINFMT_CONF.len().cast_signed(), "write within bounds");
+        libc::close(fd);
     }
 }
 
@@ -935,6 +965,19 @@ mod tests {
     fn decode_pid_round_trips_native_endian() {
         for pid in [1_i32, 4242, 65_535, i32::MAX] {
             assert_eq!(decode_pid(pid.to_ne_bytes()), pid);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn binfmt_conf_registers_both_machos_against_the_pinned_interp() {
+        let text = std::str::from_utf8(super::BINFMT_CONF).expect("utf8 drop-in");
+        assert!(text.contains(r"\xcf\xfa\xed\xfe") && text.contains(r"\xca\xfe\xba\xbe"));
+        for line in text.lines() {
+            assert!(
+                line.ends_with("/run/msl/tools/mac-binfmt:F"),
+                "F-pinned interp"
+            );
         }
     }
 }

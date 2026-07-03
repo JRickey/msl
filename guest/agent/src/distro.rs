@@ -536,6 +536,8 @@ mod linux {
             parent: cstr(&format!("{newroot}/run/msl"))?,
             target: cstr(&format!("{newroot}/run/msl/tools"))?,
             link: cstr(&format!("{newroot}/usr/local/bin/mac"))?,
+            binfmt_dir: cstr(&format!("{newroot}/etc/binfmt.d"))?,
+            binfmt_conf: cstr(&format!("{newroot}/etc/binfmt.d/msl-macho.conf"))?,
         }))
     }
 
