@@ -15,12 +15,13 @@ public struct DaemonConfig: Sendable {
     public let term: String
     public let memoryFloorMiB: UInt64
     public let pollIntervalS: Double
+    public let interopEnabled: Bool
 
     public init(
         home: MSLHome, kernelPath: String, initramfsPath: String, cmdline: String = "console=hvc0",
         cpus: Int = 4, memoryMiB: UInt64 = 4096, shareHomePath: String?, bootTimeout: Double = 60,
         idleTimeoutS: Int = 60, term: String = "xterm-256color", memoryFloorMiB: UInt64 = 1024,
-        pollIntervalS: Double = 2
+        pollIntervalS: Double = 2, interopEnabled: Bool = true
     ) {
         precondition(!kernelPath.isEmpty, "kernel path must not be empty")
         precondition(!initramfsPath.isEmpty, "initramfs path must not be empty")
@@ -38,5 +39,6 @@ public struct DaemonConfig: Sendable {
         self.term = term
         self.memoryFloorMiB = memoryFloorMiB
         self.pollIntervalS = pollIntervalS
+        self.interopEnabled = interopEnabled
     }
 }

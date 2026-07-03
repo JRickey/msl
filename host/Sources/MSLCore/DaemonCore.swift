@@ -24,6 +24,7 @@ public final class DaemonCore: @unchecked Sendable {
     var pendingOps = 0
     var powerWake: PowerWake?
     var forwarder: PortForwarder?
+    var interopListener: InteropListener?
     var balloonTargetMiB: UInt64 = 0
     var comfortTicks = 0
     var reclaimedThisIdle = false

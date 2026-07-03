@@ -120,15 +120,17 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 /// only inside `queue`-confined closures; callers reach it through the
 /// blocking methods, which hop onto `queue` and wait on a semaphore.
 public final class VMHost: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "msl.vm", qos: .userInitiated)
+    let queue = DispatchQueue(label: "msl.vm", qos: .userInitiated)
     private let connectAttemptTimeoutMs = 750
     private let spec: BootSpec
     private var consoleHandle: FileHandle?
     private var resolvedConsolePath: String?
-    private var machine: VZVirtualMachine?
+    var machine: VZVirtualMachine?
     private var delegate: VMDelegate?
     private var stopRequested = false
     private var imageLocks: [ImageLock] = []
+    var interopListeners: [UInt32: VZVirtioSocketListener] = [:]
+    var interopDelegates: [UInt32: VZVirtioSocketListenerDelegate] = [:]
 
     public init(spec: BootSpec) {
         self.spec = spec

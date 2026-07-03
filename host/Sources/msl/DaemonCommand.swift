@@ -40,6 +40,11 @@ struct DaemonRunCommand: ParsableCommand {
     @Flag(name: .long, inversion: .prefixedNo, help: "Share $HOME into the VM as the 'mac' tag.")
     var shareHome: Bool = true
 
+    @Flag(
+        name: .long, inversion: .prefixedNo,
+        help: "Serve the linux->mac interop channel (vsock 5010).")
+    var interop: Bool = true
+
     @Flag(name: .long, help: "Set when auto-spawned by 'msl shell'/'run' (quieter startup).")
     var spawned: Bool = false
 
@@ -59,7 +64,8 @@ struct DaemonRunCommand: ParsableCommand {
                 devDefault: "initramfs.cpio.gz"),
             cmdline: cmdline, cpus: cpus, memoryMiB: memoryMib,
             shareHomePath: shareHome ? NSHomeDirectory() : nil, bootTimeout: timeout,
-            idleTimeoutS: idleTimeout, term: env["TERM"] ?? "xterm-256color")
+            idleTimeoutS: idleTimeout, term: env["TERM"] ?? "xterm-256color",
+            interopEnabled: interop)
         DaemonRuntime.run(config: config, spawned: spawned)
     }
 }

@@ -79,6 +79,7 @@ extension DaemonCore {
         startMemoryLadder(host: host)
         forwarder.start()
         startPollTimer()
+        installInterop(host: host)
         log("VM booted with \(entries.count) image(s) attached")
     }
 
@@ -157,7 +158,9 @@ extension DaemonCore {
 
     private func teardownState() {
         let saved = withLock { () -> TeardownBundle in
-            let bundle = TeardownBundle(wake: powerWake, forwarder: forwarder, pollTimer: pollTimer)
+            let bundle = TeardownBundle(
+                wake: powerWake, forwarder: forwarder, pollTimer: pollTimer,
+                interop: interopListener, host: host)
             host = nil
             control = nil
             attached = []
@@ -165,6 +168,7 @@ extension DaemonCore {
             sessions = SessionTable()
             powerWake = nil
             forwarder = nil
+            interopListener = nil
             pollTimer = nil
             balloonTargetMiB = 0
             comfortTicks = 0
@@ -174,6 +178,8 @@ extension DaemonCore {
             return bundle
         }
         saved.pollTimer?.cancel()
+        saved.interop?.stop()
+        saved.host?.removeInteropListener(port: Proto.interopPort)
         saved.forwarder?.stop()
         saved.wake?.stop()
     }
@@ -374,4 +380,6 @@ private struct TeardownBundle {
     let wake: PowerWake?
     let forwarder: PortForwarder?
     let pollTimer: DispatchSourceTimer?
+    let interop: InteropListener?
+    let host: VMHost?
 }

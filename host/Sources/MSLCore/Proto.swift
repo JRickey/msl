@@ -19,6 +19,9 @@ public enum Proto {
     /// Forward data plane (v1.3): one proxied TCP connection per vsock connection.
     public static let forwardPort: UInt32 = 5003
 
+    /// Reverse interop exec (mac_exec v1): the guest shim dials CID_HOST here.
+    public static let interopPort: UInt32 = 5010
+
     /// Wire protocol version advertised by a v1.3 agent in the `ping` reply.
     public static let version = 3
 }
