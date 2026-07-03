@@ -9,14 +9,15 @@ extension DaemonCore {
     /// so boot and distro_up are atomic with respect to down/stop.
     func ensureUp(_ name: String?) throws -> DeviceEntry {
         let resolved = try resolveName(name)
-        let hostname = try resolveHostname(resolved)
+        let settings = try distroSettings(resolved)
         return try lifecycleQueue.sync {
             try performBoot()
             guard let entry = withLock({ attached.first { $0.name == resolved } }) else {
                 throw MSLError.configuration(
                     "'\(resolved)' installed after boot; restart the daemon to attach it")
             }
-            try performDistroUp(entry: entry, hostname: hostname)
+            try performDistroUp(
+                entry: entry, hostname: settings.hostname, macShare: settings.macShare)
             return entry
         }
     }
@@ -122,12 +123,13 @@ extension DaemonCore {
 
     /// Bring one distro up on the guest (idempotent). Caller is on the lifecycle
     /// queue, so the `distrosUp` bookkeeping cannot race with stop/down.
-    private func performDistroUp(entry: DeviceEntry, hostname: String) throws {
+    private func performDistroUp(entry: DeviceEntry, hostname: String, macShare: Bool) throws {
+        assert(!entry.name.isEmpty, "device entry name must not be empty")
+        assert(!hostname.isEmpty, "hostname must not be empty")
         if withLock({ distrosUp.contains(entry.name) }) { return }
         guard let control = withLock({ self.control }) else {
             throw MSLError.configuration("VM not running")
         }
-        let macShare = config.shareHomePath != nil
         let result = try control.distroUp(
             name: entry.name, dev: entry.dev, hostname: hostname, macShare: macShare)
         guard result.state == "running" else {
@@ -315,9 +317,28 @@ extension DaemonCore {
         return try registry.resolveDefault(requested: requested).name
     }
 
-    private func resolveHostname(_ name: String) throws -> String {
+    /// Per-distro boot settings from one registry load: hostname (default = the
+    /// distro name) and whether the mac home is shared (global default AND opt-in).
+    private func distroSettings(_ name: String) throws -> (hostname: String, macShare: Bool) {
+        assert(!name.isEmpty, "distro name must not be empty")
         let registry = try Registry.load(from: config.home.registryURL)
-        return registry.entry(name: name)?.hostname ?? name
+        let entry = registry.entry(name: name)
+        let hostname = entry?.hostname ?? name
+        let macShare = config.shareHomePath != nil && (entry?.macShare ?? true)
+        assert(!hostname.isEmpty, "resolved hostname must not be empty")
+        return (hostname, macShare)
+    }
+
+    /// Session argv: with a per-distro default user set, wrap the client argv
+    /// (nil = login shell) in `su -l`; otherwise the client argv or a login bash.
+    func resolveArgv(name: String, requested: [String]?, cwd: String) throws -> [String] {
+        assert(!name.isEmpty, "distro name must not be empty")
+        assert(!cwd.isEmpty, "cwd must not be empty")
+        let registry = try Registry.load(from: config.home.registryURL)
+        guard let user = registry.entry(name: name)?.defaultUser else {
+            return requested ?? ["/bin/bash", "-l"]
+        }
+        return UserWrap.wrap(user: user, argv: requested, cwd: cwd)
     }
 
     func mergedEnv(_ env: [String: String]?) -> [String: String] {
