@@ -12,12 +12,12 @@ final class ExportPlanTests: XCTestCase {
         return home
     }
 
-    private func registry(with name: String) throws -> Registry {
+    private func registry(with name: String, defaultUser: String? = nil) throws -> Registry {
         var registry = Registry()
         try registry.add(
             DistroEntry(
                 name: name, image: "\(name).img", hostname: name,
-                createdAt: "2026-01-01T00:00:00Z"))
+                createdAt: "2026-01-01T00:00:00Z", defaultUser: defaultUser))
         return registry
     }
 
@@ -82,6 +82,43 @@ final class ExportPlanTests: XCTestCase {
                 registry: try registry(with: "ubuntu"), home: home))
     }
 
+    func testTarOutputIsNotBundle() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home.root) }
+        let plan = try ExportPlan.make(
+            name: "ubuntu", output: nil, force: false,
+            registry: try registry(with: "ubuntu", defaultUser: "jack"), home: home)
+        XCTAssertFalse(plan.bundle)
+        XCTAssertNil(plan.defaultUser)
+    }
+
+    func testMslOutputSetsBundleAndCopiesDefaultUser() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home.root) }
+        let dir = try writableDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("ubuntu.msl").path
+        let plan = try ExportPlan.make(
+            name: "ubuntu", output: out, force: false,
+            registry: try registry(with: "ubuntu", defaultUser: "jack"), home: home)
+        XCTAssertTrue(plan.bundle)
+        XCTAssertEqual(plan.outputURL.pathExtension, "msl")
+        XCTAssertEqual(plan.defaultUser, "jack")
+    }
+
+    func testMslOutputWithoutDefaultUser() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home.root) }
+        let dir = try writableDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("ubuntu.msl").path
+        let plan = try ExportPlan.make(
+            name: "ubuntu", output: out, force: false,
+            registry: try registry(with: "ubuntu"), home: home)
+        XCTAssertTrue(plan.bundle)
+        XCTAssertNil(plan.defaultUser)
+    }
+
     func testMissingOutputDirectoryRejected() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home.root) }
@@ -120,12 +157,61 @@ final class ExportPlanTests: XCTestCase {
     }
 
     func testExportScriptMountsReadOnlyAndTars() {
-        let script = ExportDriver.exportScript
+        let script = ExportDriver.exportScript(bundle: false)
         XCTAssertTrue(script.contains("mount -t ext4 -o ro /dev/vda /mnt"))
         XCTAssertTrue(script.contains("/run/msl/staging/export.tar"))
         XCTAssertTrue(script.contains("--numeric-owner"))
         XCTAssertTrue(script.contains("--exclude=./lost+found"))
         XCTAssertFalse(script.contains("mkfs"))
+        XCTAssertFalse(script.contains("msl-distribution.conf"))
+    }
+
+    func testBundleExportScriptAppendsConf() {
+        let script = ExportDriver.exportScript(bundle: true)
+        XCTAssertTrue(script.contains("-cpf /run/msl/staging/export.tar"))
+        XCTAssertTrue(script.contains("-rpf /run/msl/staging/export.tar"))
+        XCTAssertTrue(script.contains("--owner=0 --group=0 --mode=0644"))
+        XCTAssertTrue(script.contains("-C /run/msl/staging/meta ./etc/msl-distribution.conf"))
+        // The create must drop any baked-in conf so exactly one member remains.
+        XCTAssertTrue(script.contains("--exclude=./etc/msl-distribution.conf"))
+        // The append must land after the create and before the unmount.
+        guard let create = script.range(of: "-cpf"), let append = script.range(of: "-rpf"),
+            let umount = script.range(of: "umount")
+        else { return XCTFail("script missing expected steps") }
+        XCTAssertTrue(create.lowerBound < append.lowerBound)
+        XCTAssertTrue(append.lowerBound < umount.lowerBound)
+    }
+
+    func testTarExportScriptDoesNotExcludeConf() {
+        let script = ExportDriver.exportScript(bundle: false)
+        XCTAssertFalse(script.contains("--exclude=./etc/msl-distribution.conf"))
+        XCTAssertTrue(script.contains("--exclude=./lost+found"))
+    }
+
+    func testBundleModeRejectsInvalidRegistryDefaultUser() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home.root) }
+        let dir = try writableDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var registry = Registry()
+        try registry.add(
+            DistroEntry(
+                name: "ubuntu", image: "ubuntu.img", hostname: "ubuntu",
+                createdAt: "2026-01-01T00:00:00Z", defaultUser: "bad\nuser"))
+        let tarOut = dir.appendingPathComponent("ubuntu.tar").path
+        // A .tar export is a faithful filesystem copy; the bad value is not rendered.
+        XCTAssertNoThrow(
+            try ExportPlan.make(
+                name: "ubuntu", output: tarOut, force: false, registry: registry, home: home))
+        let mslOut = dir.appendingPathComponent("ubuntu.msl").path
+        XCTAssertThrowsError(
+            try ExportPlan.make(
+                name: "ubuntu", output: mslOut, force: false, registry: registry, home: home)
+        ) { error in
+            guard case MSLError.configuration = error else {
+                return XCTFail("expected configuration error, got \(error)")
+            }
+        }
     }
 }
 

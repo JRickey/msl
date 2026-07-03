@@ -5,12 +5,14 @@ import MSLCore
 struct ExportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "export",
-        abstract: "Export a distro's filesystem to a .tar archive.")
+        abstract: "Export a distro's filesystem to a .tar archive or a .msl bundle.")
 
     @Argument(help: "Distro name to export.")
     var name: String
 
-    @Option(name: .long, help: "Output tarball path (must end in .tar; default: ./<name>.tar).")
+    @Option(
+        name: .long,
+        help: "Output path (must end in .tar or .msl; default: ./<name>.tar).")
     var output: String?
 
     @Flag(name: .long, help: "Overwrite an existing output file.")
