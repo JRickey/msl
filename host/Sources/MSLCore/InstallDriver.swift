@@ -42,15 +42,21 @@ public struct InstallPlan: Sendable, Equatable {
     public let hostname: String
     public let source: InstallSource
     public let sizeGiB: Int
+    /// Login user to seed on the registry entry (nil = root); from a bundle conf.
+    public let defaultUser: String?
 
     public static let minSizeGiB = 1
     public static let maxSizeGiB = 512
 
     /// Validate a request: name grammar, uniqueness, source existence + type,
-    /// and size bounds. The distro's hostname is seeded to its name.
+    /// size bounds, and (if present) the default-user grammar. The distro's
+    /// hostname is seeded to its name. `.msl` sources supply their sniffed
+    /// compression via `bundleCompression` (the CLI sniffs before calling).
     public static func make(
-        name: String, fromPath: String, sizeGiB: Int, existingNames: [String]
+        name: String, fromPath: String, sizeGiB: Int, existingNames: [String],
+        bundleCompression: TarCompression? = nil, defaultUser: String? = nil
     ) throws -> InstallPlan {
+        assert(minSizeGiB <= maxSizeGiB, "size bounds must be ordered")
         guard Registry.isValidName(name) else {
             throw MSLError.invalidArgument("invalid distro name (^[a-z][a-z0-9-]{0,31}$): \(name)")
         }
@@ -64,19 +70,34 @@ public struct InstallPlan: Sendable, Equatable {
         guard FileManager.default.isReadableFile(atPath: fromPath) else {
             throw MSLError.invalidArgument("--from not readable: \(fromPath)")
         }
-        let source = try classify(fromPath)
-        return InstallPlan(name: name, hostname: name, source: source, sizeGiB: sizeGiB)
+        if let user = defaultUser, !Registry.isValidUser(user) {
+            throw MSLError.invalidArgument(
+                "invalid default-user (^[a-z_][a-z0-9_-]{0,31}$): \(user)")
+        }
+        let source = try classify(fromPath, bundleCompression: bundleCompression)
+        return InstallPlan(
+            name: name, hostname: name, source: source, sizeGiB: sizeGiB, defaultUser: defaultUser)
     }
 
-    private static func classify(_ path: String) throws -> InstallSource {
+    private static func classify(
+        _ path: String, bundleCompression: TarCompression?
+    ) throws -> InstallSource {
+        assert(!path.isEmpty, "path must not be empty")
         let lower = path.lowercased()
         let url = URL(fileURLWithPath: path)
         if lower.hasSuffix(".img") { return .image(url) }
         if lower.hasSuffix(".tar.xz") || lower.hasSuffix(".txz") { return .tarball(url, .xz) }
         if lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz") { return .tarball(url, .gzip) }
         if lower.hasSuffix(".tar") { return .tarball(url, .none) }
+        if lower.hasSuffix(".msl") {
+            guard let compression = bundleCompression else {
+                throw MSLError.invalidArgument(
+                    "internal: .msl source needs a sniffed compression: \(path)")
+            }
+            return .tarball(url, compression)
+        }
         throw MSLError.invalidArgument(
-            "unsupported --from type (want .img, .tar.xz, .tar.gz, or .tar): \(path)")
+            "unsupported --from type (want .img, .tar.xz, .tar.gz, .tar, or .msl): \(path)")
     }
 }
 
@@ -132,9 +153,15 @@ public final class InstallDriver {
                 plan: plan, tarball: src, compression: compression,
                 to: imageURL, options: options)
         }
+        if let user = plan.defaultUser {
+            assert(Registry.isValidUser(user), "plan default-user must be pre-validated")
+            guard Registry.isValidUser(user) else {
+                throw MSLError.invalidArgument("invalid default-user in plan: \(user)")
+            }
+        }
         let entry = DistroEntry(
             name: plan.name, image: imageURL.lastPathComponent, hostname: plan.hostname,
-            createdAt: Self.timestamp())
+            createdAt: Self.timestamp(), defaultUser: plan.defaultUser)
         var registry = try Registry.load(from: home.registryURL)
         try registry.add(entry)
         try registry.save(to: home.registryURL)

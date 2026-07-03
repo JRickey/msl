@@ -81,6 +81,40 @@ final class InstallPlanTests: XCTestCase {
             try InstallPlan.make(name: "u", fromPath: path, sizeGiB: 1, existingNames: []))
     }
 
+    func testMslWithSniffedCompressionClassified() throws {
+        let path = try tempFile(suffix: ".msl")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let plan = try InstallPlan.make(
+            name: "u", fromPath: path, sizeGiB: 8, existingNames: [], bundleCompression: .gzip)
+        guard case .tarball(_, let comp) = plan.source else { return XCTFail("expected tarball") }
+        XCTAssertEqual(comp, .gzip)
+    }
+
+    func testMslWithoutSniffedCompressionRejected() throws {
+        let path = try tempFile(suffix: ".msl")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        XCTAssertThrowsError(
+            try InstallPlan.make(name: "u", fromPath: path, sizeGiB: 8, existingNames: []))
+    }
+
+    func testDefaultUserThreadsToPlan() throws {
+        let path = try tempFile(suffix: ".msl")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let plan = try InstallPlan.make(
+            name: "u", fromPath: path, sizeGiB: 8, existingNames: [],
+            bundleCompression: TarCompression.none, defaultUser: "jack")
+        XCTAssertEqual(plan.defaultUser, "jack")
+    }
+
+    func testInvalidDefaultUserRejected() throws {
+        let path = try tempFile(suffix: ".msl")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        XCTAssertThrowsError(
+            try InstallPlan.make(
+                name: "u", fromPath: path, sizeGiB: 8, existingNames: [],
+                bundleCompression: TarCompression.none, defaultUser: "Bad User"))
+    }
+
     func testBuildScriptReferencesFixedStagedName() {
         let script = InstallDriver.buildScript(
             tarball: TarCompression.xz.stagedFilename, hostname: "mydistro",

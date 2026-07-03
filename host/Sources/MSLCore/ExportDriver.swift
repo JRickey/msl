@@ -8,28 +8,50 @@ public struct ExportPlan: Sendable, Equatable {
     public let name: String
     public let imageURL: URL
     public let outputURL: URL
+    /// True when the output ends `.msl`: append a rendered conf to the archive.
+    public let bundle: Bool
+    /// The registry entry's login user, copied only in bundle mode.
+    public let defaultUser: String?
 
     /// Validate a request: name must name an installed distro; the output
-    /// defaults to `./<name>.tar`, must end in `.tar`, its parent must exist and
-    /// be writable, and an existing file is refused unless `force`.
+    /// defaults to `./<name>.tar`, must end in `.tar` or `.msl`, its parent must
+    /// exist and be writable, and an existing file is refused unless `force`.
     public static func make(
         name: String, output: String?, force: Bool, registry: Registry, home: MSLHome
     ) throws -> ExportPlan {
         guard Registry.isValidName(name) else {
             throw MSLError.invalidArgument("invalid distro name: \(name)")
         }
-        guard registry.entry(name: name) != nil else {
+        guard let entry = registry.entry(name: name) else {
             throw MSLError.invalidArgument("no such distro: \(name) (see 'msl list')")
         }
-        let outputURL = try resolveOutput(name: name, output: output, force: force)
-        return ExportPlan(name: name, imageURL: home.imageURL(name: name), outputURL: outputURL)
+        let resolved = try resolveOutput(name: name, output: output, force: force)
+        let bundleUser = try resolved.bundle ? validatedDefaultUser(entry, name: name) : nil
+        return ExportPlan(
+            name: name, imageURL: home.imageURL(name: name), outputURL: resolved.url,
+            bundle: resolved.bundle, defaultUser: bundleUser)
     }
 
-    private static func resolveOutput(name: String, output: String?, force: Bool) throws -> URL {
+    /// A hand-edited registry could hold a default-user with a newline or other
+    /// INI-breaking bytes; reject it before it is rendered into a bundle conf.
+    private static func validatedDefaultUser(_ entry: DistroEntry, name: String) throws -> String? {
+        assert(!name.isEmpty, "name validated by caller")
+        guard let user = entry.defaultUser else { return nil }
+        guard Registry.isValidUser(user) else {
+            throw MSLError.configuration(
+                "registry default-user for \(name) is invalid; fix with 'msl config'")
+        }
+        return user
+    }
+
+    private static func resolveOutput(
+        name: String, output: String?, force: Bool
+    ) throws -> (url: URL, bundle: Bool) {
         assert(!name.isEmpty, "name validated by caller")
         let url = URL(fileURLWithPath: output ?? "./\(name).tar")
-        guard url.pathExtension.lowercased() == "tar" else {
-            throw MSLError.invalidArgument("output must end in .tar: \(url.path)")
+        let ext = url.pathExtension.lowercased()
+        guard ext == "tar" || ext == "msl" else {
+            throw MSLError.invalidArgument("output must end in .tar or .msl: \(url.path)")
         }
         let parent = url.deletingLastPathComponent()
         let fileManager = FileManager.default
@@ -44,7 +66,8 @@ public struct ExportPlan: Sendable, Equatable {
         guard force || !fileManager.fileExists(atPath: url.path) else {
             throw MSLError.invalidArgument("output exists (use --force to overwrite): \(url.path)")
         }
-        return url
+        assert(ext == "tar" || ext == "msl", "extension validated above")
+        return (url, ext == "msl")
     }
 }
 
@@ -67,6 +90,9 @@ public final class ExportDriver {
         try probeInUse(plan: plan)
         let stagingDir = try makeStagingDir()
         defer { try? FileManager.default.removeItem(at: stagingDir) }
+        if plan.bundle {
+            try writeBundleMeta(plan: plan, stagingDir: stagingDir)
+        }
         try runExporter(plan: plan, stagingDir: stagingDir, options: options)
         let produced = stagingDir.appendingPathComponent("export.tar")
         guard FileManager.default.fileExists(atPath: produced.path) else {
@@ -90,6 +116,21 @@ public final class ExportDriver {
             throw MSLError.configuration(
                 "'\(plan.name)' is in use (VM running?); run 'msl stop' first")
         }
+    }
+
+    /// Render the conf from the registry values into the writable staging share
+    /// as `meta/etc/msl-distribution.conf`; the in-guest script appends it.
+    private func writeBundleMeta(plan: ExportPlan, stagingDir: URL) throws {
+        assert(plan.bundle, "meta is only written for bundle exports")
+        assert(!plan.name.isEmpty, "plan name validated by make")
+        let confDir = stagingDir.appendingPathComponent("meta/etc")
+        try FileManager.default.createDirectory(at: confDir, withIntermediateDirectories: true)
+        let confURL = confDir.appendingPathComponent("msl-distribution.conf")
+        let contents = BundleMeta.render(name: plan.name, defaultUser: plan.defaultUser)
+        guard let data = contents.data(using: .utf8) else {
+            throw MSLError.io("cannot encode bundle conf for \(plan.name)")
+        }
+        try data.write(to: confURL)
     }
 
     private func makeStagingDir() throws -> URL {
@@ -123,8 +164,8 @@ public final class ExportDriver {
         _ = try control.ping()
         let receive = Double(options.execTimeoutMs) / 1000.0 + 15
         let result = try control.exec(
-            argv: ["/bin/sh", "-c", Self.exportScript], timeoutMs: options.execTimeoutMs,
-            receiveTimeout: receive)
+            argv: ["/bin/sh", "-c", Self.exportScript(bundle: plan.bundle)],
+            timeoutMs: options.execTimeoutMs, receiveTimeout: receive)
         guard result.exitCode == 0 else {
             throw MSLError.configuration(
                 "exporter script failed (exit \(result.exitCode)); console log: \(logPath)")
@@ -166,16 +207,29 @@ public final class ExportDriver {
     }
 
     /// One-shot in-guest export: mount the image read-only, tar its root
-    /// (xattrs + numeric owners, minus lost+found) into the staging share. The
-    /// staged name is fixed, so nothing user-controlled reaches the shell.
-    static let exportScript = """
-        set -euf
-        export PATH=/usr/sbin:/sbin:/usr/bin:/bin
-        mount -t ext4 -o ro /dev/vda /mnt
-        /usr/bin/tar -cpf /run/msl/staging/export.tar \
-            --xattrs --xattrs-include=* --numeric-owner \
-            --exclude=./lost+found -C /mnt .
-        sync
-        umount /mnt
-        """
+    /// (xattrs + numeric owners, minus lost+found) into the staging share. In
+    /// bundle mode the create excludes any conf baked into the rootfs and
+    /// appends the host-rendered one (root-owned, constant member path), so the
+    /// archive holds exactly one conf member — never a stale duplicate.
+    static func exportScript(bundle: Bool) -> String {
+        let excludeConf = bundle ? " --exclude=./etc/msl-distribution.conf" : ""
+        var lines = [
+            "set -euf",
+            "export PATH=/usr/sbin:/sbin:/usr/bin:/bin",
+            "mount -t ext4 -o ro /dev/vda /mnt",
+            "/usr/bin/tar -cpf /run/msl/staging/export.tar \\",
+            "    --xattrs --xattrs-include=* --numeric-owner \\",
+            "    --exclude=./lost+found\(excludeConf) -C /mnt .",
+        ]
+        if bundle {
+            lines.append("/usr/bin/tar -rpf /run/msl/staging/export.tar \\")
+            lines.append("    --owner=0 --group=0 --mode=0644 \\")
+            lines.append("    -C /run/msl/staging/meta ./etc/msl-distribution.conf")
+        }
+        lines.append("sync")
+        lines.append("umount /mnt")
+        assert(lines.count >= 8, "export script must retain its core steps")
+        assert(!lines[0].isEmpty, "first line must not be empty")
+        return lines.joined(separator: "\n")
+    }
 }
