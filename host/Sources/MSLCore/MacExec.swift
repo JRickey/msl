@@ -77,6 +77,21 @@ public enum MacExec {
         return home
     }
 
+    /// Translate a binfmt target: a clean `/mnt/mac/…` path -> host absolute
+    /// path; nil when outside the share, dot-dot-bearing, share off, or the bare
+    /// share root (a directory, not a binary). Pure; unit-tested.
+    public static func translateBinary(_ guestPath: String, shareRoot: String?) -> String? {
+        guard let shareRoot, !shareRoot.isEmpty else { return nil }
+        assert(shareRoot.hasPrefix("/"), "share root must be an absolute host path")
+        let prefix = "/mnt/mac"
+        guard guestPath.hasPrefix(prefix + "/") else { return nil }
+        let remainder = guestPath.dropFirst(prefix.count)  // keeps the leading slash
+        assert(remainder.hasPrefix("/"), "remainder retains the separator")
+        let components = remainder.split(separator: "/")
+        guard !components.isEmpty, !components.contains("..") else { return nil }
+        return shareRoot + remainder
+    }
+
     private static func spawnPTY(
         argv: [String], cwd: String, env: [String], tty: TTYRequest
     ) throws -> MacProcess {

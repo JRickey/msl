@@ -27,6 +27,36 @@ final class MacExecTranslateTests: XCTestCase {
     }
 }
 
+final class MacExecTranslateBinaryTests: XCTestCase {
+    func testSubpathMapsUnderShareRoot() {
+        XCTAssertEqual(
+            MacExec.translateBinary("/mnt/mac/Dev/tool", shareRoot: "/Users/x"), "/Users/x/Dev/tool"
+        )
+    }
+
+    func testExactPrefixIsNil() {
+        XCTAssertNil(MacExec.translateBinary("/mnt/mac", shareRoot: "/Users/x"))
+    }
+
+    func testDotDotComponentIsNil() {
+        XCTAssertNil(MacExec.translateBinary("/mnt/mac/../etc/tool", shareRoot: "/Users/x"))
+    }
+
+    func testNonSharePathIsNil() {
+        XCTAssertNil(MacExec.translateBinary("/usr/bin/tool", shareRoot: "/Users/x"))
+    }
+
+    func testNoShareIsNil() {
+        XCTAssertNil(MacExec.translateBinary("/mnt/mac/Dev/tool", shareRoot: nil))
+    }
+
+    func testDotDotLookalikeComponentIsKept() {
+        XCTAssertEqual(
+            MacExec.translateBinary("/mnt/mac/a..b/tool", shareRoot: "/Users/x"),
+            "/Users/x/a..b/tool")
+    }
+}
+
 final class MacExecSpawnTests: XCTestCase {
     func testPipeSpawnStreamsStdoutAndExitsZero() throws {
         let proc = try MacExec.spawn(
@@ -112,5 +142,15 @@ final class MacExecTraversalTests: XCTestCase {
         let mapped = MacExec.translateCwd(
             "/mnt/mac/a..b", shareRoot: "/Users/u", home: "/Users/u")
         XCTAssertEqual(mapped, "/Users/u/a..b")
+    }
+}
+
+final class MacExecTrailingSlashTests: XCTestCase {
+    func testBareShareRootWithTrailingSlashIsNil() {
+        XCTAssertNil(MacExec.translateBinary("/mnt/mac/", shareRoot: "/Users/u"))
+    }
+
+    func testMultipleSlashesOnlyIsNil() {
+        XCTAssertNil(MacExec.translateBinary("/mnt/mac///", shareRoot: "/Users/u"))
     }
 }
