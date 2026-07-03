@@ -12,8 +12,8 @@ use serde_json::Value;
 use crate::distro::{self, Distro};
 use crate::exec::{self, ExecOpts};
 use crate::proto::{
-    self, AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, DistroUpReq, Empty, MkfsReq,
-    PROTOCOL_VERSION, PingData, Request, SessionOpenReq, SessionRefReq, SessionResizeReq,
+    self, AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, DistroDownReq, DistroUpReq, Empty,
+    MkfsReq, PROTOCOL_VERSION, PingData, Request, SessionOpenReq, SessionRefReq, SessionResizeReq,
     SessionSignalReq, SetTimeReq,
 };
 use crate::session::{self, Sessions};
@@ -91,6 +91,7 @@ impl Agent {
             "ping" => Self::handle_ping(req.id),
             "exec" => self.handle_exec(req),
             "distro_up" => self.handle_distro_up(req),
+            "distro_down" => self.handle_distro_down(req),
             "distro_state" => respond(req.id, self.distro_state()),
             "session_open" => self.handle_session_open(req),
             "session_resize" => self.handle_session_resize(req),
@@ -141,6 +142,31 @@ impl Agent {
     fn distro_state(&self) -> Result<proto::DistroStateData, String> {
         let guard = self.distro.lock().map_err(|_| "distro lock".to_string())?;
         Ok(guard.snapshot())
+    }
+
+    fn handle_distro_down(&self, req: &Request) -> Vec<u8> {
+        let timeout_ms = parse_down_timeout(&req.req);
+        respond(req.id, self.distro_down(timeout_ms))
+    }
+
+    // A live distro takes the poweroff/wait path; the sync/unmount teardown and
+    // Failed->Stopped settle then run unconditionally, holding no lock meanwhile.
+    fn distro_down(&self, timeout_ms: u64) -> Result<proto::DistroDownData, String> {
+        debug_assert!((distro::DOWN_MIN_MS..=distro::DOWN_MAX_MS).contains(&timeout_ms));
+        let active = {
+            let guard = self.distro.lock().map_err(|_| "distro lock".to_string())?;
+            guard.active_pid()
+        };
+        if let Some(pid) = active {
+            assert!(pid > 0, "active init pid must be positive");
+            do_poweroff_and_wait(&self.distro, pid, timeout_ms);
+        }
+        do_teardown();
+        self.distro
+            .lock()
+            .map_err(|_| "distro lock".to_string())?
+            .settle_stopped();
+        Ok(proto::DistroDownData { state: "stopped" })
     }
 
     fn handle_session_open(&self, req: &Request) -> Vec<u8> {
@@ -254,6 +280,21 @@ fn validate_set_time(sec: i64) -> Result<(), String> {
     }
 }
 
+// A distro_down `req` is optional; a missing or malformed one falls back to the
+// default timeout. The result is always clamped into the valid window.
+fn parse_down_timeout(value: &Value) -> u64 {
+    let requested = if value.is_null() {
+        None
+    } else {
+        serde_json::from_value::<DistroDownReq>(value.clone())
+            .ok()
+            .and_then(|r| r.timeout_ms)
+    };
+    let clamped = distro::clamp_down_timeout(requested);
+    debug_assert!((distro::DOWN_MIN_MS..=distro::DOWN_MAX_MS).contains(&clamped));
+    clamped
+}
+
 fn parse<T: DeserializeOwned>(value: &Value) -> Result<T, String> {
     if value.is_null() {
         return Err("missing req object".to_string());
@@ -290,6 +331,22 @@ fn do_distro_up(
 ) -> Result<proto::DistroStateData, String> {
     Err("distro boot requires linux".to_string())
 }
+
+#[cfg(target_os = "linux")]
+fn do_poweroff_and_wait(distro: &Mutex<Distro>, init_pid: i32, timeout_ms: u64) {
+    distro::poweroff_and_wait(distro, init_pid, timeout_ms);
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn do_poweroff_and_wait(_distro: &Mutex<Distro>, _init_pid: i32, _timeout_ms: u64) {}
+
+#[cfg(target_os = "linux")]
+fn do_teardown() {
+    distro::teardown();
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn do_teardown() {}
 
 #[cfg(target_os = "linux")]
 fn do_session_open(
@@ -469,6 +526,48 @@ mod tests {
                 .expect("err")
                 .contains("no such session")
         );
+    }
+
+    #[test]
+    fn distro_down_idempotent_when_stopped() {
+        let value = call(&Agent::new(), r#"{"id":21,"op":"distro_down"}"#);
+        assert_eq!(value["id"], 21);
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["data"]["state"], "stopped");
+    }
+
+    #[test]
+    fn distro_down_routes_with_req_timeout() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":22,"op":"distro_down","req":{"timeout_ms":50}}"#,
+        );
+        assert_eq!(value["id"], 22);
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["data"]["state"], "stopped");
+    }
+
+    #[test]
+    fn distro_down_from_failed_reports_stopped_and_settles() {
+        let agent = Agent::new();
+        {
+            // A crashed boot lands in Failed (init exits inside the ready window).
+            let mut guard = agent.distro.lock().expect("distro lock");
+            guard.begin(4242);
+            let recorded = guard.on_init_exit(4242);
+            let state = guard.snapshot().state;
+            drop(guard);
+            assert!(recorded, "init exit recorded");
+            assert_eq!(state, "failed");
+        }
+        let first = call(&agent, r#"{"id":23,"op":"distro_down"}"#);
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["data"]["state"], "stopped");
+        // Settled to Stopped, so distro_state and a repeat call agree.
+        let state = call(&agent, r#"{"id":24,"op":"distro_state"}"#);
+        assert_eq!(state["data"]["state"], "stopped");
+        let again = call(&agent, r#"{"id":25,"op":"distro_down"}"#);
+        assert_eq!(again["data"]["state"], "stopped");
     }
 
     #[test]

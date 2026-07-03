@@ -76,6 +76,11 @@ pub struct MkfsReq {
     pub dev: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct DistroDownReq {
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DataHello {
     pub session_id: u64,
@@ -102,6 +107,11 @@ pub struct ExecData {
 pub struct DistroStateData {
     pub state: &'static str,
     pub init_pid: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DistroDownData {
+    pub state: &'static str,
 }
 
 #[derive(Debug, Serialize)]

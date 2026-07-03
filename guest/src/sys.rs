@@ -179,6 +179,27 @@ fn mount_one(src: &str, target: &str, fstype: &str, data: Option<&str>) -> io::R
     Ok(())
 }
 
+// Flush the page cache to the block device, then detach the distro root. The
+// ext4 lives in init's (now dead) mount ns, so "not mounted here" is expected.
+#[cfg(target_os = "linux")]
+pub fn sync_and_unmount(newroot: &str) -> io::Result<()> {
+    if newroot.is_empty() {
+        return Err(invalid("empty newroot"));
+    }
+    debug_assert!(newroot.starts_with('/'));
+    unsafe { libc::sync() };
+    let c_newroot = CString::new(newroot).map_err(|_| invalid("nul in newroot"))?;
+    let rc = unsafe { libc::umount2(c_newroot.as_ptr(), libc::MNT_DETACH) };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::EINVAL | libc::ENOENT)) {
+            return Ok(());
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn ensure_dir(path: &str) -> io::Result<()> {
     match std::fs::create_dir(path) {
