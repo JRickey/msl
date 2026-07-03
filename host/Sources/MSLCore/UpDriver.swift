@@ -3,6 +3,7 @@ import Foundation
 
 /// Options for the `msl up` flow that are not part of the VM boot spec.
 public struct UpConfig: Sendable {
+    public let distroName: String
     public let hostname: String
     public let shell: Bool
     public let shellArgv: [String]
@@ -11,11 +12,13 @@ public struct UpConfig: Sendable {
     public let term: String
 
     public init(
-        hostname: String, shell: Bool, shellArgv: [String], home: String, hostCwd: String,
-        term: String
+        distroName: String, hostname: String, shell: Bool, shellArgv: [String], home: String,
+        hostCwd: String, term: String
     ) {
+        precondition(!distroName.isEmpty, "distro name must not be empty")
         precondition(!hostname.isEmpty, "hostname must not be empty")
         precondition(!shellArgv.isEmpty, "shell argv must not be empty")
+        self.distroName = distroName
         self.hostname = hostname
         self.shell = shell
         self.shellArgv = shellArgv
@@ -74,16 +77,28 @@ public final class UpDriver: @unchecked Sendable {
 
     private func bringUp(_ control: ControlClient) {
         do {
-            _ = try control.ping()
+            let ping = try control.ping()
+            warnProtocolMismatch(ping)
             let macShare = spec.shares.contains { $0.tag == "mac" }
             let distro = try control.distroUp(
-                dev: "/dev/vda", hostname: config.hostname, macShare: macShare)
+                name: config.distroName, dev: "/dev/vda", hostname: config.hostname,
+                macShare: macShare)
             if distro.state != "running" { failToStart(state: distro.state) }
         } catch {
             reportAndExit(error, code: 1)
         }
         syncTime(control)
         startPowerWake(control)
+    }
+
+    /// The agent ships in lockstep with this host, so a protocol other than 2 is
+    /// a warning, not a fatal error (per the M2b contract): log and proceed.
+    private func warnProtocolMismatch(_ ping: PingData) {
+        let reported = ping.protocolVersion ?? 0
+        guard reported != Proto.version else { return }
+        write(
+            line: "msl: warning: agent protocol \(reported) != expected \(Proto.version)",
+            to: FileHandle.standardError)
     }
 
     /// distro_up reported a non-running state: surface it and the console log,
@@ -113,7 +128,7 @@ public final class UpDriver: @unchecked Sendable {
     private func shutdownAndExit(_ code: Int32) -> Never {
         if let control {
             do {
-                _ = try control.distroDown(timeoutMs: 15000)
+                _ = try control.distroDown(name: config.distroName, timeoutMs: 15000)
             } catch {
                 write(
                     line: "msl: distro_down failed: \(describe(error))",
@@ -130,7 +145,7 @@ public final class UpDriver: @unchecked Sendable {
         let size = Terminal.windowSize(STDIN_FILENO) ?? Terminal.windowSize(STDOUT_FILENO)
         let open = SessionOpenReq(
             argv: config.shellArgv, cwd: cwd, env: ["TERM": config.term],
-            rows: size?.rows ?? 40, cols: size?.cols ?? 120, distro: true)
+            rows: size?.rows ?? 40, cols: size?.cols ?? 120, distro: config.distroName)
         let opened = try control.sessionOpen(open)
         let dataFD = try handshakeData(sessionID: opened.sessionID, token: opened.token)
         return try SessionAttach(
