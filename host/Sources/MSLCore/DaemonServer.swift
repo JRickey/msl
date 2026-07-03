@@ -47,6 +47,8 @@ public final class DaemonServer: @unchecked Sendable {
         switch request {
         case .attach(let sessionID, let token):
             return handleAttach(framed: framed, sessionID: sessionID, token: token)
+        case .guiConnect(let name):
+            return handleGuiConnect(framed: framed, name: name)
         case .shutdown:
             // Stop the VM (releasing image locks) before acknowledging, so the
             // client's "shut down" means resources are actually free.
@@ -102,6 +104,27 @@ public final class DaemonServer: @unchecked Sendable {
         let clientFD = framed.detachDescriptor()
         ByteRelay(clientFD: clientFD, guestFD: guestFD).run()
         core.endSession(sessionID: sessionID)
+        return false
+    }
+
+    /// GUI connect: open the guest surface plane, ACK, then relay the connection
+    /// raw until either side closes; balance the op reference on the way out.
+    private func handleGuiConnect(framed: VsockClient, name: String?) -> Bool {
+        let guestFD: Int32
+        do {
+            guestFD = try core.beginGuiConnect(name: name)
+        } catch {
+            _ = try? framed.send(errorFrame(describe(error)))
+            return true
+        }
+        guard (try? framed.send(okFrame(LocalEmpty()))) != nil else {
+            _ = Darwin.close(guestFD)
+            core.endGuiConnect()
+            return false
+        }
+        let clientFD = framed.detachDescriptor()
+        ByteRelay(clientFD: clientFD, guestFD: guestFD).run()
+        core.endGuiConnect()
         return false
     }
 

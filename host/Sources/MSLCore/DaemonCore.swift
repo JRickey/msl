@@ -137,6 +137,33 @@ public final class DaemonCore: @unchecked Sendable {
         }
     }
 
+    /// Ensure the VM + distro are up, then open the guest GUI surface plane
+    /// (vsock 5020). The raw fd is relayed to the client; `endGuiConnect` must
+    /// balance this call once the relay ends. Holds an op reference meanwhile so
+    /// the VM is not idle-reaped under a live presenter.
+    public func beginGuiConnect(name: String?) throws -> Int32 {
+        beginOp()
+        do {
+            let entry = try ensureUp(name)
+            assert(!entry.name.isEmpty, "resolved distro name must not be empty")
+            guard let host = withLock({ self.host }) else {
+                throw MSLError.configuration("VM not running")
+            }
+            let fd = try host.connectRaw(port: GuiProto.port, timeout: min(config.bootTimeout, 5))
+            assert(fd >= 0, "connectRaw returns a valid fd or throws")
+            return fd
+        } catch {
+            endOp()
+            throw error
+        }
+    }
+
+    /// Balance a successful `beginGuiConnect` when its relay finishes.
+    public func endGuiConnect() {
+        endOp()
+        withLock { lastActivity = Date() }
+    }
+
     /// Reap a session whose relay ended normally (guest closed on child exit).
     public func endSession(sessionID: UInt64) {
         reap(sessionID: sessionID, kill: false)

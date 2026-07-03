@@ -58,6 +58,19 @@ public final class LocalClient: @unchecked Sendable {
         return framed.detachDescriptor()
     }
 
+    /// Send `gui_connect`, read the framed `{ok}` reply, then detach the raw fd;
+    /// the connection is now a byte pipe to the guest surface plane (vsock 5020).
+    public func guiConnectRaw(name: String?) throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        try framed.send(try LocalRequest.guiConnect(name: name).encoded())
+        let reply = try LocalResponse<LocalEmpty>.decode(try framed.receive())
+        guard reply.ok else {
+            throw MSLError.remote(reply.error ?? "gui connect rejected")
+        }
+        return framed.detachDescriptor()
+    }
+
     private func roundTrip<Payload: Decodable & Sendable>(
         _ request: LocalRequest
     ) throws -> Payload {
