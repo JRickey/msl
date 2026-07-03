@@ -9,5 +9,6 @@ struct MSL: ParsableCommand {
             BootCommand.self, UpCommand.self, InstallCommand.self, ListCommand.self,
             RemoveCommand.self, DefaultCommand.self, DaemonCommand.self, ShellCommand.self,
             RunCommand.self, StatusCommand.self, StopCommand.self, ShutdownCommand.self,
+            ExportCommand.self,
         ])
 }
