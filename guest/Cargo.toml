@@ -1,5 +1,5 @@
 [workspace]
-members = ["agent", "wire", "shim"]
+members = ["agent", "wire", "shim", "way"]
 resolver = "3"
 
 [workspace.package]

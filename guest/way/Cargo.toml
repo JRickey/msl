@@ -1,0 +1,27 @@
+[package]
+name = "msl-way"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "msl-way"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+
+# The compositor terminates Wayland inside the guest; these link only for the
+# aarch64/x86_64 Linux target. Host builds (cargo test on macOS) compile the
+# pure-logic core alone — framing, ledger, pacing, damage packing.
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend"] }
+wayland-server = "0.31"
+calloop = "0.14"
+vsock = { workspace = true }
+
+[lints]
+workspace = true
