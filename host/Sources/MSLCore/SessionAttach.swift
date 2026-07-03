@@ -8,13 +8,24 @@ public enum AttachOutcome: Sendable {
     case signaled(Int32)
 }
 
+/// The control-side operations `SessionAttach` needs: resize (SIGWINCH) and the
+/// non-blocking exit poll. The vsock `ControlClient` and the daemon's
+/// `LocalClient` both satisfy this, so the same attach machinery drives `msl up`
+/// and `msl shell`.
+public protocol SessionControlChannel: Sendable {
+    func sessionResize(sessionID: UInt64, rows: UInt16, cols: UInt16) throws
+    func sessionWait(sessionID: UInt64) throws -> SessionWaitData
+}
+
+extension ControlClient: SessionControlChannel {}
+
 /// Binds a PTY-backed guest session to the local terminal. One thread pumps
 /// stdin -> data socket, another pumps data socket -> stdout; the second owns
 /// end-of-session detection (agent closes the data connection on child exit).
 /// SIGWINCH -> session_resize and terminating signals run on dedicated queues;
 /// the terminal is restored on every exit path.
 public final class SessionAttach: @unchecked Sendable {
-    private let control: ControlClient
+    private let control: any SessionControlChannel
     private let sessionID: UInt64
     private let dataFD: Int32
     private let inFD: Int32 = STDIN_FILENO
@@ -29,7 +40,7 @@ public final class SessionAttach: @unchecked Sendable {
     private var intSource: DispatchSourceSignal?
     private var termSource: DispatchSourceSignal?
 
-    public init(control: ControlClient, sessionID: UInt64, dataFD: Int32) {
+    public init(control: any SessionControlChannel, sessionID: UInt64, dataFD: Int32) {
         precondition(dataFD >= 0, "data-plane fd must be valid")
         self.control = control
         self.sessionID = sessionID

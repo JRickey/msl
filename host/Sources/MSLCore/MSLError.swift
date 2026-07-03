@@ -10,6 +10,7 @@ public enum MSLError: Error, CustomStringConvertible, Sendable {
     case io(String)
     case framing(String)
     case protocolMismatch(String)
+    case remote(String)
 
     /// Wrap a Foundation error as a `vzFailure`, preserving domain and code as
     /// the primary debugging surface for Virtualization.framework paths.
@@ -39,6 +40,8 @@ public enum MSLError: Error, CustomStringConvertible, Sendable {
             return "framing error: \(message)"
         case .protocolMismatch(let message):
             return "protocol error: \(message)"
+        case .remote(let message):
+            return message
         }
     }
 }

@@ -139,7 +139,7 @@ public final class ControlClient: @unchecked Sendable {
         let reply = try client.receive()
         let response = try Response<Payload>.decode(reply, expectedID: id)
         guard response.ok, let data = response.data else {
-            throw MSLError.protocolMismatch(response.error ?? "control request failed")
+            throw MSLError.remote(response.error ?? "control request failed")
         }
         return data
     }

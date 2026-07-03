@@ -147,23 +147,12 @@ public final class UpDriver: @unchecked Sendable {
             argv: config.shellArgv, cwd: cwd, env: ["TERM": config.term],
             rows: size?.rows ?? 40, cols: size?.cols ?? 120, distro: config.distroName)
         let opened = try control.sessionOpen(open)
-        let dataFD = try handshakeData(sessionID: opened.sessionID, token: opened.token)
+        let dataFD = try DataPlane.open(
+            host: host, sessionID: opened.sessionID, token: opened.token,
+            timeout: min(spec.timeout, 15))
         return try SessionAttach(
             control: control, sessionID: opened.sessionID, dataFD: dataFD
         ).run()
-    }
-
-    private func handshakeData(sessionID: UInt64, token: String) throws -> Int32 {
-        let fd = try host.connectRaw(port: Proto.dataPort, timeout: min(spec.timeout, 15))
-        let framed = try VsockClient(fileDescriptor: fd)
-        try framed.setReceiveTimeout(seconds: min(spec.timeout, 15))
-        try framed.send(try DataHandshake(sessionID: sessionID, token: token).encoded())
-        let reply = try DataHandshakeReply.decode(try framed.receive())
-        guard reply.ok else {
-            framed.close()
-            throw MSLError.protocolMismatch("data handshake rejected: \(reply.error ?? "unknown")")
-        }
-        return framed.detachDescriptor()
     }
 
     private func syncTime(_ control: ControlClient) {
