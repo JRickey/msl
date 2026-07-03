@@ -303,8 +303,10 @@ public final class InstallDriver {
             mkdir -p /mnt/mnt/mac
             [ -d /mnt/etc/cloud ] && touch /mnt/etc/cloud/cloud-init.disabled || true
             if [ -d /mnt/etc/netplan ]; then
-                printf "network:\\n  version: 2\\n  ethernets:\\n    all:\\n\
-              match: {name: \\"e*\\"}\\n      dhcp4: true\\n" > /mnt/etc/netplan/01-msl.yaml
+                printf "network:\\n  version: 2\\n  ethernets:\\n" \
+                    > /mnt/etc/netplan/01-msl.yaml
+                printf "    all:\\n      match: {name: \\"e*\\"}\\n      dhcp4: true\\n" \
+                    >> /mnt/etc/netplan/01-msl.yaml
                 chmod 600 /mnt/etc/netplan/01-msl.yaml
             fi
             /usr/sbin/chroot /mnt /usr/bin/passwd -d root || true

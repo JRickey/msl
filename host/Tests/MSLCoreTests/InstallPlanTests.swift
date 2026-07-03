@@ -125,6 +125,16 @@ final class InstallPlanTests: XCTestCase {
         XCTAssertTrue(
             script.contains("test -x /mnt/usr/lib/systemd/systemd || test -x /mnt/sbin/init"))
     }
+
+    func testBuildScriptSeedsValidNetplanIndentation() {
+        let script = InstallDriver.buildScript(
+            tarball: TarCompression.none.stagedFilename, hostname: "d",
+            tarFlag: TarCompression.none.tarExtractFlag)
+        // `match` must sit two levels under `all` (printf-escaped \n literals);
+        // a Swift line-continuation once collapsed this indent and broke DHCP.
+        XCTAssertTrue(script.contains("    all:\\n      match: {name:"))
+        XCTAssertFalse(script.contains("\n  match:"))
+    }
 }
 
 final class InstallStagingTests: XCTestCase {
