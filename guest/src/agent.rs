@@ -102,6 +102,9 @@ impl Agent {
             "session_wait" => self.handle_session_wait(req),
             "set_time" => Self::handle_set_time(req),
             "mkfs_ext4" => Self::handle_mkfs(req),
+            "mem_stats" => Self::handle_mem_stats(req.id),
+            "mem_reclaim" => Self::handle_mem_reclaim(req.id),
+            "net_listeners" => Self::handle_net_listeners(req.id),
             other => proto::encode_err(req.id, &format!("unknown op: {other}")),
         }
     }
@@ -292,6 +295,18 @@ impl Agent {
         });
         respond(req.id, result)
     }
+
+    fn handle_mem_stats(id: u64) -> Vec<u8> {
+        respond(id, do_mem_stats())
+    }
+
+    fn handle_mem_reclaim(id: u64) -> Vec<u8> {
+        respond(id, do_mem_reclaim())
+    }
+
+    fn handle_net_listeners(id: u64) -> Vec<u8> {
+        respond(id, do_net_listeners())
+    }
 }
 
 fn run_mkfs(dev: &str) -> Result<Empty, String> {
@@ -448,6 +463,37 @@ fn do_set_time(_sec: i64, _usec: i64) -> Result<(), String> {
     Err("set_time requires linux".to_string())
 }
 
+#[cfg(target_os = "linux")]
+fn do_mem_stats() -> Result<proto::MemStatsData, String> {
+    crate::mem::mem_stats()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn do_mem_stats() -> Result<proto::MemStatsData, String> {
+    Err("mem stats requires linux".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn do_mem_reclaim() -> Result<Empty, String> {
+    crate::mem::reclaim()?;
+    Ok(Empty {})
+}
+
+#[cfg(not(target_os = "linux"))]
+fn do_mem_reclaim() -> Result<Empty, String> {
+    Err("mem reclaim requires linux".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn do_net_listeners() -> Result<proto::NetListenersData, String> {
+    crate::net::listeners()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn do_net_listeners() -> Result<proto::NetListenersData, String> {
+    Err("net listeners require linux".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::Agent;
@@ -459,12 +505,38 @@ mod tests {
     }
 
     #[test]
-    fn ping_reports_protocol_two() {
+    fn ping_reports_protocol_three() {
         let value = call(&Agent::new(), r#"{"id":7,"op":"ping"}"#);
         assert_eq!(value["id"], 7);
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["agent"], "msl-agent");
-        assert_eq!(value["data"]["protocol"], 2);
+        assert_eq!(value["data"]["protocol"], 3);
+    }
+
+    // The three v1.3 ops route to their gated wrappers; on the host build those
+    // stubs report the linux requirement rather than "unknown op".
+    #[test]
+    fn mem_stats_routes() {
+        let value = call(&Agent::new(), r#"{"id":40,"op":"mem_stats"}"#);
+        assert_eq!(value["id"], 40);
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().expect("err").contains("linux"));
+    }
+
+    #[test]
+    fn mem_reclaim_routes() {
+        let value = call(&Agent::new(), r#"{"id":41,"op":"mem_reclaim"}"#);
+        assert_eq!(value["id"], 41);
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().expect("err").contains("linux"));
+    }
+
+    #[test]
+    fn net_listeners_routes() {
+        let value = call(&Agent::new(), r#"{"id":42,"op":"net_listeners"}"#);
+        assert_eq!(value["id"], 42);
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().expect("err").contains("linux"));
     }
 
     #[test]

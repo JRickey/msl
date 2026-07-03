@@ -12,6 +12,8 @@ mod distro;
 mod exec;
 mod frame;
 mod log;
+mod mem;
+mod net;
 mod proto;
 mod session;
 mod sys;
@@ -49,6 +51,7 @@ fn run_forever() -> ! {
         log::error(&format!("early mount failed: {e}"));
     }
     mount_shares();
+    mem::boot_tuning();
     let agent = Arc::new(Agent::new());
     server::spawn_background(&agent);
     // outer loop is intentional: PID 1 must never return; rebind on failure

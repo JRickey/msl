@@ -3,7 +3,7 @@
 //! and the blocking single-owner reaper thread that owns `waitpid`.
 
 use std::io;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::thread;
@@ -13,17 +13,20 @@ use serde::Serialize;
 use vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
 use crate::agent::Agent;
-use crate::proto::DataHello;
-use crate::{conn, frame, log, proto, session, sys, wait};
+use crate::proto::{DataHello, ForwardHello};
+use crate::{conn, frame, log, net, proto, session, sys, wait};
 
 const CONTROL_PORT: u32 = 5000;
 const DATA_PORT: u32 = 5001;
 const LOG_PORT: u32 = 5002;
+const FORWARD_PORT: u32 = 5003;
 const MAX_CONTROL_CONNS: usize = 16;
+const MAX_FORWARD_CONNS: usize = 64;
 const IDLE_POLL: Duration = Duration::from_millis(100);
 const REBIND_PAUSE: Duration = Duration::from_secs(1);
 
 static CONTROL_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static FORWARD_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Serialize)]
 struct HelloReply<'a> {
@@ -41,6 +44,9 @@ pub fn spawn_background(agent: &Arc<Agent>) {
     let _ = thread::Builder::new()
         .name("data".to_string())
         .spawn(move || data_listener_loop(&data));
+    let _ = thread::Builder::new()
+        .name("forward".to_string())
+        .spawn(forward_listener_loop);
     let _ = thread::Builder::new()
         .name("logs".to_string())
         .spawn(log_listener_loop);
@@ -164,6 +170,55 @@ fn write_hello(stream: &mut VsockStream, error: Option<&str>) {
     };
     if let Ok(body) = serde_json::to_vec(&reply) {
         let _ = frame::write_frame(stream, &body);
+    }
+}
+
+fn forward_listener_loop() -> ! {
+    // sanctioned infinite rebind loop: the forward listener must always recover
+    loop {
+        match bind(FORWARD_PORT) {
+            Ok(listener) => forward_accept_loop(&listener),
+            Err(e) => {
+                log::error(&format!("forward bind failed: {e}"));
+                thread::sleep(REBIND_PAUSE);
+            }
+        }
+    }
+}
+
+fn forward_accept_loop(listener: &VsockListener) {
+    // sanctioned infinite accept loop: forward connections, one thread each
+    loop {
+        let Ok((stream, _addr)) = listener.accept() else {
+            return;
+        };
+        let _ = sys::set_cloexec(stream.as_raw_fd());
+        let _ = thread::Builder::new()
+            .name("fwd".to_string())
+            .spawn(move || handle_forward(stream));
+    }
+}
+
+// One guest TCP connection proxied per vsock connection: framed {"port"} hello,
+// cap check, dial loopback, then relay raw bytes until either side closes.
+fn handle_forward(mut stream: VsockStream) {
+    let Ok(payload) = frame::read_frame(&mut stream) else {
+        return;
+    };
+    let Ok(hello) = serde_json::from_slice::<ForwardHello>(&payload) else {
+        write_hello(&mut stream, Some("bad forward handshake"));
+        return;
+    };
+    let Some(_slot) = conn::try_reserve(&FORWARD_ACTIVE, MAX_FORWARD_CONNS) else {
+        write_hello(&mut stream, Some("too many forwarded connections"));
+        return;
+    };
+    match net::forward_connect(hello.port) {
+        Ok(tcp) => {
+            write_hello(&mut stream, None);
+            net::pump_streams(tcp.into_raw_fd(), stream.into_raw_fd());
+        }
+        Err(message) => write_hello(&mut stream, Some(&message)),
     }
 }
 

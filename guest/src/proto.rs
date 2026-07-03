@@ -8,7 +8,7 @@ use serde_json::Value;
 
 pub const AGENT_NAME: &str = "msl-agent";
 pub const AGENT_VERSION: &str = "0.0.1";
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +97,11 @@ pub struct DataHello {
     pub token: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ForwardHello {
+    pub port: u16,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PingData {
     pub agent: &'static str,
@@ -146,6 +151,21 @@ pub struct SessionOpenData {
 pub struct SessionWaitData {
     pub done: bool,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemStatsData {
+    pub mem_total_kib: u64,
+    pub mem_available_kib: u64,
+    pub swap_total_kib: u64,
+    pub swap_free_kib: u64,
+    pub psi_some_avg10: f64,
+    pub psi_full_avg10: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetListenersData {
+    pub ports: Vec<u16>,
 }
 
 #[derive(Debug, Serialize)]
