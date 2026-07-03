@@ -505,12 +505,12 @@ mod tests {
     }
 
     #[test]
-    fn ping_reports_protocol_three() {
+    fn ping_reports_protocol_four() {
         let value = call(&Agent::new(), r#"{"id":7,"op":"ping"}"#);
         assert_eq!(value["id"], 7);
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["agent"], "msl-agent");
-        assert_eq!(value["data"]["protocol"], 3);
+        assert_eq!(value["data"]["protocol"], 4);
     }
 
     // The three v1.3 ops route to their gated wrappers; on the host build those

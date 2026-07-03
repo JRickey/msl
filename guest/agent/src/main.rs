@@ -67,10 +67,14 @@ fn run_forever() -> ! {
 fn mount_shares() {
     let _ = std::fs::create_dir_all("/run/msl/mac");
     let _ = std::fs::create_dir_all("/run/msl/staging");
+    let _ = std::fs::create_dir_all("/run/msl/rosetta");
     if sys::mount_share("mac", "/run/msl/mac").is_ok() {
         log::info("mounted virtiofs share 'mac' at /run/msl/mac");
     }
     let _ = sys::mount_share("staging", "/run/msl/staging");
+    if sys::mount_share("rosetta", "/run/msl/rosetta").is_ok() {
+        log::info("mounted virtiofs share 'rosetta' at /run/msl/rosetta");
+    }
 }
 
 #[cfg(target_os = "linux")]

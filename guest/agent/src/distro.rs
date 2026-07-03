@@ -352,12 +352,14 @@ mod linux {
     use super::{DOWN_MAX_MS, Distros, validate_dev, validate_hostname, validate_name};
     use crate::exec::{self, ExecOpts};
     use crate::proto::{DistroStateData, DistroUpReq};
-    use crate::sys::{self, BootSpec, MountOp, ToolsBind};
+    use crate::sys::{self, BootSpec, MountOp, RosettaBind, ToolsBind};
 
     const DISTRO_ROOT: &str = "/run/msl/distros";
     const MAC_SRC: &str = "/run/msl/mac";
     // The initramfs directory holding the projected interop shim (ADR 0008).
     const TOOLS_SRC: &str = "/tools";
+    // The agent-ns mount of the VM's Rosetta virtiofs share (ADR 0001).
+    const ROSETTA_SRC: &str = "/run/msl/rosetta";
     const READY_TICKS: u32 = 50;
     const TICK: Duration = Duration::from_millis(100);
     const DOWN_TICK: Duration = Duration::from_millis(100);
@@ -509,12 +511,14 @@ mod linux {
             None
         };
         let tools = prepare_tools(&newroot)?;
+        let rosetta = prepare_rosetta(req.rosetta, &newroot)?;
         Ok(BootSpec {
             dev: cstr(&req.dev)?,
             newroot: cstr(&newroot)?,
             mounts: guest_mounts(&newroot)?,
             mac,
             tools,
+            rosetta,
             hostname: cstr(&req.hostname)?,
             argv: vec![cstr("/sbin/init")?],
             envp: vec![
@@ -538,6 +542,22 @@ mod linux {
             link: cstr(&format!("{newroot}/usr/local/bin/mac"))?,
             binfmt_dir: cstr(&format!("{newroot}/etc/binfmt.d"))?,
             binfmt_conf: cstr(&format!("{newroot}/etc/binfmt.d/msl-macho.conf"))?,
+        }))
+    }
+
+    // Set up x86-64 translation when the distro opted in and the VM attached
+    // the share; an absent share (Rosetta off host-side) degrades to None.
+    fn prepare_rosetta(enabled: bool, newroot: &str) -> Result<Option<RosettaBind>, String> {
+        assert!(!newroot.is_empty(), "rosetta projection needs a newroot");
+        if !enabled || !Path::new(ROSETTA_SRC).exists() {
+            return Ok(None);
+        }
+        Ok(Some(RosettaBind {
+            src: cstr(ROSETTA_SRC)?,
+            parent: cstr(&format!("{newroot}/run/msl"))?,
+            target: cstr(&format!("{newroot}/run/msl/rosetta"))?,
+            binfmt_dir: cstr(&format!("{newroot}/etc/binfmt.d"))?,
+            binfmt_conf: cstr(&format!("{newroot}/etc/binfmt.d/rosetta.conf"))?,
         }))
     }
 

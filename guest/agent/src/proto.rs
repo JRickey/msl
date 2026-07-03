@@ -8,7 +8,7 @@ use serde_json::Value;
 
 pub const AGENT_NAME: &str = "msl-agent";
 pub const AGENT_VERSION: &str = "0.0.1";
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +35,8 @@ pub struct DistroUpReq {
     pub hostname: String,
     #[serde(default)]
     pub mac_share: bool,
+    #[serde(default)]
+    pub rosetta: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]

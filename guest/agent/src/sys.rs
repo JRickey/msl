@@ -410,6 +410,22 @@ pub struct ToolsBind {
 pub const BINFMT_CONF: &[u8] = b":msl-macho:M::\\xcf\\xfa\\xed\\xfe::/run/msl/tools/mac-binfmt:F\n\
 :msl-macho-fat:M::\\xca\\xfe\\xba\\xbe::/run/msl/tools/mac-binfmt:F\n";
 
+// Read-only bind of the VM's Rosetta virtiofs share into a distro plus the
+// binfmt.d drop-in that registers x86-64 ELF against the pinned interpreter.
+#[cfg(target_os = "linux")]
+pub struct RosettaBind {
+    pub src: CString,
+    pub parent: CString,
+    pub target: CString,
+    pub binfmt_dir: CString,
+    pub binfmt_conf: CString,
+}
+
+// binfmt.d drop-in registering 64-bit LE x86-64 ELF (EM_X86_64 == 0x3e,
+// exec-or-dyn) against Rosetta. F pins /run/msl/rosetta/rosetta at boot.
+#[cfg(target_os = "linux")]
+pub const ROSETTA_CONF: &[u8] = b":rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:/run/msl/rosetta/rosetta:F\n";
+
 #[cfg(target_os = "linux")]
 pub struct BootSpec {
     pub dev: CString,
@@ -417,6 +433,7 @@ pub struct BootSpec {
     pub mounts: Vec<MountOp>,
     pub mac: Option<(CString, CString)>,
     pub tools: Option<ToolsBind>,
+    pub rosetta: Option<RosettaBind>,
     pub hostname: CString,
     pub argv: Vec<CString>,
     pub envp: Vec<CString>,
@@ -509,6 +526,9 @@ unsafe fn child_mounts(spec: &BootSpec) {
         if let Some(tools) = &spec.tools {
             bind_tools(tools);
         }
+        if let Some(rosetta) = &spec.rosetta {
+            bind_rosetta(rosetta);
+        }
     }
 }
 
@@ -561,6 +581,61 @@ unsafe fn seed_binfmt(tools: &ToolsBind) {
         }
         let rc = libc::write(fd, BINFMT_CONF.as_ptr().cast(), BINFMT_CONF.len());
         debug_assert!(rc <= BINFMT_CONF.len().cast_signed(), "write within bounds");
+        libc::close(fd);
+    }
+}
+
+// Read-only bind of the Rosetta share into the distro, then its binfmt.d
+// drop-in. A writable bind would let a distro tamper with the shared interp.
+#[cfg(target_os = "linux")]
+unsafe fn bind_rosetta(rosetta: &RosettaBind) {
+    unsafe {
+        libc::mkdir(rosetta.parent.as_ptr(), 0o755);
+        libc::mkdir(rosetta.target.as_ptr(), 0o755);
+        if libc::mount(
+            rosetta.src.as_ptr(),
+            rosetta.target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        ) != 0
+        {
+            return;
+        }
+        if libc::mount(
+            std::ptr::null(),
+            rosetta.target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY,
+            std::ptr::null(),
+        ) != 0
+        {
+            libc::umount(rosetta.target.as_ptr());
+            return;
+        }
+        seed_rosetta(rosetta);
+    }
+}
+
+// Drop the systemd binfmt.d config so the distro registers x86-64 ELF against
+// Rosetta at boot. Best-effort: a write failure just leaves x86 translation off.
+#[cfg(target_os = "linux")]
+unsafe fn seed_rosetta(rosetta: &RosettaBind) {
+    unsafe {
+        libc::mkdir(rosetta.binfmt_dir.as_ptr(), 0o755);
+        let fd = libc::open(
+            rosetta.binfmt_conf.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        );
+        if fd < 0 {
+            return;
+        }
+        let rc = libc::write(fd, ROSETTA_CONF.as_ptr().cast(), ROSETTA_CONF.len());
+        debug_assert!(
+            rc <= ROSETTA_CONF.len().cast_signed(),
+            "write within bounds"
+        );
         libc::close(fd);
     }
 }
@@ -976,6 +1051,22 @@ mod tests {
         for line in text.lines() {
             assert!(
                 line.ends_with("/run/msl/tools/mac-binfmt:F"),
+                "F-pinned interp"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rosetta_conf_registers_x86_64_elf_against_the_pinned_interp() {
+        let text = std::str::from_utf8(super::ROSETTA_CONF).expect("utf8 drop-in");
+        assert!(
+            text.contains(r"\x3e\x00"),
+            "carries the x86-64 machine bytes"
+        );
+        for line in text.lines() {
+            assert!(
+                line.ends_with("/run/msl/rosetta/rosetta:F"),
                 "F-pinned interp"
             );
         }
