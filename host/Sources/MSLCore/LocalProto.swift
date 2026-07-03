@@ -25,6 +25,7 @@ public enum LocalRequest: Sendable, Equatable {
     case down(name: String?, all: Bool, timeoutMs: UInt64?)
     case shell(ShellRequest)
     case attach(sessionID: UInt64, token: String)
+    case guiConnect(name: String?)
     case resize(sessionID: UInt64, rows: UInt16, cols: UInt16)
     case signal(sessionID: UInt64, signal: Int32)
     case wait(sessionID: UInt64)
@@ -95,6 +96,9 @@ extension LocalRequest: Codable {
             try container.encode("attach", forKey: .op)
             try container.encode(sessionID, forKey: .sessionID)
             try container.encode(token, forKey: .token)
+        case .guiConnect(let name):
+            try container.encode("gui_connect", forKey: .op)
+            try container.encodeIfPresent(name, forKey: .name)
         case .resize(let sessionID, let rows, let cols):
             try container.encode("resize", forKey: .op)
             try container.encode(sessionID, forKey: .sessionID)
@@ -141,6 +145,17 @@ extension LocalRequest: Codable {
                 all: try container.decodeIfPresent(Bool.self, forKey: .all) ?? false,
                 timeoutMs: try container.decodeIfPresent(UInt64.self, forKey: .timeoutMs))
         case "shell": return .shell(try decodeShell(from: container))
+        case "gui_connect":
+            return .guiConnect(name: try container.decodeIfPresent(String.self, forKey: .name))
+        case "shutdown": return .shutdown
+        default: return try decodeSessionOp(op, from: container)
+        }
+    }
+
+    private static func decodeSessionOp(
+        _ op: String, from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> LocalRequest {
+        switch op {
         case "attach":
             return .attach(
                 sessionID: try container.decode(UInt64.self, forKey: .sessionID),
@@ -155,7 +170,6 @@ extension LocalRequest: Codable {
                 sessionID: try container.decode(UInt64.self, forKey: .sessionID),
                 signal: try container.decode(Int32.self, forKey: .signal))
         case "wait": return .wait(sessionID: try container.decode(UInt64.self, forKey: .sessionID))
-        case "shutdown": return .shutdown
         default: throw MSLError.protocolMismatch("unknown local op: \(op)")
         }
     }
