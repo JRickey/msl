@@ -23,11 +23,12 @@ private struct RectSpec {
 
 private func buildCommit(
     win: UInt32 = 1, seq: UInt32 = 7, width: UInt32 = 4, height: UInt32 = 4, stride: UInt32 = 16,
-    format: UInt32 = 1, scaleE12: UInt32 = 4096, rects: [RectSpec], pixels: [UInt8],
-    tClient: UInt64 = 111, tSend: UInt64 = 222
+    format: UInt32 = 1, scaleE12: UInt32 = 4096, serial: UInt32 = 0, reserved: UInt32 = 0,
+    rects: [RectSpec], pixels: [UInt8], tClient: UInt64 = 111, tSend: UInt64 = 222
 ) -> Data {
     var bytes = le32(win) + le32(seq) + le32(width) + le32(height) + le32(stride) + le32(format)
-    bytes += le32(scaleE12) + le32(UInt32(rects.count)) + le64(tClient) + le64(tSend)
+    bytes += le32(scaleE12) + le32(UInt32(rects.count)) + le32(serial) + le32(reserved)
+    bytes += le64(tClient) + le64(tSend)
     for rect in rects {
         bytes += le32(rect.originX) + le32(rect.originY) + le32(rect.width) + le32(rect.height)
     }
@@ -135,15 +136,44 @@ final class GuiCommitParserTests: XCTestCase {
     func testValidCommitParses() throws {
         let commit = try GuiProto.parseCommit(
             buildCommit(
+                serial: 5,
                 rects: [RectSpec(originX: 0, originY: 0, width: 2, height: 2)],
                 pixels: [UInt8](repeating: 7, count: 16)))
         XCTAssertEqual(commit.win, 1)
         XCTAssertEqual(commit.seq, 7)
+        XCTAssertEqual(commit.serial, 5)
         XCTAssertEqual(commit.rects.count, 1)
         XCTAssertEqual(commit.pixels.count, 16)
         XCTAssertEqual(commit.scale, 1.0, accuracy: 0.0001)
         XCTAssertEqual(commit.tClientCommitNs, 111)
         XCTAssertEqual(commit.tSendNs, 222)
+    }
+
+    func testSerialLandsAndReservedIgnored() throws {
+        let commit = try GuiProto.parseCommit(
+            buildCommit(
+                serial: 42, reserved: 0xdead_beef,
+                rects: [RectSpec(originX: 0, originY: 0, width: 2, height: 2)],
+                pixels: [UInt8](repeating: 0, count: 16)))
+        XCTAssertEqual(commit.serial, 42, "serial parses at offset 32")
+    }
+
+    func testTimestampsSurviveSerialInsertion() throws {
+        let commit = try GuiProto.parseCommit(
+            buildCommit(
+                serial: 9,
+                rects: [RectSpec(originX: 0, originY: 0, width: 2, height: 2)],
+                pixels: [UInt8](repeating: 0, count: 16), tClient: 777, tSend: 888))
+        XCTAssertEqual(commit.tClientCommitNs, 777, "t_client stays 8-byte aligned at offset 40")
+        XCTAssertEqual(commit.tSendNs, 888, "t_send stays 8-byte aligned at offset 48")
+    }
+
+    func testRejects53ByteTruncatedHeader() {
+        XCTAssertThrowsError(try GuiProto.parseCommit(Data([UInt8](repeating: 0, count: 53))))
+    }
+
+    func testRejects55ByteTruncatedHeader() {
+        XCTAssertThrowsError(try GuiProto.parseCommit(Data([UInt8](repeating: 0, count: 55))))
     }
 
     func testMultipleRectsPackTightly() throws {

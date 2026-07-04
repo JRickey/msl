@@ -129,7 +129,7 @@ final class KeepLatestTests: XCTestCase {
 final class GuiCommitRouterTests: XCTestCase {
     private func held(_ seq: UInt32) -> GuiHeldCommit {
         let commit = GuiCommit(
-            win: 5, seq: seq, width: 4, height: 4, stride: 16, format: 1, scaleE12: 4096,
+            win: 5, seq: seq, width: 4, height: 4, stride: 16, format: 1, scaleE12: 4096, serial: 0,
             rects: [], tClientCommitNs: 0, tSendNs: 0, pixels: Data())
         return GuiHeldCommit(commit: commit, recvNs: 0)
     }

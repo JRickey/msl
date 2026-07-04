@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import IOSurface
 import QuartzCore
 
 /// Callbacks a `GuiWindow` makes back into the presenter (ledger + lifecycle).
@@ -11,56 +10,9 @@ public protocol GuiHost: AnyObject {
     func windowClosed(_ win: UInt32)
 }
 
-/// A BGRA IOSurface backing one window; damaged rects are copied in honoring
-/// the destination row stride. Touched only on the main thread.
-@MainActor
-final class GuiSurface {
-    let ioSurface: IOSurface
-    let width: Int
-    let height: Int
-
-    init?(width: Int, height: Int) {
-        guard width > 0, height > 0, width <= 16384, height <= 16384 else { return nil }
-        let props: [IOSurfacePropertyKey: any Sendable] = [
-            .width: width, .height: height, .bytesPerElement: 4,
-            .pixelFormat: UInt32(0x4247_5241),
-        ]
-        guard let surface = IOSurface(properties: props) else { return nil }
-        self.ioSurface = surface
-        self.width = width
-        self.height = height
-    }
-
-    /// Copy each damaged rect's row-packed pixels into the surface. Dimensions
-    /// must match; the parser already proved every rect lies in-bounds.
-    func apply(_ commit: GuiCommit) {
-        precondition(commit.width == UInt32(width), "commit width must match surface")
-        precondition(commit.height == UInt32(height), "commit height must match surface")
-        guard !commit.rects.isEmpty else { return }
-        guard ioSurface.lock(options: [], seed: nil) == 0 else { return }
-        defer { _ = ioSurface.unlock(options: [], seed: nil) }
-        let dstStride = ioSurface.bytesPerRow
-        let base = ioSurface.baseAddress
-        commit.pixels.withUnsafeBytes { raw in
-            guard let src = raw.baseAddress else { return }
-            var srcOff = 0
-            for rect in commit.rects {  // bounded: ≤ maxRects (4096)
-                let rowBytes = Int(rect.width) * 4
-                for row in 0..<Int(rect.height) {  // bounded: ≤ surface height
-                    let dstOff = (Int(rect.originY) + row) * dstStride + Int(rect.originX) * 4
-                    assert(dstOff + rowBytes <= dstStride * height, "row copy stays in surface")
-                    assert(srcOff + rowBytes <= raw.count, "row copy stays in payload")
-                    memcpy(base.advanced(by: dstOff), src.advanced(by: srcOff), rowBytes)
-                    srcOff += rowBytes
-                }
-            }
-        }
-    }
-}
-
-/// One native window for a remote toplevel: presents the backing surface at
-/// display-link cadence, paces present_acks, translates NSEvents to protocol
-/// input, and tracks live resize without ever blocking the main thread.
+/// One native window for a remote toplevel: presents from a surface pool at
+/// display-link cadence, paces present_acks, applies the size-authority
+/// verdict, and translates NSEvents without ever blocking the main thread.
 @MainActor
 final class GuiWindow: NSObject, NSWindowDelegate {
     let win: UInt32
@@ -70,43 +22,44 @@ final class GuiWindow: NSObject, NSWindowDelegate {
 
     private let window: NSWindow
     private let view: GuiSurfaceView
-    private var surface: GuiSurface
+    private let pool: GuiSurfacePool
     private var pacer = GuiPacer()
     private var displayLink: CADisplayLink?
 
-    private var configureSerial: UInt32 = 0
-    private var resizePending: (w: UInt32, h: UInt32)?
-    private var resizing = false
-
-    private var appliedSeq: UInt32 = 0
-    private var appliedRecvNs: UInt64 = 0
-    private var appliedClientNs: UInt64 = 0
-    private var appliedSendNs: UInt64 = 0
-    private var haveApplied = false
+    private var sentSerial: UInt32 = 0
+    private var sizeState: GuiSizeState = .settled
+    private var remoteApplying = false
+    private var resizePending: GuiSizePoints?
+    private var pending: GuiHeldCommit?
     private var pendingInput: (kind: String, tNs: UInt64)?
+    private var loggedPartialResize = false
+    private var loggedSerialBug = false
 
     init?(spec: GuiWinNew, channel: GuiChannel, host: GuiHost, latch: GuiCommitLatch) {
         guard spec.scale > 0, spec.width > 0, spec.height > 0 else { return nil }
-        guard let surface = GuiSurface(width: Int(spec.width), height: Int(spec.height))
+        guard let pool = GuiSurfacePool(width: Int(spec.width), height: Int(spec.height))
         else { return nil }
         self.win = spec.win
         self.latch = latch
         self.channel = channel
         self.host = host
-        self.surface = surface
-        let logical = NSRect(
-            x: 0, y: 0, width: Double(spec.width) / spec.scale,
-            height: Double(spec.height) / spec.scale)
+        self.pool = pool
+        let desired = GuiSizePoints(
+            width: Double(spec.width) / spec.scale, height: Double(spec.height) / spec.scale)
+        let clamped = GuiWindow.clamp(desired, to: NSScreen.main)
+        let logical = NSRect(x: 0, y: 0, width: clamped.width, height: clamped.height)
         self.window = NSWindow(
             contentRect: logical, styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         self.view = GuiSurfaceView(frame: logical)
         super.init()
         configureWindow(title: spec.title, scale: spec.scale)
+        if clamped != desired { enqueueConfigure(clamped) }
     }
 
     private func configureWindow(title: String, scale: Double) {
         assert(scale > 0, "window scale must be positive")
+        assert(view.owner == nil, "view is freshly created")
         window.title = title.isEmpty ? "msl" : title
         // Swift owns the window's lifetime (held in the presenter's dict); without
         // this AppKit over-releases it on close and crashes in the close animation.
@@ -118,13 +71,10 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         view.wantsLayer = true
         view.layerContentsRedrawPolicy = .never
         if let layer = view.layer {
-            layer.contentsGravity = .resize
+            layer.contentsGravity = .resizeAspect
             layer.contentsScale = scale
-            layer.contents = surface.ioSurface
         }
     }
-
-    // MARK: - Lifecycle
 
     func mapWindow() {
         window.makeKeyAndOrderFront(nil)
@@ -152,6 +102,7 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         displayLink?.invalidate()
         displayLink = nil
         view.layer?.contents = nil
+        pool.detach()
         window.delegate = nil
         view.owner = nil
     }
@@ -170,73 +121,126 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         assert(displayLink != nil, "display link must be installed")
     }
 
-    // MARK: - Present pipeline
+    @objc private func step() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        // An owed configure advances sentSerial before any commit is judged, so a
+        // commit echoing the prior serial is stale (pixels only), never re-applied.
+        emitPendingConfigure()
+        drainAndDecide()
+        guard !pacer.isUnacked, pacer.hasPending, let held = pending else { return }
+        guard ensurePool(held.commit) else { return }
+        guard let target = pool.reusableTarget() else { return }
+        guard case .present(let seq) = pacer.tick() else { return }
+        presentFrame(held: held, target: target, seq: seq)
+    }
 
-    /// Copy the latest coalesced commit into the backing surface. Called only
-    /// from the display tick, so at most one pixel copy happens per frame no
-    /// matter how many commits the peer sent since the last tick.
-    private func applyLatest() {
+    /// Drain the newest coalesced commit, run the size-authority verdict against
+    /// its serial, and record it as pending (kept until a tick presents it).
+    private func drainAndDecide() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let held = latch.take() else { return }
         assert(held.commit.win == win, "commit routed to the wrong window")
-        applyToSurface(held.commit)
-        appliedSeq = held.commit.seq
-        appliedRecvNs = held.recvNs
-        appliedClientNs = held.commit.tClientCommitNs
-        appliedSendNs = held.commit.tSendNs
-        haveApplied = true
+        pending = held
+        applySizeVerdict(held.commit)
         pacer.onCommit(seq: held.commit.seq)
+        assert(pending != nil, "drain leaves a pending commit")
     }
 
-    private func applyToSurface(_ commit: GuiCommit) {
-        let bufferChanged =
-            commit.width != UInt32(surface.width) || commit.height != UInt32(surface.height)
-        if bufferChanged {
-            guard let fresh = GuiSurface(width: Int(commit.width), height: Int(commit.height))
-            else { return }
-            surface = fresh
-            view.layer?.contents = fresh.ioSurface
-        }
-        view.layer?.contentsScale = commit.scale > 0 ? commit.scale : 1
-        if bufferChanged { syncLogicalSize(commit) }
-        surface.apply(commit)
-    }
-
-    /// Size the window content in logical points = buffer_pixels / scale so the
-    /// layer maps 1:1 at the backing scale (sharp Retina). Skipped during a user
-    /// live resize so it never fights the drag.
-    private func syncLogicalSize(_ commit: GuiCommit) {
-        guard !resizing, commit.scale > 0 else { return }
-        let logical = NSSize(
-            width: Double(commit.width) / commit.scale, height: Double(commit.height) / commit.scale
-        )
-        guard logical.width >= 1, logical.height >= 1 else { return }
-        if view.bounds.width != logical.width || view.bounds.height != logical.height {
-            window.setContentSize(logical)
+    private func applySizeVerdict(_ commit: GuiCommit) {
+        let buffer = GuiSizing.bufferPoints(
+            widthPx: commit.width, heightPx: commit.height, scaleE12: commit.scaleE12)
+        let content = boundsPoints()
+        let verdict = GuiSizing.verdict(
+            state: sizeState, sentSerial: sentSerial, commitSerial: commit.serial,
+            bufferPoints: buffer, contentPoints: content)
+        assert(content.width >= 0 && content.height >= 0, "content points non-negative")
+        switch verdict {
+        case .pixelsOnly: break
+        case .pixelsOnlyStaleFuture: logSerialBugOnce(commit.serial)
+        case .applyGeometry(let points): applyRemoteGeometry(points)
         }
     }
 
-    @objc private func step() {
+    /// Rule 3: apply the client's buffer points once under a guard that suppresses
+    /// the echo configure; if the clamp shrank the size, tell the guest with one.
+    private func applyRemoteGeometry(_ points: GuiSizePoints) {
         dispatchPrecondition(condition: .onQueue(.main))
-        applyLatest()
-        emitPendingConfigure()
-        guard case .present(let seq) = pacer.tick() else { return }
-        presentFrame(seq: seq)
+        let clamped = GuiWindow.clamp(points, to: window.screen ?? NSScreen.main)
+        guard clamped.width >= 1, clamped.height >= 1 else { return }
+        remoteApplying = true
+        window.setContentSize(NSSize(width: clamped.width, height: clamped.height))
+        remoteApplying = false
+        assert(!remoteApplying, "remote-apply guard cleared after setContentSize")
+        if clamped != points { enqueueConfigure(clamped) }
     }
 
-    private func presentFrame(seq: UInt32) {
+    /// Reallocate the pool on a buffer-size change; the guest sends full damage on
+    /// resize, so a partial-damage resize is logged once and the rest left blank.
+    private func ensurePool(_ commit: GuiCommit) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
-        assert(haveApplied, "present requires an applied commit")
-        let tPresent = commitLayer()
-        let ack = GuiPresentAck(
-            win: win, seq: seq, tRecvNs: appliedRecvNs, tPresentNs: tPresent)
+        if Int(commit.width) == pool.width, Int(commit.height) == pool.height { return true }
+        guard pool.resize(width: Int(commit.width), height: Int(commit.height)) else {
+            return false
+        }
+        if !commitCoversFullBuffer(commit) { logPartialResizeOnce() }
+        assert(pool.front == nil, "resized pool has no front surface")
+        return true
+    }
+
+    private func commitCoversFullBuffer(_ commit: GuiCommit) -> Bool {
+        assert(commit.width > 0 && commit.height > 0, "commit dimensions positive")
+        for rect in commit.rects {  // bounded: ≤ maxRects
+            let atOrigin = rect.originX == 0 && rect.originY == 0
+            let fullSize = rect.width == commit.width && rect.height == commit.height
+            if atOrigin, fullSize { return true }
+        }
+        return false
+    }
+
+    /// Bring `target` current (full copy of the on-screen frame, then this commit's
+    /// damage), swap it in as the front surface in one CATransaction, and ack.
+    private func presentFrame(held: GuiHeldCommit, target: GuiSurface, seq: UInt32) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        assert(target.reusable, "present target must be reusable")
+        if let front = pool.front { target.copyContents(from: front) }
+        target.apply(held.commit)
+        let outgoing = pool.promote(target)
+        let scale = held.commit.scale > 0 ? held.commit.scale : 1
+        let tPresent = commitLayer(target: target, scale: scale, outgoing: outgoing)
+        recordAndAck(held: held, seq: seq, tPresent: tPresent)
+    }
+
+    private func commitLayer(target: GuiSurface, scale: Double, outgoing: GuiSurface?) -> UInt64 {
+        dispatchPrecondition(condition: .onQueue(.main))
+        assert(scale > 0, "contents scale must be positive")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let layer = view.layer {
+            if layer.contentsScale != scale { layer.contentsScale = scale }
+            layer.contents = target.ioSurface
+        }
+        if let outgoing {
+            // CA may fire this off the main thread; hop before touching actor state.
+            CATransaction.setCompletionBlock {
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { outgoing.reusable = true }
+                }
+            }
+        }
+        CATransaction.commit()
+        return GuiClock.nowNs()
+    }
+
+    private func recordAndAck(held: GuiHeldCommit, seq: UInt32, tPresent: UInt64) {
+        assert(tPresent > 0, "present timestamp is monotonic non-zero")
+        let ack = GuiPresentAck(win: win, seq: seq, tRecvNs: held.recvNs, tPresentNs: tPresent)
         if let payload = try? GuiProto.encode(ack) {
             channel.send(type: GuiType.presentAck.rawValue, flags: 0, payload: payload)
         }
         host?.ledgerCommit(
             GuiCommitSample(
-                win: win, seq: seq, tRecvNs: appliedRecvNs, tPresentNs: tPresent,
-                tClientCommitNs: appliedClientNs, tSendNs: appliedSendNs))
+                win: win, seq: seq, tRecvNs: held.recvNs, tPresentNs: tPresent,
+                tClientCommitNs: held.commit.tClientCommitNs, tSendNs: held.commit.tSendNs))
         if let input = pendingInput {
             host?.ledgerInput(
                 GuiInputSample(
@@ -246,39 +250,43 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         pacer.onAck()
     }
 
-    private func commitLayer() -> UInt64 {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        view.layer?.contents = surface.ioSurface
-        CATransaction.commit()
-        return GuiClock.nowNs()
-    }
-
-    // MARK: - Resize (never blocks on the guest)
-
     func windowWillStartLiveResize(_ notification: Notification) {
-        resizing = true
+        sizeState = .liveResize
     }
 
     func windowDidResize(_ notification: Notification) {
-        let bounds = view.bounds
-        resizePending = (UInt32(max(1, bounds.width)), UInt32(max(1, bounds.height)))
+        guard !remoteApplying else { return }
+        resizePending = boundsPoints()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
-        resizing = false
+        sizeState = .settled
+        resizePending = boundsPoints()
+    }
+
+    private func boundsPoints() -> GuiSizePoints {
         let bounds = view.bounds
-        resizePending = (UInt32(max(1, bounds.width)), UInt32(max(1, bounds.height)))
+        return GuiSizePoints(
+            width: max(1, Double(bounds.width)), height: max(1, Double(bounds.height)))
     }
 
     private func emitPendingConfigure() {
-        guard let size = resizePending else { return }
+        guard let points = resizePending else { return }
         resizePending = nil
-        configureSerial += 1
-        let states = resizing ? ["activated", "resizing"] : ["activated"]
+        enqueueConfigure(points)
+    }
+
+    /// Stamp the next serial (monotonic from 1) and send one configure in the
+    /// window's current state (resizing state only during a live drag).
+    private func enqueueConfigure(_ points: GuiSizePoints) {
+        sentSerial += 1
+        assert(sentSerial > 0, "serials start at 1")
+        let width = UInt32(max(1, points.width.rounded()))
+        let height = UInt32(max(1, points.height.rounded()))
+        assert(width > 0 && height > 0, "configure size must be positive")
+        let states = sizeState == .liveResize ? ["activated", "resizing"] : ["activated"]
         let cfg = GuiConfigure(
-            win: win, width: size.w, height: size.h, serial: configureSerial, states: states)
-        assert(size.w > 0 && size.h > 0, "configure size must be positive")
+            win: win, width: width, height: height, serial: sentSerial, states: states)
         if let payload = try? GuiProto.encode(cfg) {
             channel.send(type: GuiType.configure.rawValue, flags: 0, payload: payload)
         }
@@ -294,9 +302,47 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         host?.windowClosed(win)
         return true
     }
+}
 
-    // MARK: - Input translation (called by the content view on the main thread)
+extension GuiWindow {
+    fileprivate func logPartialResizeOnce() {
+        guard !loggedPartialResize else { return }
+        loggedPartialResize = true
+        warn("resize commit did not fully damage the new buffer")
+    }
 
+    fileprivate func logSerialBugOnce(_ serial: UInt32) {
+        guard !loggedSerialBug else { return }
+        loggedSerialBug = true
+        warn("commit serial \(serial) exceeds sent \(sentSerial)")
+    }
+
+    private func warn(_ message: String) {
+        assert(!message.isEmpty, "diagnostic message is non-empty")
+        let line = "gui-spike win \(win): \(message)\n"
+        try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
+    }
+
+    fileprivate static func clamp(_ points: GuiSizePoints, to screen: NSScreen?) -> GuiSizePoints {
+        guard let visible = screen?.visibleFrame else { return points }
+        let width = min(points.width, Double(visible.width))
+        let height = min(points.height, Double(visible.height))
+        return GuiSizePoints(width: max(1, width), height: max(1, height))
+    }
+
+    fileprivate static func cursor(for name: String) -> NSCursor {
+        switch name {
+        case "text": return .iBeam
+        case "pointer": return .pointingHand
+        case "grab": return .openHand
+        default: return .arrow
+        }
+    }
+}
+
+// MARK: - Input translation (called by the content view on the main thread)
+
+extension GuiWindow {
     /// Window-local logical pointer state for one event (top-left origin).
     struct PointerSample {
         let kind: String
@@ -349,15 +395,6 @@ final class GuiWindow: NSObject, NSWindowDelegate {
             button: sample.button, state: sample.state, dx: sample.dx, dy: sample.dy, tHostNs: now)
         if let payload = try? GuiProto.encode(pointer) {
             channel.send(type: GuiType.pointer.rawValue, flags: 0, payload: payload)
-        }
-    }
-
-    private static func cursor(for name: String) -> NSCursor {
-        switch name {
-        case "text": return .iBeam
-        case "pointer": return .pointingHand
-        case "grab": return .openHand
-        default: return .arrow
         }
     }
 }
