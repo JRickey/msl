@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import IOSurface
 
@@ -47,6 +48,26 @@ final class GuiSurface {
                 }
             }
         }
+    }
+
+    /// The bottom-right pixel as an opaque sRGB color — the corner adjacent to
+    /// the strip a grow exposes. The presenter paints it behind the anchored
+    /// content so that strip reads as window background, not a blank flash. Nil
+    /// when the surface cannot be locked for reading.
+    func cornerColor() -> CGColor? {
+        assert(width > 0 && height > 0, "surface has a pixel to sample")
+        let stride = ioSurface.bytesPerRow
+        guard stride >= width * 4 else { return nil }
+        guard ioSurface.lock(options: [.readOnly], seed: nil) == 0 else { return nil }
+        defer { _ = ioSurface.unlock(options: [.readOnly], seed: nil) }
+        let offset = (height - 1) * stride + (width - 1) * 4
+        assert(offset + 4 <= stride * height, "sample stays in surface")
+        let px = ioSurface.baseAddress.advanced(by: offset)
+            .assumingMemoryBound(to: UInt8.self)
+        // BGRA byte order: px[2]=R, px[1]=G, px[0]=B.
+        return CGColor(
+            srgbRed: Double(px[2]) / 255, green: Double(px[1]) / 255,
+            blue: Double(px[0]) / 255, alpha: 1)
     }
 
     /// Bring this surface current with `other` (same dimensions) by a full copy

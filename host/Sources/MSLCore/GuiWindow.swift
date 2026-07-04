@@ -341,6 +341,10 @@ extension GuiWindow {
         if let layer = view.layer {
             if layer.contentsScale != scale { layer.contentsScale = scale }
             layer.contents = target.ioSurface
+            // Fill any region the anchored content leaves uncovered (a grow's
+            // exposed strip, an initial-map letterbox) with the frame's own
+            // corner color so it blends instead of flashing the window backing.
+            if let bg = target.cornerColor() { layer.backgroundColor = bg }
         }
         if let outgoing {
             // CA may fire this off the main thread; hop before touching actor state.
