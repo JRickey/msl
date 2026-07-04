@@ -30,8 +30,8 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
 use smithay::wayland::shell::xdg::{
-    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-    XdgToplevelSurfaceData,
+    Configure as XdgConfigure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
+    XdgShellState, XdgToplevelSurfaceData,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
@@ -61,8 +61,10 @@ pub struct Win {
     pub prev_buffer_size: (u32, u32),
     pub held_callbacks: Vec<WlCallback>,
     pub pacing: frames::Pacing,
+    pub serials: frames::ConfigureRing,
     pub pending: Option<frames::FullBuffer>,
     pub pending_t_commit: u64,
+    pub pending_serial: u32,
     pub last_frame: Option<frames::FullBuffer>,
 }
 
@@ -79,8 +81,10 @@ impl Win {
             prev_buffer_size: (0, 0),
             held_callbacks: Vec::new(),
             pacing: frames::Pacing::new(frames::FRAME_STARVATION_NS),
+            serials: frames::ConfigureRing::new(),
             pending: None,
             pending_t_commit: 0,
+            pending_serial: 0,
             last_frame: None,
         }
     }
@@ -286,6 +290,21 @@ impl XdgShellHandler for State {
                 let payload = serde_json::to_vec(&msg).unwrap_or_default();
                 self.enqueue(crate::remote::T_WIN_TITLE, payload);
             }
+        }
+    }
+
+    fn ack_configure(&mut self, surface: WlSurface, configure: XdgConfigure) {
+        debug_assert!(surface.is_alive(), "ack_configure on dead surface");
+        let XdgConfigure::Toplevel(top) = configure else {
+            return;
+        };
+        let xdg_serial = u32::from(top.serial);
+        let Some(win) = self.win_id_of(&surface) else {
+            return;
+        };
+        debug_assert!(win != 0, "reserved window id 0 in registry");
+        if let Some(w) = self.windows.get_mut(&win) {
+            w.serials.resolve(xdg_serial);
         }
     }
 }
