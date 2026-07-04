@@ -22,3 +22,6 @@ target/
 
 # Integration build outputs
 build/
+
+# Apple Credentials
+.env
