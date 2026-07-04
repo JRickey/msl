@@ -10,10 +10,14 @@ public struct UpConfig: Sendable {
     public let home: String
     public let hostCwd: String
     public let term: String
+    /// Whether the guest should mount the Rosetta share and seed x86-64 binfmt.
+    /// The caller has already gated this on VMHost.rosettaAvailable(); it must
+    /// equal the BootSpec.rosettaShare the VM booted with (share ⇔ binfmt).
+    public let rosetta: Bool
 
     public init(
         distroName: String, hostname: String, shell: Bool, shellArgv: [String], home: String,
-        hostCwd: String, term: String
+        hostCwd: String, term: String, rosetta: Bool
     ) {
         precondition(!distroName.isEmpty, "distro name must not be empty")
         precondition(!hostname.isEmpty, "hostname must not be empty")
@@ -25,6 +29,7 @@ public struct UpConfig: Sendable {
         self.home = home
         self.hostCwd = hostCwd
         self.term = term
+        self.rosetta = rosetta
     }
 }
 
@@ -80,11 +85,15 @@ public final class UpDriver: @unchecked Sendable {
             let ping = try control.ping()
             warnProtocolMismatch(ping)
             let macShare = spec.shares.contains { $0.tag == "mac" }
-            // The one-shot `msl up` path attaches no Rosetta share; rosetta is a
-            // daemon-only capability, so it is off here regardless of opt-in.
+            // rosetta must track the attached share: the caller keeps
+            // config.rosetta and spec.rosettaShare in lockstep so the agent
+            // seeds binfmt exactly when the "rosetta" tag is mountable.
+            assert(
+                config.rosetta == spec.rosettaShare,
+                "rosetta request must match the booted share")
             let distro = try control.distroUp(
                 name: config.distroName, dev: "/dev/vda", hostname: config.hostname,
-                macShare: macShare, rosetta: false)
+                macShare: macShare, rosetta: config.rosetta)
             if distro.state != "running" { failToStart(state: distro.state) }
         } catch {
             reportAndExit(error, code: 1)
