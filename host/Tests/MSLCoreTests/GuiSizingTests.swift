@@ -114,4 +114,29 @@ final class GuiSizingVerdictTests: XCTestCase {
             .settled, sent: 2, commit: 2, buffer: points(640.5, 480), content: points(640, 480))
         XCTAssertEqual(result, .applyGeometry(points(640.5, 480)))
     }
+
+    func testRepeatedAppliedPairIsPixelsOnly() {
+        let last = GuiAppliedGeometry(serial: 5, points: points(700, 500))
+        let result = GuiSizing.verdict(
+            state: .settled, sentSerial: 5, commitSerial: 5,
+            bufferPoints: points(700, 500), contentPoints: points(640, 480), lastApplied: last)
+        XCTAssertEqual(
+            result, .pixelsOnly, "a (serial, points) pair applies once even if content lags")
+    }
+
+    func testNewPointsAtAppliedSerialStillApplies() {
+        let last = GuiAppliedGeometry(serial: 5, points: points(700, 500))
+        let result = GuiSizing.verdict(
+            state: .settled, sentSerial: 5, commitSerial: 5,
+            bufferPoints: points(750, 520), contentPoints: points(640, 480), lastApplied: last)
+        XCTAssertEqual(result, .applyGeometry(points(750, 520)))
+    }
+
+    func testAppliedPointsAtNewSerialStillApplies() {
+        let last = GuiAppliedGeometry(serial: 5, points: points(700, 500))
+        let result = GuiSizing.verdict(
+            state: .settled, sentSerial: 6, commitSerial: 6,
+            bufferPoints: points(700, 500), contentPoints: points(640, 480), lastApplied: last)
+        XCTAssertEqual(result, .applyGeometry(points(700, 500)))
+    }
 }

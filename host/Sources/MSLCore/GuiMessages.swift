@@ -87,6 +87,34 @@ public struct GuiCursorNamed: Codable, Sendable, Equatable {
     }
 }
 
+/// Guest→host `win_limits` {win, min_w, min_h, max_w, max_h}: the client's
+/// size hints in logical points; 0 on an axis means unconstrained.
+public struct GuiWinLimits: Codable, Sendable, Equatable {
+    public let win: UInt32
+    public let minWidth: UInt32
+    public let minHeight: UInt32
+    public let maxWidth: UInt32
+    public let maxHeight: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case win
+        case minWidth = "min_w"
+        case minHeight = "min_h"
+        case maxWidth = "max_w"
+        case maxHeight = "max_h"
+    }
+
+    public init(
+        win: UInt32, minWidth: UInt32, minHeight: UInt32, maxWidth: UInt32, maxHeight: UInt32
+    ) {
+        self.win = win
+        self.minWidth = minWidth
+        self.minHeight = minHeight
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
+    }
+}
+
 /// Host→guest `configure` {win, w, h, serial, states[]} in logical px.
 public struct GuiConfigure: Codable, Sendable, Equatable {
     public let win: UInt32
