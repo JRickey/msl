@@ -45,9 +45,12 @@ mod linux {
         };
         let ptr = state.pointer.clone();
         let time = state.now_ms();
+        // Host coordinates are window-geometry-relative; the surface origin sits
+        // a CSD shadow margin above/left of it (protocol window-geometry ruling).
+        let (gx, gy) = crate::frames::geometry_offset_logical(&surface);
         match ev.kind.as_str() {
             "motion" | "enter" => {
-                let loc = Point::<f64, smithay::utils::Logical>::from((ev.x, ev.y));
+                let loc = Point::<f64, smithay::utils::Logical>::from((ev.x + gx, ev.y + gy));
                 let pair = Some((surface, Point::from((0.0, 0.0))));
                 ptr.motion(
                     state,

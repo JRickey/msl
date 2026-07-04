@@ -62,6 +62,7 @@ pub struct Win {
     pub held_callbacks: Vec<WlCallback>,
     pub pacing: frames::Pacing,
     pub serials: frames::ConfigureRing,
+    pub limits: (u32, u32, u32, u32),
     pub pending: Option<frames::FullBuffer>,
     pub pending_t_commit: u64,
     pub pending_serial: u32,
@@ -82,6 +83,7 @@ impl Win {
             held_callbacks: Vec::new(),
             pacing: frames::Pacing::new(frames::FRAME_STARVATION_NS),
             serials: frames::ConfigureRing::new(),
+            limits: (0, 0, 0, 0),
             pending: None,
             pending_t_commit: 0,
             pending_serial: 0,
@@ -256,8 +258,28 @@ impl XdgShellHandler for State {
         assert!(self.windows.contains_key(&win), "window insert failed");
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    /// Popups are not remoted, but the xdg handshake must complete: a popup
+    /// that never receives its initial configure deadlocks the whole client.
+    /// Dismissal happens exactly once, here — `popup_done` has no defined
+    /// double-delivery semantics, and grab/reposition arrive for popups this
+    /// handler already dismissed.
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        debug_assert!(surface.wl_surface().is_alive(), "popup on dead surface");
+        if !surface.wl_surface().is_alive() {
+            return;
+        }
+        surface.with_pending_state(|s| {
+            s.geometry = positioner.get_geometry();
+            s.positioner = positioner;
+        });
+        match surface.send_configure() {
+            Ok(_) => surface.send_popup_done(),
+            Err(e) => eprintln!("msl-way: popup configure failed: {e}"),
+        }
+    }
+
     fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+
     fn reposition_request(
         &mut self,
         _surface: PopupSurface,

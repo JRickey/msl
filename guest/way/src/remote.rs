@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 pub const T_HELLO: u32 = 1;
@@ -19,6 +19,7 @@ pub const T_WIN_DESTROY: u32 = 9;
 pub const T_WIN_TITLE: u32 = 11;
 pub const T_COMMIT: u32 = 13;
 pub const T_CURSOR_NAMED: u32 = 15;
+pub const T_WIN_LIMITS: u32 = 19;
 pub const T_STATS: u32 = 17;
 
 pub const T_HELLO_ACK: u32 = 2;
@@ -132,6 +133,15 @@ pub struct WinNew {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WinRef {
     pub win: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WinLimits {
+    pub win: u32,
+    pub min_w: u32,
+    pub min_h: u32,
+    pub max_w: u32,
+    pub max_h: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

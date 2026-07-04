@@ -321,6 +321,104 @@ pub fn pack_damage(
     Some(out)
 }
 
+/// Bytes per pixel for the two supported shm formats.
+const CROP_BPP: usize = 4;
+
+/// Map a window-geometry rectangle (logical) into a buffer-pixel crop rect.
+///
+/// The rect is intersected with the buffer; `None` = remote the whole buffer
+/// (geometry covers it, is empty/degenerate, or the scale is unusable).
+#[must_use]
+pub fn crop_rect_px(geo: (i32, i32, i32, i32), scale: f64, buf_w: u32, buf_h: u32) -> Option<Rect> {
+    debug_assert!(buf_w > 0 && buf_h > 0, "crop against an empty buffer");
+    if !scale.is_finite() || scale <= 0.0 || buf_w == 0 || buf_h == 0 {
+        return None;
+    }
+    let x0 = scale_px(geo.0, scale, buf_w);
+    let y0 = scale_px(geo.1, scale, buf_h);
+    let x1 = scale_px(geo.0.saturating_add(geo.2), scale, buf_w);
+    let y1 = scale_px(geo.1.saturating_add(geo.3), scale, buf_h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let rect = Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    };
+    debug_assert!(
+        rect.x + rect.w <= buf_w && rect.y + rect.h <= buf_h,
+        "crop in buffer"
+    );
+    if rect.x == 0 && rect.y == 0 && rect.w == buf_w && rect.h == buf_h {
+        return None;
+    }
+    Some(rect)
+}
+
+/// Logical coordinate × scale → buffer pixels, clamped to `[0, max]`.
+fn scale_px(v: i32, scale: f64, max: u32) -> u32 {
+    debug_assert!(scale.is_finite() && scale > 0.0, "scale must be usable");
+    let f = (f64::from(v) * scale).round();
+    if !f.is_finite() || f <= 0.0 {
+        return 0;
+    }
+    let cap = f64::from(max);
+    // f is clamped to [0, max], so the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let out = if f >= cap { max } else { f as u32 };
+    out
+}
+
+/// Crop a frame to `rect` with a tight stride. The caller filters identity
+/// rects; a packing failure means the caller keeps the uncropped frame.
+#[must_use]
+pub fn crop_frame(fb: &FullBuffer, rect: Rect) -> Option<FullBuffer> {
+    debug_assert!(rect.w > 0 && rect.h > 0, "empty crop rect");
+    debug_assert!(
+        rect.x + rect.w <= fb.w && rect.y + rect.h <= fb.h,
+        "crop rect outside the buffer"
+    );
+    let bytes = pack_damage(
+        &fb.bytes,
+        fb.stride as usize,
+        CROP_BPP,
+        fb.w,
+        fb.h,
+        std::slice::from_ref(&rect),
+    )?;
+    let stride = rect.w.checked_mul(4)?;
+    Some(FullBuffer {
+        w: rect.w,
+        h: rect.h,
+        stride,
+        format: fb.format,
+        scale: fb.scale,
+        bytes,
+    })
+}
+
+/// Intersect a buffer-space damage rect with the crop and translate it into
+/// crop-relative coordinates; `None` when nothing survives.
+#[must_use]
+pub fn translate_damage(r: Rect, crop: Rect) -> Option<Rect> {
+    debug_assert!(crop.w > 0 && crop.h > 0, "empty crop rect");
+    let x0 = r.x.max(crop.x);
+    let y0 = r.y.max(crop.y);
+    let x1 = r.x.saturating_add(r.w).min(crop.x.saturating_add(crop.w));
+    let y1 = r.y.saturating_add(r.h).min(crop.y.saturating_add(crop.h));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect {
+        x: x0 - crop.x,
+        y: y0 - crop.y,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
@@ -330,14 +428,16 @@ mod linux {
     use smithay::utils::SERIAL_COUNTER;
     use smithay::wayland::compositor::{BufferAssignment, Damage, SurfaceAttributes, with_states};
     use smithay::wayland::fractional_scale::with_fractional_scale;
+    use smithay::wayland::shell::xdg::SurfaceCachedState as XdgSurfaceCachedState;
     use smithay::wayland::shm::with_buffer_contents;
     use smithay::wayland::viewporter::ViewportCachedState;
 
     use super::{Damageset, FullBuffer, Rect, Release, effective_scale, pack_damage, scale_to_e12};
     use crate::comp::{State, read_toplevel_app_id, read_toplevel_title};
     use crate::remote::{
-        CommitMeta, FMT_ARGB8888, FMT_XRGB8888, MAX_COMMIT_RECTS, T_COMMIT, T_WIN_MAP, T_WIN_NEW,
-        T_WIN_TITLE, T_WIN_UNMAP, WinNew, WinRef, WinTitle, encode_commit,
+        CommitMeta, FMT_ARGB8888, FMT_XRGB8888, MAX_COMMIT_RECTS, T_COMMIT, T_WIN_LIMITS,
+        T_WIN_MAP, T_WIN_NEW, T_WIN_TITLE, T_WIN_UNMAP, WinLimits, WinNew, WinRef, WinTitle,
+        encode_commit,
     };
 
     const BPP: usize = 4;
@@ -372,6 +472,96 @@ mod linux {
                 viewport_dst_w,
             }
         })
+    }
+
+    /// The xdg window geometry (logical) the client last committed, if any.
+    fn window_geometry(surface: &WlSurface) -> Option<(i32, i32, i32, i32)> {
+        with_states(surface, |states| {
+            let mut cached = states.cached_state.get::<XdgSurfaceCachedState>();
+            cached
+                .current()
+                .geometry
+                .map(|g| (g.loc.x, g.loc.y, g.size.w, g.size.h))
+        })
+    }
+
+    /// The client's min/max size hints (logical points; 0 = unconstrained).
+    fn surface_limits(surface: &WlSurface) -> (u32, u32, u32, u32) {
+        let cur = with_states(surface, |states| {
+            let mut cached = states.cached_state.get::<XdgSurfaceCachedState>();
+            *cached.current()
+        });
+        let cvt = |v: i32| u32::try_from(v).unwrap_or(0);
+        (
+            cvt(cur.min_size.w),
+            cvt(cur.min_size.h),
+            cvt(cur.max_size.w),
+            cvt(cur.max_size.h),
+        )
+    }
+
+    /// Forward min/max hint changes to the host (protocol `win_limits`); the
+    /// hints commit atomically with the rest of the surface state.
+    fn sync_limits(state: &mut State, win: u32, surface: &WlSurface) {
+        debug_assert!(win != 0, "limits for reserved window id 0");
+        let limits = surface_limits(surface);
+        let changed = state.windows.get(&win).is_some_and(|x| x.limits != limits);
+        if !changed {
+            return;
+        }
+        if let Some(x) = state.windows.get_mut(&win) {
+            x.limits = limits;
+        }
+        enqueue_limits(state, win, limits);
+    }
+
+    fn enqueue_limits(state: &mut State, win: u32, limits: (u32, u32, u32, u32)) {
+        debug_assert!(win != 0, "limits for reserved window id 0");
+        let msg = WinLimits {
+            win,
+            min_w: limits.0,
+            min_h: limits.1,
+            max_w: limits.2,
+            max_h: limits.3,
+        };
+        state.enqueue(T_WIN_LIMITS, serde_json::to_vec(&msg).unwrap_or_default());
+    }
+
+    /// Logical offset of the window geometry inside the surface, for mapping
+    /// host pointer coordinates (geometry-relative) into surface space.
+    #[must_use]
+    pub fn geometry_offset_logical(surface: &WlSurface) -> (f64, f64) {
+        window_geometry(surface).map_or((0.0, 0.0), |g| (f64::from(g.0), f64::from(g.1)))
+    }
+
+    /// Intersect buffer-space damage with the crop and translate it into crop
+    /// space; surface-space damage passes through (downstream full fallback).
+    fn crop_damage(damage: Vec<Damage>, crop: Rect, buf_w: u32, buf_h: u32) -> Vec<Damage> {
+        debug_assert!(crop.w > 0 && crop.h > 0, "empty crop rect");
+        let mut out = Vec::with_capacity(damage.len());
+        for d in damage {
+            match d {
+                Damage::Buffer(rect) => {
+                    let clamped = clamp_rect(rect, buf_w, buf_h);
+                    if let Some(moved) = super::translate_damage(clamped, crop) {
+                        let (Ok(mx), Ok(my)) = (i32::try_from(moved.x), i32::try_from(moved.y))
+                        else {
+                            continue;
+                        };
+                        let (Ok(mw), Ok(mh)) = (i32::try_from(moved.w), i32::try_from(moved.h))
+                        else {
+                            continue;
+                        };
+                        out.push(Damage::Buffer(smithay::utils::Rectangle::new(
+                            (mx, my).into(),
+                            (mw, mh).into(),
+                        )));
+                    }
+                }
+                Damage::Surface(rect) => out.push(Damage::Surface(rect)),
+            }
+        }
+        out
     }
 
     fn set_preferred_fractional(surface: &WlSurface, scale: f64) {
@@ -548,10 +738,18 @@ mod linux {
         debug_assert!(fb.w > 0 && fb.h > 0, "emitting a zero-sized frame");
         announce_and_map(state, win, surface, fb.w, fb.h);
         let rects = commit_rects(dmg, fb.w, fb.h);
-        let Some(packed) = pack_damage(&fb.bytes, fb.stride as usize, BPP, fb.w, fb.h, &rects)
-        else {
-            return false;
+        // A tightly-packed full-frame commit already IS the payload; repacking
+        // it would be a redundant whole-buffer copy on every resize frame.
+        let tight = dmg.full && fb.stride == fb.w * BPP_U32;
+        let repacked = if tight {
+            None
+        } else {
+            match pack_damage(&fb.bytes, fb.stride as usize, BPP, fb.w, fb.h, &rects) {
+                Some(p) => Some(p),
+                None => return false,
+            }
         };
+        let packed: &[u8] = repacked.as_deref().unwrap_or(&fb.bytes);
         let seq = state.next_seq();
         let t_send = state.now_ns();
         let meta = CommitMeta {
@@ -566,7 +764,7 @@ mod linux {
             t_client_commit_ns: t_commit,
             t_send_ns: t_send,
         };
-        let Ok(payload) = encode_commit(&meta, &rects, &packed) else {
+        let Ok(payload) = encode_commit(&meta, &rects, packed) else {
             return false;
         };
         state.enqueue(T_COMMIT, payload);
@@ -641,11 +839,25 @@ mod linux {
                 match snap {
                     Some(mut fb) => {
                         fb.scale = effective_scale(fb.w, ex.viewport_dst_w, ex.buffer_scale);
-                        ingest_commit(state, win, surface, fb, &ex.damage, ex.callbacks, t_commit);
+                        let mut damage = ex.damage;
+                        // Window-geometry ruling: CSD shadow margins never
+                        // cross the seam.
+                        if let Some(crop) = window_geometry(surface)
+                            .and_then(|g| super::crop_rect_px(g, fb.scale, fb.w, fb.h))
+                            && let Some(cropped) = super::crop_frame(&fb, crop)
+                        {
+                            damage = crop_damage(damage, crop, fb.w, fb.h);
+                            fb = cropped;
+                        }
+                        ingest_commit(state, win, surface, fb, &damage, ex.callbacks, t_commit);
                     }
                     None => fire(state, ex.callbacks),
                 }
             }
+        }
+        let announced = state.windows.get(&win).is_some_and(|x| x.announced);
+        if announced {
+            sync_limits(state, win, surface);
         }
     }
 
@@ -786,6 +998,10 @@ mod linux {
             };
             state.enqueue(T_WIN_TITLE, serde_json::to_vec(&t).unwrap_or_default());
         }
+        let limits = state.windows.get(&win).map_or((0, 0, 0, 0), |x| x.limits);
+        if limits != (0, 0, 0, 0) {
+            enqueue_limits(state, win, limits);
+        }
         if let Some(x) = state.windows.get_mut(&win) {
             x.announced = true;
             x.mapped = true;
@@ -799,7 +1015,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{on_commit, on_present_ack, poll_pacing, replay_all};
+pub use linux::{geometry_offset_logical, on_commit, on_present_ack, poll_pacing, replay_all};
 
 #[cfg(test)]
 mod tests {
@@ -1036,6 +1252,138 @@ mod tests {
         r.record(20, 50);
         r.resolve(20);
         assert_eq!(r.acked(), 100, "a lower host serial cannot roll acked back");
+    }
+
+    #[test]
+    fn crop_rect_identity_and_empty_are_none() {
+        assert_eq!(
+            crop_rect_px((0, 0, 100, 80), 1.0, 100, 80),
+            None,
+            "covers buffer"
+        );
+        assert_eq!(
+            crop_rect_px((5, 5, 0, 10), 1.0, 100, 80),
+            None,
+            "empty geometry"
+        );
+        assert_eq!(
+            crop_rect_px((5, 5, 10, 10), 0.0, 100, 80),
+            None,
+            "unusable scale"
+        );
+        assert_eq!(
+            crop_rect_px((200, 200, 10, 10), 1.0, 100, 80),
+            None,
+            "outside buffer"
+        );
+    }
+
+    #[test]
+    fn crop_rect_scales_margins_to_pixels() {
+        let r = crop_rect_px((14, 12, 1689, 852), 2.0, 3434, 1762).expect("crop");
+        assert_eq!(
+            (r.x, r.y, r.w, r.h),
+            (28, 24, 3378, 1704),
+            "gtk shadow margins at 2x"
+        );
+    }
+
+    #[test]
+    fn crop_rect_clamps_overhang_and_rounds_fractional_scale() {
+        let r = crop_rect_px((-4, 10, 200, 60), 1.0, 100, 80).expect("crop");
+        assert_eq!(
+            (r.x, r.y, r.w, r.h),
+            (0, 10, 100, 60),
+            "overhang clamps to buffer"
+        );
+        let f = crop_rect_px((10, 10, 20, 20), 1.5, 100, 100).expect("crop");
+        assert_eq!(
+            (f.x, f.y, f.w, f.h),
+            (15, 15, 30, 30),
+            "1.5x scaling rounds exactly"
+        );
+    }
+
+    #[test]
+    fn crop_frame_extracts_geometry_pixels() {
+        let mut bytes = vec![0u8; 4 * 4 * 4];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("fits");
+        }
+        let fb = FullBuffer {
+            w: 4,
+            h: 4,
+            stride: 16,
+            format: 0,
+            scale: 1.0,
+            bytes,
+        };
+        let rect = Rect {
+            x: 1,
+            y: 1,
+            w: 2,
+            h: 2,
+        };
+        let cropped = crop_frame(&fb, rect).expect("crop");
+        assert_eq!((cropped.w, cropped.h, cropped.stride), (2, 2, 8));
+        assert_eq!(cropped.bytes.len(), 2 * 2 * 4);
+        assert_eq!(
+            cropped.bytes[0],
+            fb.bytes[16 + 4],
+            "row 1, px 1 leads the crop"
+        );
+    }
+
+    #[test]
+    fn translate_damage_intersects_and_offsets() {
+        let crop = Rect {
+            x: 28,
+            y: 24,
+            w: 100,
+            h: 100,
+        };
+        let inside = Rect {
+            x: 30,
+            y: 30,
+            w: 10,
+            h: 10,
+        };
+        assert_eq!(
+            translate_damage(inside, crop),
+            Some(Rect {
+                x: 2,
+                y: 6,
+                w: 10,
+                h: 10
+            })
+        );
+        let straddle = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 40,
+        };
+        assert_eq!(
+            translate_damage(straddle, crop),
+            Some(Rect {
+                x: 0,
+                y: 0,
+                w: 12,
+                h: 16
+            }),
+            "shadow-side damage clips to the geometry"
+        );
+        let outside = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 20,
+        };
+        assert_eq!(
+            translate_damage(outside, crop),
+            None,
+            "pure shadow damage drops"
+        );
     }
 
     #[test]
