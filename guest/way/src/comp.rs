@@ -21,6 +21,9 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, with_states,
 };
+use smithay::wayland::fractional_scale::{
+    FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
@@ -95,6 +98,7 @@ pub struct State {
     pub output: Output,
     pub data_device: DataDeviceState,
     pub viewporter: ViewporterState,
+    pub fractional: FractionalScaleManagerState,
     pub windows: HashMap<u32, Win>,
     pub surface_win: HashMap<WlSurface, u32>,
     pub focus: Option<u32>,
@@ -163,7 +167,20 @@ impl State {
             Some(Scale::Integer(output_scale(self.scale))),
             None,
         );
+        for win in self.windows.values() {
+            if win.mapped {
+                push_preferred_scale(&win.surface, self.scale);
+            }
+        }
     }
+}
+
+fn push_preferred_scale(surface: &WlSurface, scale: f64) {
+    debug_assert!(scale > 0.0, "preferred scale must be positive");
+    debug_assert!(scale.is_finite(), "preferred scale must be finite");
+    with_states(surface, |states| {
+        with_fractional_scale(states, |fs| fs.set_preferred_scale(scale));
+    });
 }
 
 fn output_scale(scale: f64) -> i32 {
@@ -327,6 +344,12 @@ pub const fn protocol_version() -> u32 {
 
 impl OutputHandler for State {}
 
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        push_preferred_scale(&surface, self.scale);
+    }
+}
+
 impl SelectionHandler for State {
     type SelectionUserData = ();
 }
@@ -347,3 +370,4 @@ smithay::delegate_seat!(State);
 smithay::delegate_output!(State);
 smithay::delegate_data_device!(State);
 smithay::delegate_viewporter!(State);
+smithay::delegate_fractional_scale!(State);

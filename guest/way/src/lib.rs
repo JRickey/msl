@@ -19,7 +19,7 @@ pub mod input;
 /// Wayland globals the compositor must advertise from startup for the supported
 /// toolkits (GTK ≥4.12) to accept the display. `build_state` registers exactly
 /// this set; `--list-globals` prints it.
-pub const REQUIRED_GLOBALS: [&str; 8] = [
+pub const REQUIRED_GLOBALS: [&str; 9] = [
     "wl_compositor",
     "wl_subcompositor",
     "wl_shm",
@@ -27,6 +27,7 @@ pub const REQUIRED_GLOBALS: [&str; 8] = [
     "wl_seat",
     "wl_data_device_manager",
     "wp_viewporter",
+    "wp_fractional_scale_manager_v1",
     "xdg_wm_base",
 ];
 
@@ -44,6 +45,7 @@ mod tests {
             "wl_seat",
             "wl_data_device_manager",
             "wp_viewporter",
+            "wp_fractional_scale_manager_v1",
             "xdg_wm_base",
         ] {
             assert!(REQUIRED_GLOBALS.contains(&want), "missing global {want}");

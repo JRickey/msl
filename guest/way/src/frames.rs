@@ -17,7 +17,38 @@ pub struct FullBuffer {
     pub h: u32,
     pub stride: u32,
     pub format: u32,
+    pub scale: f64,
     pub bytes: Vec<u8>,
+}
+
+/// Buffer pixels per logical point for a surface.
+///
+/// `buffer_w / viewport_dst_w` when a viewport sizes the surface (fractional
+/// scaling), else the integer `wl_surface.set_buffer_scale` value. This is the
+/// surface's own scale, not the output's — the two diverge during transitions.
+#[must_use]
+pub fn effective_scale(buffer_w: u32, viewport_dst_w: Option<u32>, buffer_scale: i32) -> f64 {
+    debug_assert!(buffer_scale >= 0, "negative buffer scale");
+    if let Some(dst) = viewport_dst_w
+        && dst > 0
+        && buffer_w > 0
+    {
+        return f64::from(buffer_w) / f64::from(dst);
+    }
+    f64::from(buffer_scale.max(1))
+}
+
+/// Fixed-point (×4096) encoding of a surface scale for the commit header.
+#[must_use]
+pub fn scale_to_e12(scale: f64) -> u32 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return 4096;
+    }
+    let v = (scale.clamp(0.0, 16.0) * 4096.0).round();
+    // v is bounded to [0, 65536] by the clamp, so the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let e = v as u32;
+    e
 }
 
 /// Accumulated damage across coalesced commits. Collapses to a whole-surface
@@ -212,9 +243,11 @@ mod linux {
     use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
     use smithay::utils::SERIAL_COUNTER;
     use smithay::wayland::compositor::{BufferAssignment, Damage, SurfaceAttributes, with_states};
+    use smithay::wayland::fractional_scale::with_fractional_scale;
     use smithay::wayland::shm::with_buffer_contents;
+    use smithay::wayland::viewporter::ViewportCachedState;
 
-    use super::{Damageset, FullBuffer, Rect, Release, pack_damage};
+    use super::{Damageset, FullBuffer, Rect, Release, effective_scale, pack_damage, scale_to_e12};
     use crate::comp::{State, read_toplevel_app_id, read_toplevel_title};
     use crate::remote::{
         CommitMeta, FMT_ARGB8888, FMT_XRGB8888, MAX_COMMIT_RECTS, T_COMMIT, T_WIN_MAP, T_WIN_NEW,
@@ -228,6 +261,8 @@ mod linux {
         buffer: Option<BufferAssignment>,
         damage: Vec<Damage>,
         callbacks: Vec<WlCallback>,
+        buffer_scale: i32,
+        viewport_dst_w: Option<u32>,
     }
 
     fn extract(surface: &WlSurface) -> Extracted {
@@ -237,13 +272,28 @@ mod linux {
             let callbacks: Vec<WlCallback> = attrs.frame_callbacks.drain(..).collect();
             let buffer = attrs.buffer.take();
             let damage = std::mem::take(&mut attrs.damage);
+            let buffer_scale = attrs.buffer_scale;
             drop(cached);
+            let viewport_dst_w = {
+                let mut vp = states.cached_state.get::<ViewportCachedState>();
+                vp.current().dst.and_then(|d| u32::try_from(d.w).ok())
+            };
             Extracted {
                 buffer,
                 damage,
                 callbacks,
+                buffer_scale,
+                viewport_dst_w,
             }
         })
+    }
+
+    fn set_preferred_fractional(surface: &WlSurface, scale: f64) {
+        debug_assert!(scale > 0.0, "preferred scale must be positive");
+        debug_assert!(scale.is_finite(), "preferred scale must be finite");
+        with_states(surface, |states| {
+            with_fractional_scale(states, |fs| fs.set_preferred_scale(scale));
+        });
     }
 
     fn fire(state: &State, callbacks: Vec<WlCallback>) {
@@ -313,6 +363,7 @@ mod linux {
                 h,
                 stride,
                 format,
+                scale: 1.0,
                 bytes: pool[offset..end].to_vec(),
             })
         })
@@ -368,29 +419,26 @@ mod linux {
             let serial = SERIAL_COUNTER.next_serial();
             let kbd = state.keyboard.clone();
             kbd.set_focus(state, Some(surface.clone()), serial);
+            // Associate the surface with the output so the client receives
+            // wl_surface.enter and renders at the output/fractional scale.
+            state.output.enter(surface);
+            set_preferred_fractional(surface, state.scale);
         }
     }
 
     fn unmap(state: &mut State, win: u32) {
         let was = state.windows.get(&win).is_some_and(|x| x.mapped);
         if was {
+            let surface = state.windows.get(&win).map(|x| x.surface.clone());
             if let Some(x) = state.windows.get_mut(&win) {
                 x.mapped = false;
             }
             let payload = serde_json::to_vec(&WinRef { win }).unwrap_or_default();
             state.enqueue(T_WIN_UNMAP, payload);
+            if let Some(surface) = surface {
+                state.output.leave(&surface);
+            }
         }
-    }
-
-    fn scale_e12(scale: f64) -> u32 {
-        if !scale.is_finite() || scale <= 0.0 {
-            return 4096;
-        }
-        let v = (scale.clamp(0.0, 16.0) * 4096.0).round();
-        // v is bounded to [0, 65536] by the clamp above, so the cast is exact.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let e = v as u32;
-        e
     }
 
     fn commit_rects(dmg: &Damageset, w: u32, h: u32) -> Vec<Rect> {
@@ -426,7 +474,7 @@ mod linux {
             h: fb.h,
             stride: fb.stride,
             format: fb.format,
-            scale_e12: scale_e12(state.scale),
+            scale_e12: scale_to_e12(fb.scale),
             t_client_commit_ns: t_commit,
             t_send_ns: t_send,
         };
@@ -501,7 +549,8 @@ mod linux {
                 let snap = read_full_buffer(&buf);
                 buf.release();
                 match snap {
-                    Some(fb) => {
+                    Some(mut fb) => {
+                        fb.scale = effective_scale(fb.w, ex.viewport_dst_w, ex.buffer_scale);
                         ingest_commit(state, win, surface, fb, &ex.damage, ex.callbacks, t_commit);
                     }
                     None => fire(state, ex.callbacks),
@@ -760,6 +809,44 @@ mod tests {
         p.reset();
         assert!(p.wants_emit(), "reset frees the pipeline for a new host");
         assert_eq!(p.poll_deadline(u64::MAX), Release::None);
+    }
+
+    #[test]
+    fn scale_to_e12_maps_common_scales() {
+        assert_eq!(scale_to_e12(1.0), 4096);
+        assert_eq!(scale_to_e12(2.0), 8192);
+        assert_eq!(scale_to_e12(1.5), 6144);
+        assert_eq!(scale_to_e12(0.0), 4096, "non-positive falls back to 1x");
+        assert_eq!(scale_to_e12(f64::NAN), 4096, "NaN falls back to 1x");
+    }
+
+    #[test]
+    fn effective_scale_prefers_viewport_then_buffer_scale() {
+        assert!(
+            (effective_scale(200, Some(100), 1) - 2.0).abs() < 1e-9,
+            "fractional via viewport"
+        );
+        assert!((effective_scale(150, Some(100), 1) - 1.5).abs() < 1e-9);
+        assert!(
+            (effective_scale(200, None, 2) - 2.0).abs() < 1e-9,
+            "integer buffer scale"
+        );
+        assert!(
+            (effective_scale(100, Some(0), 3) - 3.0).abs() < 1e-9,
+            "zero dst -> buffer scale"
+        );
+        assert!(
+            (effective_scale(100, None, 0) - 1.0).abs() < 1e-9,
+            "zero scale floors to 1"
+        );
+    }
+
+    #[test]
+    fn hello_ack_scale_change_reaches_commit_header() {
+        // Plumbing pin (no VM): a 2x buffer for a 100pt window must encode 2x,
+        // so the host presents at the correct logical size instead of upscaling.
+        let scale = effective_scale(200, Some(100), 1);
+        assert_eq!(scale_to_e12(scale), 8192);
     }
 
     #[test]

@@ -28,6 +28,7 @@ mod linux {
     use smithay::reexports::wayland_server::{Display, DisplayHandle};
     use smithay::utils::Transform;
     use smithay::wayland::compositor::CompositorState;
+    use smithay::wayland::fractional_scale::FractionalScaleManagerState;
     use smithay::wayland::selection::data_device::DataDeviceState;
     use smithay::wayland::shell::xdg::XdgShellState;
     use smithay::wayland::shm::ShmState;
@@ -101,7 +102,14 @@ mod linux {
         }
     }
 
-    fn install_globals(dh: &DisplayHandle) -> (Output, DataDeviceState, ViewporterState) {
+    type Globals = (
+        Output,
+        DataDeviceState,
+        ViewporterState,
+        FractionalScaleManagerState,
+    );
+
+    fn install_globals(dh: &DisplayHandle) -> Globals {
         let output = Output::new(
             "MSL-1".to_string(),
             PhysicalProperties {
@@ -127,6 +135,7 @@ mod linux {
             output,
             DataDeviceState::new::<State>(dh),
             ViewporterState::new::<State>(dh),
+            FractionalScaleManagerState::new::<State>(dh),
         )
     }
 
@@ -137,7 +146,7 @@ mod linux {
         let compositor = CompositorState::new::<State>(&dh);
         let shm = ShmState::new::<State>(&dh, Vec::new());
         let xdg = XdgShellState::new::<State>(&dh);
-        let (output, data_device, viewporter) = install_globals(&dh);
+        let (output, data_device, viewporter, fractional) = install_globals(&dh);
         let mut seats = SeatState::<State>::new();
         let mut seat: Seat<State> = seats.new_wl_seat(&dh, "seat0");
         let xkb = XkbConfig {
@@ -163,6 +172,7 @@ mod linux {
             output,
             data_device,
             viewporter,
+            fractional,
             windows: HashMap::new(),
             surface_win: HashMap::new(),
             focus: None,
