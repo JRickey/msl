@@ -48,10 +48,25 @@ pub const OUTPUT_W: i32 = 1920;
 pub const OUTPUT_H: i32 = 1080;
 pub const DEFAULT_REFRESH_HZ: u32 = 60;
 
-/// One remoted toplevel: its Wayland handles, current attributes mirrored to the
-/// host, held frame callbacks (released on `present_ack`), and pacing state.
+/// A window's shell role. Toplevels carry the host size-authority machine;
+/// popups are client-sized and anchored to `parent` (a win id) at `pos`
+/// (parent-geometry-relative logical points).
+pub enum WinRole {
+    Toplevel(ToplevelSurface),
+    Popup {
+        popup: PopupSurface,
+        parent: u32,
+        pos: (i32, i32),
+    },
+}
+
+/// One remoted window: its Wayland role and handles, current attributes mirrored
+/// to the host, held frame callbacks (released on `present_ack`), and pacing
+/// state.
+///
+/// The serial ring and limits stay inert for popups.
 pub struct Win {
-    pub toplevel: ToplevelSurface,
+    pub role: WinRole,
     pub surface: WlSurface,
     pub app_id: String,
     pub title: String,
@@ -70,9 +85,9 @@ pub struct Win {
 }
 
 impl Win {
-    fn new(toplevel: ToplevelSurface, surface: WlSurface) -> Self {
+    fn with_role(role: WinRole, surface: WlSurface) -> Self {
         Self {
-            toplevel,
+            role,
             surface,
             app_id: String::new(),
             title: String::new(),
@@ -88,6 +103,62 @@ impl Win {
             pending_t_commit: 0,
             pending_serial: 0,
             last_frame: None,
+        }
+    }
+
+    fn new(toplevel: ToplevelSurface, surface: WlSurface) -> Self {
+        Self::with_role(WinRole::Toplevel(toplevel), surface)
+    }
+
+    #[must_use]
+    pub fn new_popup(
+        popup: PopupSurface,
+        surface: WlSurface,
+        parent: u32,
+        pos: (i32, i32),
+    ) -> Self {
+        debug_assert!(parent != 0, "popup parent is reserved id 0");
+        Self::with_role(WinRole::Popup { popup, parent, pos }, surface)
+    }
+
+    #[must_use]
+    pub const fn toplevel(&self) -> Option<&ToplevelSurface> {
+        match &self.role {
+            WinRole::Toplevel(t) => Some(t),
+            WinRole::Popup { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn popup(&self) -> Option<&PopupSurface> {
+        match &self.role {
+            WinRole::Popup { popup, .. } => Some(popup),
+            WinRole::Toplevel(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_popup(&self) -> bool {
+        matches!(self.role, WinRole::Popup { .. })
+    }
+
+    #[must_use]
+    pub const fn is_toplevel(&self) -> bool {
+        matches!(self.role, WinRole::Toplevel(_))
+    }
+
+    #[must_use]
+    pub const fn parent(&self) -> Option<u32> {
+        match self.role {
+            WinRole::Popup { parent, .. } => Some(parent),
+            WinRole::Toplevel(_) => None,
+        }
+    }
+
+    pub fn set_popup_pos(&mut self, pos: (i32, i32)) {
+        debug_assert!(self.is_popup(), "popup position set on a toplevel");
+        if let WinRole::Popup { pos: p, .. } = &mut self.role {
+            *p = pos;
         }
     }
 }
@@ -116,6 +187,9 @@ pub struct State {
     pub ledger: Ledger,
     pub out: Vec<OutFrame>,
     pub dropped_input: u64,
+    pub grabs: crate::popups::GrabStack,
+    pub dismissed: crate::popups::DismissedSet,
+    pub warned_popup_configure: bool,
 }
 
 impl State {
@@ -258,34 +332,25 @@ impl XdgShellHandler for State {
         assert!(self.windows.contains_key(&win), "window insert failed");
     }
 
-    /// Popups are not remoted, but the xdg handshake must complete: a popup
-    /// that never receives its initial configure deadlocks the whole client.
-    /// Dismissal happens exactly once, here — `popup_done` has no defined
-    /// double-delivery semantics, and grab/reposition arrive for popups this
-    /// handler already dismissed.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
-        debug_assert!(surface.wl_surface().is_alive(), "popup on dead surface");
-        if !surface.wl_surface().is_alive() {
-            return;
-        }
-        surface.with_pending_state(|s| {
-            s.geometry = positioner.get_geometry();
-            s.positioner = positioner;
-        });
-        match surface.send_configure() {
-            Ok(_) => surface.send_popup_done(),
-            Err(e) => eprintln!("msl-way: popup configure failed: {e}"),
-        }
+        crate::popups::on_new_popup(self, surface, positioner);
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
+        crate::popups::on_grab(self, &surface);
+    }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        crate::popups::on_reposition(self, &surface, positioner, token);
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        crate::popups::on_popup_destroyed(self, &surface);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -317,8 +382,10 @@ impl XdgShellHandler for State {
 
     fn ack_configure(&mut self, surface: WlSurface, configure: XdgConfigure) {
         debug_assert!(surface.is_alive(), "ack_configure on dead surface");
-        let XdgConfigure::Toplevel(top) = configure else {
-            return;
+        let top = match configure {
+            XdgConfigure::Toplevel(top) => top,
+            // Popups have no host serial mapping; their acks carry nothing.
+            XdgConfigure::Popup(_) => return,
         };
         let xdg_serial = u32::from(top.serial);
         let Some(win) = self.win_id_of(&surface) else {

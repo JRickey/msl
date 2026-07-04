@@ -184,6 +184,9 @@ mod linux {
             ledger: Ledger::new(),
             out: Vec::new(),
             dropped_input: 0,
+            grabs: msl_way::popups::GrabStack::new(),
+            dismissed: msl_way::popups::DismissedSet::new(),
+            warned_popup_configure: false,
         })
     }
 
@@ -233,10 +236,27 @@ mod linux {
 
     fn apply_configure(state: &mut State, cfg: &Configure) {
         debug_assert!(cfg.win != 0, "configure for reserved window id 0");
-        let Some(win) = state.windows.get(&cfg.win) else {
+        let Some(is_popup) = state
+            .windows
+            .get(&cfg.win)
+            .map(msl_way::comp::Win::is_popup)
+        else {
             return;
         };
-        let toplevel = win.toplevel.clone();
+        if is_popup {
+            if !state.warned_popup_configure {
+                eprintln!("msl-way: ignoring host configure for popup win {}", cfg.win);
+                state.warned_popup_configure = true;
+            }
+            return;
+        }
+        let Some(toplevel) = state
+            .windows
+            .get(&cfg.win)
+            .and_then(|w| w.toplevel().cloned())
+        else {
+            return;
+        };
         debug_assert!(toplevel.alive(), "configure target toplevel dead");
         toplevel.with_pending_state(|s| {
             let w = i32::try_from(cfg.w).unwrap_or(0);
@@ -268,8 +288,18 @@ mod linux {
         match msg {
             HostMsg::Configure(cfg) => apply_configure(state, &cfg),
             HostMsg::Close(r) => {
-                if let Some(w) = state.windows.get(&r.win) {
-                    w.toplevel.send_close();
+                match state.windows.get(&r.win).map(msl_way::comp::Win::is_popup) {
+                    Some(true) => msl_way::popups::dismiss_cascade(state, r.win),
+                    Some(false) => {
+                        if let Some(t) = state
+                            .windows
+                            .get(&r.win)
+                            .and_then(|w| w.toplevel().cloned())
+                        {
+                            t.send_close();
+                        }
+                    }
+                    None => {}
                 }
             }
             HostMsg::Pointer(p) => inject_pointer(state, &p),
@@ -281,6 +311,7 @@ mod linux {
                 let json = state.ledger.dump_json();
                 state.enqueue(T_STATS, json.into_bytes());
             }
+            HostMsg::PopupDismiss(r) => msl_way::popups::dismiss_cascade(state, r.win),
             HostMsg::HelloAck(_) | HostMsg::Unknown(_) => {}
         }
     }

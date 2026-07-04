@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 pub const T_HELLO: u32 = 1;
@@ -21,6 +21,8 @@ pub const T_COMMIT: u32 = 13;
 pub const T_CURSOR_NAMED: u32 = 15;
 pub const T_WIN_LIMITS: u32 = 19;
 pub const T_STATS: u32 = 17;
+pub const T_POPUP_NEW: u32 = 21;
+pub const T_POPUP_MOVED: u32 = 23;
 
 pub const T_HELLO_ACK: u32 = 2;
 pub const T_CONFIGURE: u32 = 4;
@@ -29,6 +31,7 @@ pub const T_POINTER: u32 = 8;
 pub const T_KEY: u32 = 10;
 pub const T_PRESENT_ACK: u32 = 12;
 pub const T_STATS_REQ: u32 = 14;
+pub const T_POPUP_DISMISS: u32 = 16;
 
 pub const FMT_XRGB8888: u32 = 0;
 pub const FMT_ARGB8888: u32 = 1;
@@ -150,6 +153,31 @@ pub struct WinTitle {
     pub title: String,
 }
 
+/// A popup mapped as a host child panel.
+///
+/// `parent` is an existing win id (a toplevel or another popup); `x`/`y` are the
+/// popup window-geometry origin in logical points relative to the parent's
+/// geometry origin (y-down).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PopupNew {
+    pub win: u32,
+    pub parent: u32,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub scale: f64,
+}
+
+/// A live popup's parent-relative position changed (`xdg_popup.reposition`).
+/// Units match [`PopupNew`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PopupMoved {
+    pub win: u32,
+    pub x: i32,
+    pub y: i32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CursorNamed {
     pub win: u32,
@@ -219,6 +247,7 @@ pub enum HostMsg {
     Key(Key),
     PresentAck(PresentAck),
     StatsReq,
+    PopupDismiss(WinRef),
     Unknown(u32),
 }
 
@@ -232,6 +261,7 @@ pub fn parse_host(frame: &Frame) -> io::Result<HostMsg> {
         T_KEY => HostMsg::Key(from_json(&frame.payload)?),
         T_PRESENT_ACK => HostMsg::PresentAck(from_json(&frame.payload)?),
         T_STATS_REQ => HostMsg::StatsReq,
+        T_POPUP_DISMISS => HostMsg::PopupDismiss(from_json(&frame.payload)?),
         other => HostMsg::Unknown(other),
     };
     Ok(msg)
@@ -473,6 +503,55 @@ mod tests {
         let f = read_frame(&mut cur).expect("read");
         match parse_host(&f).expect("parse") {
             HostMsg::PresentAck(got) => assert_eq!(got, ack),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn popup_new_json_round_trip() {
+        let msg = PopupNew {
+            win: 12,
+            parent: 3,
+            x: -8,
+            y: 40,
+            w: 220,
+            h: 160,
+            scale: 2.0,
+        };
+        let mut buf = Vec::new();
+        write_json(&mut buf, T_POPUP_NEW, &msg).expect("write");
+        let mut cur = Cursor::new(buf);
+        let f = read_frame(&mut cur).expect("read");
+        assert_eq!(f.msg_type, T_POPUP_NEW);
+        let got: PopupNew = serde_json::from_slice(&f.payload).expect("de");
+        assert_eq!(got, msg);
+    }
+
+    #[test]
+    fn popup_moved_json_round_trip() {
+        let msg = PopupMoved {
+            win: 12,
+            x: 17,
+            y: -3,
+        };
+        let mut buf = Vec::new();
+        write_json(&mut buf, T_POPUP_MOVED, &msg).expect("write");
+        let mut cur = Cursor::new(buf);
+        let f = read_frame(&mut cur).expect("read");
+        assert_eq!(f.msg_type, T_POPUP_MOVED);
+        let got: PopupMoved = serde_json::from_slice(&f.payload).expect("de");
+        assert_eq!(got, msg);
+    }
+
+    #[test]
+    fn parse_host_dispatches_popup_dismiss() {
+        let r = WinRef { win: 9 };
+        let mut buf = Vec::new();
+        write_json(&mut buf, T_POPUP_DISMISS, &r).expect("write");
+        let mut cur = Cursor::new(buf);
+        let f = read_frame(&mut cur).expect("read");
+        match parse_host(&f).expect("parse") {
+            HostMsg::PopupDismiss(got) => assert_eq!(got, r),
             other => panic!("wrong variant: {other:?}"),
         }
     }

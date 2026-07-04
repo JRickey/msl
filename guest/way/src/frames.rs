@@ -433,11 +433,11 @@ mod linux {
     use smithay::wayland::viewporter::ViewportCachedState;
 
     use super::{Damageset, FullBuffer, Rect, Release, effective_scale, pack_damage, scale_to_e12};
-    use crate::comp::{State, read_toplevel_app_id, read_toplevel_title};
+    use crate::comp::{State, Win, WinRole, read_toplevel_app_id, read_toplevel_title};
     use crate::remote::{
-        CommitMeta, FMT_ARGB8888, FMT_XRGB8888, MAX_COMMIT_RECTS, T_COMMIT, T_WIN_LIMITS,
-        T_WIN_MAP, T_WIN_NEW, T_WIN_TITLE, T_WIN_UNMAP, WinLimits, WinNew, WinRef, WinTitle,
-        encode_commit,
+        CommitMeta, FMT_ARGB8888, FMT_XRGB8888, MAX_COMMIT_RECTS, PopupNew, T_COMMIT, T_POPUP_NEW,
+        T_WIN_LIMITS, T_WIN_MAP, T_WIN_NEW, T_WIN_TITLE, T_WIN_UNMAP, WinLimits, WinNew, WinRef,
+        WinTitle, encode_commit,
     };
 
     const BPP: usize = 4;
@@ -664,26 +664,14 @@ mod linux {
     fn announce_and_map(state: &mut State, win: u32, surface: &WlSurface, w: u32, h: u32) {
         debug_assert!(win != 0, "window id 0 is reserved");
         debug_assert!(w > 0 && h > 0, "announcing a zero-sized window");
+        let is_popup = state.windows.get(&win).is_some_and(Win::is_popup);
         let announced = state.windows.get(&win).is_some_and(|x| x.announced);
         if !announced {
-            let app_id = read_toplevel_app_id(surface);
-            let title = read_toplevel_title(surface);
-            if let Some(x) = state.windows.get_mut(&win) {
-                x.app_id.clone_from(&app_id);
-                x.title.clone_from(&title);
-                x.size = (w, h);
-                x.announced = true;
+            if is_popup {
+                announce_popup(state, win, w, h);
+            } else {
+                announce_toplevel(state, win, surface, w, h);
             }
-            let msg = WinNew {
-                win,
-                app_id,
-                title,
-                w,
-                h,
-                scale: state.scale,
-            };
-            let payload = serde_json::to_vec(&msg).unwrap_or_default();
-            state.enqueue(T_WIN_NEW, payload);
         }
         let mapped = state.windows.get(&win).is_some_and(|x| x.mapped);
         if !mapped {
@@ -692,14 +680,64 @@ mod linux {
             }
             let payload = serde_json::to_vec(&WinRef { win }).unwrap_or_default();
             state.enqueue(T_WIN_MAP, payload);
-            let serial = SERIAL_COUNTER.next_serial();
-            let kbd = state.keyboard.clone();
-            kbd.set_focus(state, Some(surface.clone()), serial);
+            // Keyboard focus for popups is grab-driven; a mapped tooltip must
+            // not steal it, so only toplevels take focus here.
+            if !is_popup {
+                let serial = SERIAL_COUNTER.next_serial();
+                let kbd = state.keyboard.clone();
+                kbd.set_focus(state, Some(surface.clone()), serial);
+            }
             // Associate the surface with the output so the client receives
             // wl_surface.enter and renders at the output/fractional scale.
             state.output.enter(surface);
             set_preferred_fractional(surface, state.scale);
         }
+    }
+
+    fn announce_toplevel(state: &mut State, win: u32, surface: &WlSurface, w: u32, h: u32) {
+        debug_assert!(win != 0, "window id 0 is reserved");
+        let app_id = read_toplevel_app_id(surface);
+        let title = read_toplevel_title(surface);
+        if let Some(x) = state.windows.get_mut(&win) {
+            x.app_id.clone_from(&app_id);
+            x.title.clone_from(&title);
+            x.size = (w, h);
+            x.announced = true;
+        }
+        let msg = WinNew {
+            win,
+            app_id,
+            title,
+            w,
+            h,
+            scale: state.scale,
+        };
+        state.enqueue(T_WIN_NEW, serde_json::to_vec(&msg).unwrap_or_default());
+    }
+
+    fn announce_popup(state: &mut State, win: u32, w: u32, h: u32) {
+        debug_assert!(win != 0, "window id 0 is reserved");
+        let info = state.windows.get(&win).and_then(|x| match &x.role {
+            WinRole::Popup { parent, pos, .. } => Some((*parent, *pos)),
+            WinRole::Toplevel(_) => None,
+        });
+        let Some((parent, pos)) = info else {
+            return;
+        };
+        if let Some(x) = state.windows.get_mut(&win) {
+            x.size = (w, h);
+            x.announced = true;
+        }
+        let msg = PopupNew {
+            win,
+            parent,
+            x: pos.0,
+            y: pos.1,
+            w,
+            h,
+            scale: state.scale,
+        };
+        state.enqueue(T_POPUP_NEW, serde_json::to_vec(&msg).unwrap_or_default());
     }
 
     fn unmap(state: &mut State, win: u32) {
@@ -856,7 +894,8 @@ mod linux {
             }
         }
         let announced = state.windows.get(&win).is_some_and(|x| x.announced);
-        if announced {
+        let is_toplevel = state.windows.get(&win).is_some_and(Win::is_toplevel);
+        if announced && is_toplevel {
             sync_limits(state, win, surface);
         }
     }
@@ -924,10 +963,12 @@ mod linux {
 
     /// Re-drive every live mapped toplevel to a freshly-connected host.
     ///
-    /// Fires held callbacks, resets pacing/announce state, replays
-    /// `win_new`/`win_map`/`win_title`, and pushes a full-damage commit of the
-    /// last frame so the new presenter has pixels.
+    /// Popups are transient: they are dismissed (`popup_done` cascade) rather than
+    /// replayed. Toplevels fire held callbacks, reset pacing/announce state,
+    /// replay `win_new`/`win_map`/`win_title`, and push a full-damage commit of
+    /// the last frame so the new presenter has pixels.
     pub fn replay_all(state: &mut State) {
+        crate::popups::dismiss_all_popups(state);
         let wins: Vec<u32> = state.windows.keys().copied().collect();
         for win in wins {
             replay_window(state, win);
@@ -936,6 +977,9 @@ mod linux {
 
     fn replay_window(state: &mut State, win: u32) {
         debug_assert!(win != 0, "reserved window id 0 in registry");
+        if state.windows.get(&win).is_some_and(Win::is_popup) {
+            return;
+        }
         let info = state.windows.get(&win).map(|x| {
             (
                 x.mapped,

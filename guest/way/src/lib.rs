@@ -9,6 +9,7 @@
 
 pub mod frames;
 pub mod ledger;
+pub mod popups;
 pub mod remote;
 
 #[cfg(target_os = "linux")]
