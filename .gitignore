@@ -12,7 +12,7 @@ new-worktree.sh
 .vscode/
 
 # Claude Code local settings
-.claude/settings.local.json
+.claude/
 
 # Rust
 target/
