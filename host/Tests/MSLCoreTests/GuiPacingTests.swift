@@ -163,4 +163,16 @@ final class GuiCommitRouterTests: XCTestCase {
         router.store(win: 5, held: held(3))
         XCTAssertNil(latch.take())
     }
+
+    func testStoreBeforeWindowDrainsAfterRegistration() {
+        let router = GuiCommitRouter()
+        let latch = GuiCommitLatch()
+        // Reader registers the latch and deposits commits before the window is
+        // built on main; the newest survives for the first display-tick drain.
+        router.register(win: 5, latch: latch)
+        router.store(win: 5, held: held(1))
+        router.store(win: 5, held: held(2))
+        XCTAssertEqual(latch.take()?.commit.seq, 2)
+        XCTAssertNil(latch.take())
+    }
 }

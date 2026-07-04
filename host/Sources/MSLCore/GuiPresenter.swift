@@ -34,6 +34,9 @@ public final class GuiPresenter: NSObject, GuiHost {
 
     /// Become a regular app, start the reader, and run the AppKit loop (blocks).
     public func run() {
+        // Flush the ledger if the loop ever returns without going through an
+        // explicit exit path, so data still lands on disk.
+        defer { writeReport() }
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         installStallHandler()
@@ -72,6 +75,10 @@ public final class GuiPresenter: NSObject, GuiHost {
                 routeCommit(frame.payload, recvNs: recvNs)
                 continue
             }
+            if frame.type == GuiType.winNew.rawValue {
+                routeWinNew(frame.payload)
+                continue
+            }
             let type = frame.type
             let payload = frame.payload
             DispatchQueue.main.async { [weak self] in
@@ -87,6 +94,18 @@ public final class GuiPresenter: NSObject, GuiHost {
         commitRouter.store(win: commit.win, held: GuiHeldCommit(commit: commit, recvNs: recvNs))
     }
 
+    /// Register the window's latch on the reader thread *before* dispatching the
+    /// NSWindow build to main, so commits arriving in that gap latch normally and
+    /// the first display tick presents them (no first-paint-until-resize race).
+    nonisolated private func routeWinNew(_ payload: Data) {
+        guard let spec = try? GuiProto.decode(GuiWinNew.self, from: payload) else { return }
+        let latch = GuiCommitLatch()
+        commitRouter.register(win: spec.win, latch: latch)
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.createWindow(spec, latch: latch) }
+        }
+    }
+
     // MARK: - Frame dispatch
 
     private func handleFrame(type: UInt32, payload: Data) {
@@ -100,9 +119,8 @@ public final class GuiPresenter: NSObject, GuiHost {
     }
 
     private func handleWindowFrame(_ kind: GuiType, _ payload: Data) {
-        assert(kind != .commit, "commits are routed off the main thread")
+        assert(kind != .commit && kind != .winNew, "commit/win_new are routed off the main thread")
         switch kind {
-        case .winNew: handleWinNew(payload)
         case .winMap: routeRef(payload) { $0.mapWindow() }
         case .winUnmap: routeRef(payload) { $0.unmapWindow() }
         case .winDestroy: handleWinDestroy(payload)
@@ -126,21 +144,29 @@ public final class GuiPresenter: NSObject, GuiHost {
         channel.send(type: GuiType.helloAck.rawValue, flags: 0, payload: data)
     }
 
-    private func handleWinNew(_ payload: Data) {
-        guard let spec = try? GuiProto.decode(GuiWinNew.self, from: payload) else { return }
-        guard windows[spec.win] == nil else { return }
-        guard let window = GuiWindow(spec: spec, channel: channel, host: self) else {
+    /// Build the NSWindow on main using the latch the reader already registered.
+    /// A duplicate win_new re-registers the existing window's latch so the router
+    /// keeps pointing at the live window.
+    private func createWindow(_ spec: GuiWinNew, latch: GuiCommitLatch) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if let existing = windows[spec.win] {
+            commitRouter.register(win: spec.win, latch: existing.latch)
+            return
+        }
+        guard let window = GuiWindow(spec: spec, channel: channel, host: self, latch: latch) else {
             note("failed to create window \(spec.win)")
+            commitRouter.unregister(win: spec.win)
             return
         }
         windows[spec.win] = window
-        commitRouter.register(win: spec.win, latch: window.latch)
     }
 
     private func handleWinDestroy(_ payload: Data) {
         guard let ref = try? GuiProto.decode(GuiWinRef.self, from: payload) else { return }
         commitRouter.unregister(win: ref.win)
         windows.removeValue(forKey: ref.win)?.destroy()
+        writeReport()
+        closeIfLastWindow()
     }
 
     private func handleWinTitle(_ payload: Data) {
@@ -173,7 +199,17 @@ public final class GuiPresenter: NSObject, GuiHost {
 
     public func windowClosed(_ win: UInt32) {
         commitRouter.unregister(win: win)
-        windows.removeValue(forKey: win)?.destroy()
+        // AppKit already closed the window and windowShouldClose tore down its
+        // resources; just drop our reference (no destroy — that would re-close).
+        windows.removeValue(forKey: win)
+        writeReport()
+        closeIfLastWindow()
+    }
+
+    /// When no windows remain, finalize like a graceful exit so the CSV lands.
+    private func closeIfLastWindow() {
+        guard windows.isEmpty else { return }
+        beginShutdown()
     }
 
     // MARK: - Shutdown & reporting
