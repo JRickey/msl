@@ -17,22 +17,29 @@ public protocol GuiHost: AnyObject {
 final class GuiWindow: NSObject, NSWindowDelegate {
     let win: UInt32
     let latch: GuiCommitLatch
-    private weak var host: GuiHost?
+    weak var host: GuiHost?
     let channel: GuiChannel
 
-    private let window: NSWindow
-    private let view: GuiSurfaceView
+    let window: NSWindow
+    let view: GuiSurfaceView
     private let pool: GuiSurfacePool
     private var pacer = GuiPacer()
     private var displayLink: CADisplayLink?
 
+    let role: GuiRole
+    weak var popupParent: GuiWindow?
+    var popupOffset: (x: Double, y: Double) = (0, 0)
+    var popupSize = GuiSizePoints(width: 1, height: 1)
+
+    var backingWindow: NSWindow { window }
+
     var sentSerial: UInt32 = 0
-    private var sizeState: GuiSizeState = .settled
-    private var remoteApplying = false
-    private var lastApplied: GuiAppliedGeometry?
-    private var lastConfigured: GuiSizePoints?
-    private var resizePending: GuiSizePoints?
-    private var pending: GuiHeldCommit?
+    var sizeState: GuiSizeState = .settled
+    var remoteApplying = false
+    var lastApplied: GuiAppliedGeometry?
+    var lastConfigured: GuiSizePoints?
+    var resizePending: GuiSizePoints?
+    var pending: GuiHeldCommit?
     var pendingInput: (kind: String, tNs: UInt64)?
     var loggedPartialResize = false
     var loggedSerialBug = false
@@ -47,6 +54,7 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         self.channel = channel
         self.host = host
         self.pool = pool
+        self.role = .toplevel
         let desired = GuiSizePoints(
             width: Double(spec.width) / spec.scale, height: Double(spec.height) / spec.scale)
         let clamped = GuiWindow.clamp(desired, to: NSScreen.main)
@@ -60,14 +68,59 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         if clamped != desired { enqueueConfigure(clamped) }
     }
 
+    /// A popup (`popup_new`) as a borderless, non-activating child panel anchored
+    /// to `parent`. It reuses the whole presentation pipeline but runs no
+    /// size-authority machine: every commit resizes to the client's buffer points
+    /// and re-runs placement, and the host never emits a configure for it.
+    init?(
+        popup spec: GuiPopupNew, parent: GuiWindow, channel: GuiChannel, host: GuiHost,
+        latch: GuiCommitLatch
+    ) {
+        guard spec.scale.isFinite, spec.scale > 0, spec.scale <= 16 else { return nil }
+        guard spec.width > 0, spec.height > 0 else { return nil }
+        guard let pool = GuiSurfacePool(width: Int(spec.width), height: Int(spec.height))
+        else { return nil }
+        self.win = spec.win
+        self.latch = latch
+        self.channel = channel
+        self.host = host
+        self.pool = pool
+        self.role = .popup
+        let content = GuiSizePoints(
+            width: Double(spec.width) / spec.scale, height: Double(spec.height) / spec.scale)
+        let logical = NSRect(x: 0, y: 0, width: content.width, height: content.height)
+        let panel = NSPanel(
+            contentRect: logical, styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.hasShadow = true
+        panel.level = .popUpMenu
+        panel.isReleasedWhenClosed = false
+        self.window = panel
+        self.view = GuiSurfaceView(frame: logical)
+        super.init()
+        self.popupParent = parent
+        self.popupOffset = (x: Double(spec.posX), y: Double(spec.posY))
+        self.popupSize = content
+        attachContentView(scale: spec.scale)
+        applyPlacement()
+    }
+
     private func configureWindow(title: String, scale: Double) {
         assert(scale > 0, "window scale must be positive")
-        assert(view.owner == nil, "view is freshly created")
         window.title = title.isEmpty ? "msl" : title
-        // Swift owns the window's lifetime (held in the presenter's dict); without
-        // this AppKit over-releases it on close and crashes in the close animation.
-        window.isReleasedWhenClosed = false
         window.delegate = self
+        attachContentView(scale: scale)
+    }
+
+    /// Install the content view and its presentation layer; shared by toplevels
+    /// and popup panels. The lifetime override keeps Swift as the sole owner: the
+    /// window is held in the presenter's dict, and without this AppKit
+    /// over-releases it on close and crashes in the close animation.
+    func attachContentView(scale: Double) {
+        assert(scale > 0, "content scale must be positive")
+        assert(view.owner == nil, "view is freshly created")
+        window.isReleasedWhenClosed = false
         window.acceptsMouseMovedEvents = true
         window.contentView = view
         view.owner = self
@@ -80,12 +133,16 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     }
 
     func mapWindow() {
-        window.makeKeyAndOrderFront(nil)
+        switch role {
+        case .toplevel: window.makeKeyAndOrderFront(nil)
+        case .popup: attachAsChild()
+        }
         startDisplayLink()
-        assert(window.isVisible, "mapped window must be visible")
+        assert(displayLink != nil, "a mapped window drives a display link")
     }
 
     func unmapWindow() {
+        if role == .popup { detachFromParent() }
         window.orderOut(nil)
         assert(!window.isVisible, "unmapped window must be hidden")
     }
@@ -110,8 +167,11 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         view.owner = nil
     }
 
-    /// Guest-initiated teardown (`win_destroy`): tear down, then close the window.
+    /// Guest-initiated teardown (`win_destroy`): a popup detaches from its parent
+    /// first (AppKit requires removeChildWindow before the child deallocates),
+    /// then tear down and close the window.
     func destroy() {
+        if role == .popup { detachFromParent() }
         teardownResources()
         window.close()
     }
@@ -144,7 +204,10 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         guard let held = latch.take() else { return }
         assert(held.commit.win == win, "commit routed to the wrong window")
         pending = held
-        applySizeVerdict(held.commit)
+        switch role {
+        case .toplevel: applySizeVerdict(held.commit)
+        case .popup: applyPopupCommit(held.commit)
+        }
         pacer.onCommit(seq: held.commit.seq)
         assert(pending != nil, "drain leaves a pending commit")
     }
@@ -184,9 +247,47 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         if owed, !repeated { enqueueConfigure(achieved) }
     }
 
+    private func emitPendingConfigure() {
+        guard let points = resizePending else { return }
+        resizePending = nil
+        enqueueConfigure(points)
+    }
+
+    /// Stamp the next serial (monotonic from 1) and send one configure in the
+    /// window's current state (resizing state only during a live drag).
+    private func enqueueConfigure(_ points: GuiSizePoints) {
+        sentSerial += 1
+        assert(sentSerial > 0, "serials start at 1")
+        lastConfigured = points
+        let width = UInt32(max(1, points.width.rounded()))
+        let height = UInt32(max(1, points.height.rounded()))
+        assert(width > 0 && height > 0, "configure size must be positive")
+        let states = sizeState == .liveResize ? ["activated", "resizing"] : ["activated"]
+        let cfg = GuiConfigure(
+            win: win, width: width, height: height, serial: sentSerial, states: states)
+        if let payload = try? GuiProto.encode(cfg) {
+            channel.send(type: GuiType.configure.rawValue, flags: 0, payload: payload)
+        }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let payload = try? GuiProto.encode(GuiClose(win: win)) {
+            channel.send(type: GuiType.close.rawValue, flags: 0, payload: payload)
+        }
+        // AppKit is closing the window itself; tear down our resources but do not
+        // call window.close() again (that path is destroy(), guest-initiated).
+        teardownResources()
+        host?.windowClosed(win)
+        return true
+    }
+}
+
+// Present pipeline shared by toplevels and popups: pool management, the
+// surface swap, and the present_ack/ledger record on each display tick.
+extension GuiWindow {
     /// Reallocate the pool on a buffer-size change; the guest sends full damage on
     /// resize, so a partial-damage resize is logged once and the rest left blank.
-    private func ensurePool(_ commit: GuiCommit) -> Bool {
+    func ensurePool(_ commit: GuiCommit) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
         if Int(commit.width) == pool.width, Int(commit.height) == pool.height { return true }
         guard pool.resize(width: Int(commit.width), height: Int(commit.height)) else {
@@ -209,7 +310,7 @@ final class GuiWindow: NSObject, NSWindowDelegate {
 
     /// Bring `target` current (full copy of the on-screen frame, then this commit's
     /// damage), swap it in as the front surface in one CATransaction, and ack.
-    private func presentFrame(held: GuiHeldCommit, target: GuiSurface, seq: UInt32) {
+    func presentFrame(held: GuiHeldCommit, target: GuiSurface, seq: UInt32) {
         dispatchPrecondition(condition: .onQueue(.main))
         assert(target.reusable, "present target must be reusable")
         if let front = pool.front { target.copyContents(from: front) }
@@ -260,91 +361,9 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         pacer.onAck()
     }
 
-    private func boundsPoints() -> GuiSizePoints {
+    func boundsPoints() -> GuiSizePoints {
         let bounds = view.bounds
         return GuiSizePoints(
             width: max(1, Double(bounds.width)), height: max(1, Double(bounds.height)))
     }
-
-    private func emitPendingConfigure() {
-        guard let points = resizePending else { return }
-        resizePending = nil
-        enqueueConfigure(points)
-    }
-
-    /// Stamp the next serial (monotonic from 1) and send one configure in the
-    /// window's current state (resizing state only during a live drag).
-    private func enqueueConfigure(_ points: GuiSizePoints) {
-        sentSerial += 1
-        assert(sentSerial > 0, "serials start at 1")
-        lastConfigured = points
-        let width = UInt32(max(1, points.width.rounded()))
-        let height = UInt32(max(1, points.height.rounded()))
-        assert(width > 0 && height > 0, "configure size must be positive")
-        let states = sizeState == .liveResize ? ["activated", "resizing"] : ["activated"]
-        let cfg = GuiConfigure(
-            win: win, width: width, height: height, serial: sentSerial, states: states)
-        if let payload = try? GuiProto.encode(cfg) {
-            channel.send(type: GuiType.configure.rawValue, flags: 0, payload: payload)
-        }
-    }
-
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if let payload = try? GuiProto.encode(GuiClose(win: win)) {
-            channel.send(type: GuiType.close.rawValue, flags: 0, payload: payload)
-        }
-        // AppKit is closing the window itself; tear down our resources but do not
-        // call window.close() again (that path is destroy(), guest-initiated).
-        teardownResources()
-        host?.windowClosed(win)
-        return true
-    }
-}
-
-extension GuiWindow {
-    func windowWillStartLiveResize(_ notification: Notification) {
-        sizeState = .liveResize
-        // Anchor stale content at native size during the drag (compositor
-        // practice): scaling it blurs; the exposed strip stays blank instead.
-        if let layer = view.layer {
-            layer.contentsGravity = layer.contentsAreFlipped() ? .bottomLeft : .topLeft
-        }
-    }
-
-    func windowDidResize(_ notification: Notification) {
-        guard !remoteApplying else { return }
-        resizePending = boundsPoints()
-    }
-
-    func windowDidEndLiveResize(_ notification: Notification) {
-        sizeState = .settled
-        resizePending = boundsPoints()
-        view.layer?.contentsGravity = .resizeAspect
-    }
-
-    /// Apply the client's min/max size hints (0 = unconstrained). The min is
-    /// clamped to the screen's usable content size; AppKit then stops a shrink
-    /// drag at the floor, so a below-minimum size never reaches the client.
-    func applyLimits(_ limits: GuiWinLimits) {
-        let maxW = limits.maxWidth
-        let maxH = limits.maxHeight
-        let badMax =
-            (maxW != 0 && maxW < limits.minWidth) || (maxH != 0 && maxH < limits.minHeight)
-        if badMax { logBadLimitsOnce(limits) }
-        if limits.minWidth == 0, limits.minHeight == 0 {
-            window.contentMinSize = .zero
-        } else {
-            let raw = GuiSizePoints(
-                width: Double(limits.minWidth), height: Double(limits.minHeight))
-            let clamped = GuiWindow.clamp(raw, to: window.screen ?? NSScreen.main)
-            window.contentMinSize = NSSize(width: clamped.width, height: clamped.height)
-        }
-        let unbounded = CGFloat.greatestFiniteMagnitude
-        window.contentMaxSize = NSSize(
-            width: (maxW == 0 || badMax) ? unbounded : CGFloat(maxW),
-            height: (maxH == 0 || badMax) ? unbounded : CGFloat(maxH))
-        assert(window.contentMinSize.width <= window.contentMaxSize.width, "min beyond max")
-        assert(window.contentMinSize.height <= window.contentMaxSize.height, "min beyond max")
-    }
-
 }
