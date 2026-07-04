@@ -1,0 +1,24 @@
+{{! Plain-text/markdown template for `cargo about generate` (default stock
+    templates are HTML; THIRD-PARTY-LICENSES is a repo-root text file). }}
+## License overview
+
+{{#each overview}}
+- {{name}} ({{count}} package(s))
+{{/each}}
+
+## Full license texts
+
+{{#each licenses}}
+{{#if first_of_kind}}
+---
+
+### {{name}}
+{{/if}}
+
+Used by: {{#each used_by}}{{crate.name}} {{crate.version}}{{#unless @last}}, {{/unless}}{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

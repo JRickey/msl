@@ -1,0 +1,101 @@
+msl
+Copyright 2026 Jack Rickey
+
+Licensed under the Apache License, Version 2.0 (the "License"); see LICENSE.
+
+This product includes third-party software statically linked into its
+distributed binaries, as follows.
+
+================================================================================
+libxkbcommon 1.7.0 (MIT/X11) — statically linked into msl-way
+================================================================================
+
+Copyright © 2009-2012, 2016 Daniel Stone
+Copyright © 2012 Ran Benita <ran234@gmail.com>
+Copyright © 2010, 2012 Intel Corporation
+Copyright © 2008, 2009 Dan Nicholson
+Copyright © 2010 Francisco Jerez <currojerez@riseup.net>
+Copyright 1985, 1987, 1988, 1990, 1998 The Open Group
+Copyright (c) 1993, 1994, 1995, 1996 by Silicon Graphics Computer Systems, Inc.
+Copyright 1987, 1988 by Digital Equipment Corporation, Maynard, Massachusetts.
+Copyright (C) 2011 Joseph Adams <joeyadams3.14159@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next
+paragraph) shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Full upstream copyright/license statement: see the libxkbcommon LICENSE file
+(https://github.com/xkbcommon/libxkbcommon/blob/xkbcommon-1.7.0/LICENSE).
+Only the shared-library source under src/ and xkbcommon/ is compiled into
+msl-way; msl does not ship the test data under test/data.
+
+================================================================================
+Rust crates statically linked into msl-agent, msl-shim, and msl-way
+(guest/ cargo workspace) — grouped by license
+================================================================================
+
+Dependency set verified via `cargo metadata --format-version 1
+--filter-platform aarch64-unknown-linux-musl --locked`, restricted to normal
+(non-dev, non-build) dependencies of each shipped binary's resolve-graph
+closure. See docs/reports/notice-inventory.md for the full per-binary table,
+commands, and provenance.
+
+--- MIT License ---
+
+appendlist, block-buffer (RustCrypto), calloop, cpufeatures (RustCrypto),
+crypto-common (RustCrypto), digest (RustCrypto), downcast-rs, drm-fourcc,
+generic-array, memoffset, nix, quick-xml, slab, smithay, tracing,
+tracing-attributes, tracing-core, wayland-backend, wayland-protocols,
+wayland-protocols-misc, wayland-protocols-wlr, wayland-scanner,
+wayland-server, wayland-sys, xkbcommon (Rust bindings crate — distinct from
+the C library above)
+
+--- MIT OR Apache-2.0 (or equivalent dual/multi-license; used here under MIT) ---
+
+bitflags, cfg-if, cursor-icon, errno, getrandom, hashbrown, itoa, libc,
+linux-raw-sys, log, memmap2, num-traits, once_cell, pin-project-lite,
+polling, ppv-lite86, proc-macro2, quote, rand, rand_chacha, rand_core,
+rustix, serde, serde_core, serde_derive, serde_json, sha2, smallvec, syn,
+tempfile, thiserror, thiserror-impl, typenum, unicode-ident, xkeysym, zmij
+
+--- Apache-2.0 only ---
+
+approx, cgmath, vsock
+
+--- Other permissive (Unlicense/MIT, BSD-2-Clause/Apache-2.0/MIT) ---
+
+atomic_float (Apache-2.0/MIT/Unlicense), equivalent (Apache-2.0/MIT),
+fastrand (Apache-2.0/MIT), indexmap (Apache-2.0/MIT), memchr
+(Unlicense/MIT), profiling, profiling-procmacros, zerocopy
+(BSD-2-Clause/Apache-2.0/MIT)
+
+Copyright in each crate belongs to its respective authors; per crates.io
+metadata, where an individual or named group is recorded as author that name
+is the copyright holder, otherwise "the <crate name> authors" applies by
+convention. Full per-crate author attribution is in
+docs/reports/notice-inventory.md.
+
+================================================================================
+Swift host dependencies
+================================================================================
+
+swift-argument-parser (Apache-2.0) — Copyright Apple Inc. and the Swift
+Argument Parser project authors. Ships no NOTICE file of its own.
+
+Apple system frameworks (Virtualization.framework, Foundation, AppKit, Metal,
+etc.) and the Swift standard library require no attribution.
