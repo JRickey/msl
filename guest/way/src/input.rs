@@ -19,14 +19,15 @@ mod linux {
     use crate::comp::State;
     use crate::remote::{Key, Pointer};
 
-    /// Resolve the protocol `win` to its surface and make it the seat focus,
-    /// counting and rejecting events addressed to an unknown window.
-    fn target(state: &mut State, win: u32) -> Option<WlSurface> {
+    /// Resolve the protocol `win` to its surface, optionally forcing keyboard
+    /// focus to it, counting and rejecting events addressed to an unknown
+    /// window. Under a grab, pointer routing must not move keyboard focus.
+    fn target(state: &mut State, win: u32, set_kbd_focus: bool) -> Option<WlSurface> {
         let Some(surface) = state.windows.get(&win).map(|w| w.surface.clone()) else {
             state.dropped_input = state.dropped_input.saturating_add(1);
             return None;
         };
-        if state.focus != Some(win) {
+        if set_kbd_focus && state.focus != Some(win) {
             let kbd = state.keyboard.clone();
             let serial = SERIAL_COUNTER.next_serial();
             kbd.set_focus(state, Some(surface.clone()), serial);
@@ -40,7 +41,18 @@ mod linux {
             "non-finite pointer coords"
         );
         debug_assert!(ev.win != 0, "pointer for reserved window id 0");
-        let Some(surface) = target(state, ev.win) else {
+        // A press outside every grabbed popup dismisses the whole stack and
+        // activates nothing (GTK/macOS menu behavior).
+        let outside_press = ev.kind == "button"
+            && ev.state != 0
+            && !state.grabs.is_empty()
+            && !state.grabs.contains(ev.win);
+        if outside_press {
+            crate::popups::dismiss_all_grabs(state);
+            return;
+        }
+        let set_kbd = state.grabs.is_empty();
+        let Some(surface) = target(state, ev.win, set_kbd) else {
             return;
         };
         let ptr = state.pointer.clone();
@@ -106,7 +118,10 @@ mod linux {
     pub fn inject_key(state: &mut State, ev: &Key) {
         debug_assert!(ev.state <= 1, "key state must be 0 or 1");
         debug_assert!(ev.win != 0, "key for reserved window id 0");
-        if target(state, ev.win).is_none() {
+        // Under a grab the popup owns the keyboard: route every key to the
+        // topmost popup, ignoring the host's key-window tag (the parent).
+        let win = state.grabs.topmost().unwrap_or(ev.win);
+        if target(state, win, true).is_none() {
             return;
         }
         let kbd = state.keyboard.clone();
