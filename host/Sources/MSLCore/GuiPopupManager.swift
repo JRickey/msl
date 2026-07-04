@@ -133,12 +133,19 @@ final class GuiPopupManager: NSObject {
         assert(mouseMonitor == nil, "monitor cleared when no popup remains")
     }
 
+    /// Dismiss only for chrome clicks (title bar — downs that never reach a
+    /// content view). A down inside any content view — popup or parent — is the
+    /// guest's decision: it consumes outside-grab presses itself, and a host
+    /// dismissal racing ahead of the press re-arms the client's menu toggle.
     private func observeMouseDown(_ event: NSEvent) {
         guard !panels.isEmpty else { return }
-        guard let target = event.window, isPopupPanel(target) else {
-            dismissAll()
-            return
+        guard let target = event.window else { return }
+        if isPopupPanel(target) { return }
+        if let content = target.contentView {
+            let local = content.convert(event.locationInWindow, from: nil)
+            if content.bounds.contains(local) { return }
         }
+        dismissAll()
     }
 
     private func isPopupPanel(_ window: NSWindow) -> Bool {
