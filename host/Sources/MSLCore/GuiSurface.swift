@@ -105,27 +105,33 @@ final class GuiSurfacePool {
         return made
     }
 
-    /// Reallocate to new dimensions on a buffer-size change; the front is dropped
-    /// so the next present starts from a fresh surface expecting full damage.
+    /// Reallocate on a buffer-size change: only the surface the imminent present
+    /// needs is created here (a fast grow resizes every frame, and IOSurface
+    /// allocation is costly); the rest of the pool backfills on demand. The
+    /// front is dropped so the next present expects full damage.
     func resize(width newWidth: Int, height newHeight: Int) -> Bool {
         assert(newWidth > 0 && newHeight > 0, "resize dimensions must be positive")
-        guard let made = GuiSurfacePool.make(width: newWidth, height: newHeight) else {
+        guard let first = GuiSurface(width: newWidth, height: newHeight) else {
             return false
         }
-        surfaces = made
+        surfaces = [first]
         front = nil
         width = newWidth
         height = newHeight
-        assert(surfaces.count == GuiSurfacePool.depth, "resized pool holds depth surfaces")
+        assert(surfaces.count == 1, "resized pool starts with the present target")
         return true
     }
 
     func reusableTarget() -> GuiSurface? {
-        assert(surfaces.count >= 2, "pool holds at least two surfaces")
+        assert(surfaces.count >= 1, "pool never empties")
         for surface in surfaces {  // bounded: depth
             if surface.reusable, surface !== front { return surface }
         }
-        return nil
+        guard surfaces.count < GuiSurfacePool.depth else { return nil }
+        guard let extra = GuiSurface(width: width, height: height) else { return nil }
+        surfaces.append(extra)
+        assert(surfaces.count <= GuiSurfacePool.depth, "pool stays within depth")
+        return extra
     }
 
     /// Promote `target` to the front and return the outgoing surface, which the

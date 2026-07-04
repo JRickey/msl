@@ -132,6 +132,22 @@ final class GuiControlCodecTests: XCTestCase {
     }
 }
 
+final class GuiWinLimitsTests: XCTestCase {
+    func testWinLimitsRoundTrip() throws {
+        let msg = GuiWinLimits(win: 4, minWidth: 1365, minHeight: 792, maxWidth: 0, maxHeight: 0)
+        let data = try GuiProto.encode(msg)
+        let back = try GuiProto.decode(GuiWinLimits.self, from: data)
+        XCTAssertEqual(back, msg)
+    }
+
+    func testWinLimitsWireKeys() throws {
+        let json = #"{"win":9,"min_w":100,"min_h":50,"max_w":200,"max_h":150}"#
+        let msg = try GuiProto.decode(GuiWinLimits.self, from: Data(json.utf8))
+        XCTAssertEqual(msg.minWidth, 100)
+        XCTAssertEqual(msg.maxHeight, 150)
+    }
+}
+
 final class GuiCommitParserTests: XCTestCase {
     func testValidCommitParses() throws {
         let commit = try GuiProto.parseCommit(

@@ -18,7 +18,7 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     let win: UInt32
     let latch: GuiCommitLatch
     private weak var host: GuiHost?
-    private let channel: GuiChannel
+    let channel: GuiChannel
 
     private let window: NSWindow
     private let view: GuiSurfaceView
@@ -26,14 +26,17 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     private var pacer = GuiPacer()
     private var displayLink: CADisplayLink?
 
-    private var sentSerial: UInt32 = 0
+    var sentSerial: UInt32 = 0
     private var sizeState: GuiSizeState = .settled
     private var remoteApplying = false
+    private var lastApplied: GuiAppliedGeometry?
+    private var lastConfigured: GuiSizePoints?
     private var resizePending: GuiSizePoints?
     private var pending: GuiHeldCommit?
-    private var pendingInput: (kind: String, tNs: UInt64)?
-    private var loggedPartialResize = false
-    private var loggedSerialBug = false
+    var pendingInput: (kind: String, tNs: UInt64)?
+    var loggedPartialResize = false
+    var loggedSerialBug = false
+    var loggedBadLimits = false
 
     init?(spec: GuiWinNew, channel: GuiChannel, host: GuiHost, latch: GuiCommitLatch) {
         guard spec.scale > 0, spec.width > 0, spec.height > 0 else { return nil }
@@ -49,7 +52,7 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         let clamped = GuiWindow.clamp(desired, to: NSScreen.main)
         let logical = NSRect(x: 0, y: 0, width: clamped.width, height: clamped.height)
         self.window = NSWindow(
-            contentRect: logical, styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: logical, styleMask: GuiWindow.styleMask,
             backing: .buffered, defer: false)
         self.view = GuiSurfaceView(frame: logical)
         super.init()
@@ -152,26 +155,33 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         let content = boundsPoints()
         let verdict = GuiSizing.verdict(
             state: sizeState, sentSerial: sentSerial, commitSerial: commit.serial,
-            bufferPoints: buffer, contentPoints: content)
+            bufferPoints: buffer, contentPoints: content, lastApplied: lastApplied)
         assert(content.width >= 0 && content.height >= 0, "content points non-negative")
         switch verdict {
         case .pixelsOnly: break
         case .pixelsOnlyStaleFuture: logSerialBugOnce(commit.serial)
-        case .applyGeometry(let points): applyRemoteGeometry(points)
+        case .applyGeometry(let points): applyRemoteGeometry(points, serial: commit.serial)
         }
     }
 
-    /// Rule 3: apply the client's buffer points once under a guard that suppresses
-    /// the echo configure; if the clamp shrank the size, tell the guest with one.
-    private func applyRemoteGeometry(_ points: GuiSizePoints) {
+    /// Rule 3: apply the client's buffer points once per (serial, points) pair,
+    /// under a guard that suppresses the echo configure. Idempotent: when the
+    /// window already sits at the clamp target nothing moves and nothing is sent,
+    /// so a client that refuses a size can never drive a configure loop.
+    private func applyRemoteGeometry(_ points: GuiSizePoints, serial: UInt32) {
         dispatchPrecondition(condition: .onQueue(.main))
         let clamped = GuiWindow.clamp(points, to: window.screen ?? NSScreen.main)
         guard clamped.width >= 1, clamped.height >= 1 else { return }
+        lastApplied = GuiAppliedGeometry(serial: serial, points: points)
+        guard GuiSizing.differs(clamped, boundsPoints()) else { return }
         remoteApplying = true
         window.setContentSize(NSSize(width: clamped.width, height: clamped.height))
         remoteApplying = false
         assert(!remoteApplying, "remote-apply guard cleared after setContentSize")
-        if clamped != points { enqueueConfigure(clamped) }
+        let achieved = boundsPoints()
+        let owed = GuiSizing.differs(achieved, points)
+        let repeated = lastConfigured.map { !GuiSizing.differs($0, achieved) } ?? false
+        if owed, !repeated { enqueueConfigure(achieved) }
     }
 
     /// Reallocate the pool on a buffer-size change; the guest sends full damage on
@@ -250,20 +260,6 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         pacer.onAck()
     }
 
-    func windowWillStartLiveResize(_ notification: Notification) {
-        sizeState = .liveResize
-    }
-
-    func windowDidResize(_ notification: Notification) {
-        guard !remoteApplying else { return }
-        resizePending = boundsPoints()
-    }
-
-    func windowDidEndLiveResize(_ notification: Notification) {
-        sizeState = .settled
-        resizePending = boundsPoints()
-    }
-
     private func boundsPoints() -> GuiSizePoints {
         let bounds = view.bounds
         return GuiSizePoints(
@@ -281,6 +277,7 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     private func enqueueConfigure(_ points: GuiSizePoints) {
         sentSerial += 1
         assert(sentSerial > 0, "serials start at 1")
+        lastConfigured = points
         let width = UInt32(max(1, points.width.rounded()))
         let height = UInt32(max(1, points.height.rounded()))
         assert(width > 0 && height > 0, "configure size must be positive")
@@ -305,96 +302,49 @@ final class GuiWindow: NSObject, NSWindowDelegate {
 }
 
 extension GuiWindow {
-    fileprivate func logPartialResizeOnce() {
-        guard !loggedPartialResize else { return }
-        loggedPartialResize = true
-        warn("resize commit did not fully damage the new buffer")
-    }
-
-    fileprivate func logSerialBugOnce(_ serial: UInt32) {
-        guard !loggedSerialBug else { return }
-        loggedSerialBug = true
-        warn("commit serial \(serial) exceeds sent \(sentSerial)")
-    }
-
-    private func warn(_ message: String) {
-        assert(!message.isEmpty, "diagnostic message is non-empty")
-        let line = "gui-spike win \(win): \(message)\n"
-        try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
-    }
-
-    fileprivate static func clamp(_ points: GuiSizePoints, to screen: NSScreen?) -> GuiSizePoints {
-        guard let visible = screen?.visibleFrame else { return points }
-        let width = min(points.width, Double(visible.width))
-        let height = min(points.height, Double(visible.height))
-        return GuiSizePoints(width: max(1, width), height: max(1, height))
-    }
-
-    fileprivate static func cursor(for name: String) -> NSCursor {
-        switch name {
-        case "text": return .iBeam
-        case "pointer": return .pointingHand
-        case "grab": return .openHand
-        default: return .arrow
-        }
-    }
-}
-
-// MARK: - Input translation (called by the content view on the main thread)
-
-extension GuiWindow {
-    /// Window-local logical pointer state for one event (top-left origin).
-    struct PointerSample {
-        let kind: String
-        let posX: Double
-        let posY: Double
-        var button: UInt32 = 0
-        var state: UInt32 = 0
-        var dx: Double = 0
-        var dy: Double = 0
-    }
-
-    func pointerMotion(posX: Double, posY: Double) {
-        sendPointer(PointerSample(kind: "motion", posX: posX, posY: posY), note: true)
-    }
-
-    func pointerButton(button: UInt32, down: Bool, posX: Double, posY: Double) {
-        sendPointer(
-            PointerSample(
-                kind: "button", posX: posX, posY: posY, button: button, state: down ? 1 : 0),
-            note: true)
-    }
-
-    func pointerAxis(dx: Double, dy: Double, posX: Double, posY: Double) {
-        sendPointer(
-            PointerSample(kind: "axis", posX: posX, posY: posY, dx: dx, dy: dy), note: true)
-    }
-
-    func pointerCrossing(entered: Bool, posX: Double, posY: Double) {
-        sendPointer(
-            PointerSample(kind: entered ? "enter" : "leave", posX: posX, posY: posY), note: false)
-    }
-
-    func keyEvent(virtualCode: UInt16, down: Bool) {
-        let code = GuiKeymap.evdev(for: virtualCode)
-        guard code != GuiKeymap.keyReserved else { return }
-        let now = GuiClock.nowNs()
-        pendingInput = ("key", now)
-        let key = GuiKey(win: win, keycode: code, state: down ? 1 : 0, tHostNs: now)
-        if let payload = try? GuiProto.encode(key) {
-            channel.send(type: GuiType.key.rawValue, flags: 0, payload: payload)
+    func windowWillStartLiveResize(_ notification: Notification) {
+        sizeState = .liveResize
+        // Anchor stale content at native size during the drag (compositor
+        // practice): scaling it blurs; the exposed strip stays blank instead.
+        if let layer = view.layer {
+            layer.contentsGravity = layer.contentsAreFlipped() ? .bottomLeft : .topLeft
         }
     }
 
-    private func sendPointer(_ sample: PointerSample, note: Bool) {
-        assert(!sample.kind.isEmpty, "pointer kind must not be empty")
-        let now = GuiClock.nowNs()
-        if note { pendingInput = (sample.kind, now) }
-        let pointer = GuiPointer(
-            win: win, kind: sample.kind, posX: sample.posX, posY: sample.posY,
-            button: sample.button, state: sample.state, dx: sample.dx, dy: sample.dy, tHostNs: now)
-        if let payload = try? GuiProto.encode(pointer) {
-            channel.send(type: GuiType.pointer.rawValue, flags: 0, payload: payload)
-        }
+    func windowDidResize(_ notification: Notification) {
+        guard !remoteApplying else { return }
+        resizePending = boundsPoints()
     }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        sizeState = .settled
+        resizePending = boundsPoints()
+        view.layer?.contentsGravity = .resizeAspect
+    }
+
+    /// Apply the client's min/max size hints (0 = unconstrained). The min is
+    /// clamped to the screen's usable content size; AppKit then stops a shrink
+    /// drag at the floor, so a below-minimum size never reaches the client.
+    func applyLimits(_ limits: GuiWinLimits) {
+        let maxW = limits.maxWidth
+        let maxH = limits.maxHeight
+        let badMax =
+            (maxW != 0 && maxW < limits.minWidth) || (maxH != 0 && maxH < limits.minHeight)
+        if badMax { logBadLimitsOnce(limits) }
+        if limits.minWidth == 0, limits.minHeight == 0 {
+            window.contentMinSize = .zero
+        } else {
+            let raw = GuiSizePoints(
+                width: Double(limits.minWidth), height: Double(limits.minHeight))
+            let clamped = GuiWindow.clamp(raw, to: window.screen ?? NSScreen.main)
+            window.contentMinSize = NSSize(width: clamped.width, height: clamped.height)
+        }
+        let unbounded = CGFloat.greatestFiniteMagnitude
+        window.contentMaxSize = NSSize(
+            width: (maxW == 0 || badMax) ? unbounded : CGFloat(maxW),
+            height: (maxH == 0 || badMax) ? unbounded : CGFloat(maxH))
+        assert(window.contentMinSize.width <= window.contentMaxSize.width, "min beyond max")
+        assert(window.contentMinSize.height <= window.contentMaxSize.height, "min beyond max")
+    }
+
 }

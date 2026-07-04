@@ -125,6 +125,7 @@ public final class GuiPresenter: NSObject, GuiHost {
         case .winUnmap: routeRef(payload) { $0.unmapWindow() }
         case .winDestroy: handleWinDestroy(payload)
         case .winTitle: handleWinTitle(payload)
+        case .winLimits: handleWinLimits(payload)
         case .cursorNamed: handleCursor(payload)
         default: break
         }
@@ -172,6 +173,11 @@ public final class GuiPresenter: NSObject, GuiHost {
     private func handleWinTitle(_ payload: Data) {
         guard let msg = try? GuiProto.decode(GuiWinTitle.self, from: payload) else { return }
         windows[msg.win]?.setTitle(msg.title)
+    }
+
+    private func handleWinLimits(_ payload: Data) {
+        guard let msg = try? GuiProto.decode(GuiWinLimits.self, from: payload) else { return }
+        windows[msg.win]?.applyLimits(msg)
     }
 
     private func handleCursor(_ payload: Data) {

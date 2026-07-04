@@ -54,10 +54,13 @@ public enum GuiSizing {
     }
 
     /// Decide a drained commit's effect. `sentSerial` is the newest serial the
-    /// host has sent; a commit is current iff its serial equals it.
+    /// host has sent; a commit is current iff its serial equals it. `lastApplied`
+    /// dedups rule 3: repeating an already-applied (serial, points) pair never
+    /// re-applies, even while content points still differ (AppKit constraints).
     public static func verdict(
         state: GuiSizeState, sentSerial: UInt32, commitSerial: UInt32,
-        bufferPoints: GuiSizePoints, contentPoints: GuiSizePoints
+        bufferPoints: GuiSizePoints, contentPoints: GuiSizePoints,
+        lastApplied: GuiAppliedGeometry? = nil
     ) -> GuiSizeVerdict {
         assert(bufferPoints.width >= 0 && bufferPoints.height >= 0, "buffer points non-negative")
         assert(contentPoints.width >= 0 && contentPoints.height >= 0, "content points non-negative")
@@ -69,15 +72,32 @@ public enum GuiSizing {
             return .pixelsOnly
         case .settled:
             guard commitSerial == sentSerial else { return .pixelsOnly }
-            guard differ(bufferPoints, contentPoints) else { return .pixelsOnly }
+            guard differs(bufferPoints, contentPoints) else { return .pixelsOnly }
+            let repeated = lastApplied.map {
+                $0.serial == commitSerial && !differs($0.points, bufferPoints)
+            }
+            guard repeated != true else { return .pixelsOnly }
             return .applyGeometry(bufferPoints)
         }
     }
 
-    private static func differ(_ lhs: GuiSizePoints, _ rhs: GuiSizePoints) -> Bool {
+    /// True when two sizes differ by at least the epsilon on either axis.
+    public static func differs(_ lhs: GuiSizePoints, _ rhs: GuiSizePoints) -> Bool {
         assert(pointEpsilon > 0, "epsilon must be positive")
         let dw = abs(lhs.width - rhs.width)
         let dh = abs(lhs.height - rhs.height)
         return dw >= pointEpsilon || dh >= pointEpsilon
+    }
+}
+
+/// The (serial, buffer points) pair of the most recent geometry apply; rule 3
+/// applies once per pair, so a client pinned at its minimum cannot re-trigger.
+public struct GuiAppliedGeometry: Sendable, Equatable {
+    public let serial: UInt32
+    public let points: GuiSizePoints
+
+    public init(serial: UInt32, points: GuiSizePoints) {
+        self.serial = serial
+        self.points = points
     }
 }
