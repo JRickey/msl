@@ -3,9 +3,17 @@
 //! The pure pieces here — the [`Pacing`] state machine and [`pack_damage`] — are
 //! host-testable; the Smithay buffer plumbing that feeds them is guest-only.
 
+use std::collections::VecDeque;
+
 use crate::remote::{MAX_COMMIT_RECTS, Rect};
 
 pub const FRAME_STARVATION_NS: u64 = 50_000_000;
+
+/// Bound on a window's outstanding xdg→host configure-serial map.
+///
+/// Overflow drops the oldest entry: a lost mapping can only stamp a later commit
+/// with an older host serial, never a newer one — the conservative direction.
+pub const CONFIGURE_RING_CAP: usize = 64;
 
 /// A committed shm frame copied out of the client's pool.
 ///
@@ -192,6 +200,84 @@ impl Pacing {
         } else {
             Release::Idle
         }
+    }
+}
+
+/// Wayland-style wrapping serial comparison: `a` is strictly newer than `b`
+/// when their forward distance falls in the near half of the u32 ring. Keeps
+/// [`ConfigureRing`] free of smithay types while surviving counter wraparound.
+#[must_use]
+const fn serial_newer(a: u32, b: u32) -> bool {
+    a != b && a.wrapping_sub(b) < 0x8000_0000
+}
+
+/// Per-window configure-serial tracking.
+///
+/// A bounded ring mapping each xdg configure serial to the host serial it
+/// carried, plus the newest host serial the client has acked. Commits stamp
+/// [`acked`](Self::acked); the host keys its size-authority machine on it.
+#[derive(Debug, Default)]
+pub struct ConfigureRing {
+    entries: VecDeque<(u32, u32)>,
+    acked_host_serial: u32,
+}
+
+impl ConfigureRing {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub const fn acked(&self) -> u32 {
+        self.acked_host_serial
+    }
+
+    /// Map an xdg configure serial to the host serial it delivered; drop the
+    /// oldest when full, and reject a serial not strictly newer than the back.
+    pub fn record(&mut self, xdg_serial: u32, host_serial: u32) {
+        debug_assert!(self.entries.len() <= CONFIGURE_RING_CAP, "ring over cap");
+        if self
+            .entries
+            .back()
+            .is_some_and(|&(back, _)| !serial_newer(xdg_serial, back))
+        {
+            return;
+        }
+        if self.entries.len() >= CONFIGURE_RING_CAP {
+            let _ = self.entries.pop_front();
+        }
+        self.entries.push_back((xdg_serial, host_serial));
+        debug_assert!(
+            self.entries.len() <= CONFIGURE_RING_CAP,
+            "ring exceeded cap"
+        );
+    }
+
+    /// Resolve an ordered ack: drain every entry at or before `acked_xdg_serial`
+    /// (wrapping-aware) and advance the acked host serial monotonically.
+    pub fn resolve(&mut self, acked_xdg_serial: u32) {
+        debug_assert!(self.entries.len() <= CONFIGURE_RING_CAP, "ring over cap");
+        let mut newest = self.acked_host_serial;
+        for _ in 0..CONFIGURE_RING_CAP {
+            match self.entries.front() {
+                Some(&(xs, hs)) if !serial_newer(xs, acked_xdg_serial) => {
+                    newest = newest.max(hs);
+                    let _ = self.entries.pop_front();
+                }
+                _ => break,
+            }
+        }
+        self.acked_host_serial = newest.max(self.acked_host_serial);
+        debug_assert!(self.entries.len() <= CONFIGURE_RING_CAP, "ring over cap");
+    }
+
+    /// Drop all serial state for a fresh host connection.
+    pub fn reset(&mut self) {
+        debug_assert!(self.entries.len() <= CONFIGURE_RING_CAP, "ring over cap");
+        self.entries.clear();
+        self.acked_host_serial = 0;
+        debug_assert!(self.entries.is_empty(), "ring not cleared");
     }
 }
 
@@ -456,6 +542,7 @@ mod linux {
         fb: &FullBuffer,
         dmg: &Damageset,
         t_commit: u64,
+        serial: u32,
     ) -> bool {
         debug_assert!(win != 0, "window id 0 is reserved");
         debug_assert!(fb.w > 0 && fb.h > 0, "emitting a zero-sized frame");
@@ -475,6 +562,7 @@ mod linux {
             stride: fb.stride,
             format: fb.format,
             scale_e12: scale_to_e12(fb.scale),
+            serial,
             t_client_commit_ns: t_commit,
             t_send_ns: t_send,
         };
@@ -511,12 +599,13 @@ mod linux {
             .map_or((0, 0), |x| x.prev_buffer_size);
         let full = !announced || prev != (fb.w, fb.h);
         let dmg = damage_set(damage, fb.w, fb.h, full);
+        let serial = state.windows.get(&win).map_or(0, |x| x.serials.acked());
         let wants = state
             .windows
             .get(&win)
             .is_some_and(|x| x.pacing.wants_emit());
         if wants {
-            let emitted = emit_snapshot(state, win, surface, &fb, &dmg, t_commit);
+            let emitted = emit_snapshot(state, win, surface, &fb, &dmg, t_commit, serial);
             if emitted {
                 if let Some(x) = state.windows.get_mut(&win) {
                     x.last_frame = Some(fb);
@@ -529,6 +618,7 @@ mod linux {
             x.pacing.defer(dmg.full, &dmg.rects);
             x.pending = Some(fb);
             x.pending_t_commit = t_commit;
+            x.pending_serial = serial;
             x.held_callbacks.extend(callbacks);
         }
     }
@@ -574,14 +664,15 @@ mod linux {
     fn flush_pending(state: &mut State, win: u32, dmg: &Damageset) {
         debug_assert!(win != 0, "flush for reserved window id 0");
         let surface = state.windows.get(&win).map(|x| x.surface.clone());
-        let taken = state
-            .windows
-            .get_mut(&win)
-            .and_then(|x| x.pending.take().map(|fb| (fb, x.pending_t_commit)));
-        let (Some(surface), Some((fb, t_commit))) = (surface, taken) else {
+        let taken = state.windows.get_mut(&win).and_then(|x| {
+            x.pending
+                .take()
+                .map(|fb| (fb, x.pending_t_commit, x.pending_serial))
+        });
+        let (Some(surface), Some((fb, t_commit, serial))) = (surface, taken) else {
             return;
         };
-        if emit_snapshot(state, win, &surface, &fb, dmg, t_commit)
+        if emit_snapshot(state, win, &surface, &fb, dmg, t_commit, serial)
             && let Some(x) = state.windows.get_mut(&win)
         {
             x.last_frame = Some(fb);
@@ -653,8 +744,10 @@ mod linux {
         fire(state, held);
         if let Some(x) = state.windows.get_mut(&win) {
             x.pacing.reset();
+            x.serials.reset();
             x.pending = None;
             x.pending_t_commit = 0;
+            x.pending_serial = 0;
             x.announced = false;
             x.mapped = false;
             x.prev_buffer_size = (0, 0);
@@ -700,7 +793,7 @@ mod linux {
         let last = state.windows.get(&win).and_then(|x| x.last_frame.clone());
         if let Some(fb) = last {
             let t = state.now_ns();
-            let _ = emit_snapshot(state, win, surface, &fb, &Damageset::full(), t);
+            let _ = emit_snapshot(state, win, surface, &fb, &Damageset::full(), t, 0);
         }
     }
 }
@@ -901,5 +994,89 @@ mod tests {
             h: 1,
         }];
         assert!(pack_damage(&data, 16, 4, 4, 2, &rects).is_none());
+    }
+
+    #[test]
+    fn fresh_ring_stamps_zero_before_any_ack() {
+        let r = ConfigureRing::new();
+        assert_eq!(r.acked(), 0, "commits stamp 0 until the first ack resolves");
+    }
+
+    #[test]
+    fn ring_overflow_drops_oldest_entry() {
+        let mut r = ConfigureRing::new();
+        let cap = u32::try_from(CONFIGURE_RING_CAP).expect("cap fits u32");
+        for i in 1..=cap + 1 {
+            r.record(i, i * 10);
+        }
+        r.resolve(1);
+        assert_eq!(r.acked(), 0, "dropped oldest xdg serial 1 cannot resolve");
+        r.resolve(2);
+        assert_eq!(r.acked(), 20, "the surviving second entry still resolves");
+    }
+
+    #[test]
+    fn ordered_ack_drains_every_entry_at_or_before_it() {
+        let mut r = ConfigureRing::new();
+        r.record(10, 100);
+        r.record(20, 200);
+        r.record(30, 300);
+        r.resolve(20);
+        assert_eq!(r.acked(), 200, "acking xdg 20 resolves 10 and 20");
+        r.resolve(30);
+        assert_eq!(r.acked(), 300, "the remaining entry resolves next");
+    }
+
+    #[test]
+    fn acked_host_serial_never_decreases() {
+        let mut r = ConfigureRing::new();
+        r.record(10, 100);
+        r.resolve(10);
+        assert_eq!(r.acked(), 100);
+        r.record(20, 50);
+        r.resolve(20);
+        assert_eq!(r.acked(), 100, "a lower host serial cannot roll acked back");
+    }
+
+    #[test]
+    fn reset_zeroes_serial_state_for_reconnect() {
+        let mut r = ConfigureRing::new();
+        r.record(10, 100);
+        r.resolve(10);
+        assert_eq!(r.acked(), 100);
+        r.reset();
+        assert_eq!(r.acked(), 0, "reconnect zeroes the acked serial");
+        r.resolve(10);
+        assert_eq!(r.acked(), 0, "the ring is empty after reset");
+    }
+
+    #[test]
+    fn ordered_drain_is_wraparound_aware() {
+        let mut r = ConfigureRing::new();
+        r.record(u32::MAX - 1, 100);
+        r.record(u32::MAX, 200);
+        r.record(0, 300);
+        r.record(1, 400);
+        r.resolve(0);
+        assert_eq!(
+            r.acked(),
+            300,
+            "serials straddling the u32 wrap drain in order"
+        );
+        r.resolve(1);
+        assert_eq!(r.acked(), 400, "the post-wrap entry resolves next");
+    }
+
+    #[test]
+    fn record_drops_stale_out_of_order_serial() {
+        let mut r = ConfigureRing::new();
+        r.record(10, 100);
+        r.record(5, 200);
+        r.resolve(10);
+        assert_eq!(
+            r.acked(),
+            100,
+            "a serial older than the back is dropped, not stored"
+        );
     }
 }

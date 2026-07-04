@@ -231,12 +231,13 @@ mod linux {
         }
     }
 
-    fn apply_configure(state: &State, cfg: &Configure) {
+    fn apply_configure(state: &mut State, cfg: &Configure) {
         debug_assert!(cfg.win != 0, "configure for reserved window id 0");
         let Some(win) = state.windows.get(&cfg.win) else {
             return;
         };
         let toplevel = win.toplevel.clone();
+        debug_assert!(toplevel.alive(), "configure target toplevel dead");
         toplevel.with_pending_state(|s| {
             let w = i32::try_from(cfg.w).unwrap_or(0);
             let h = i32::try_from(cfg.h).unwrap_or(0);
@@ -257,7 +258,10 @@ mod linux {
                 }
             }
         });
-        toplevel.send_configure();
+        let xdg_serial = u32::from(toplevel.send_configure());
+        if let Some(win) = state.windows.get_mut(&cfg.win) {
+            win.serials.record(xdg_serial, cfg.serial);
+        }
     }
 
     fn handle_host(state: &mut State, msg: HostMsg) {

@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 pub const T_HELLO: u32 = 1;
@@ -37,7 +37,7 @@ pub const FMT_ARGB8888: u32 = 1;
 pub const MAX_COMMIT_RECTS: u32 = 4096;
 
 const HDR_LEN: usize = 16;
-const COMMIT_FIXED_LEN: usize = 8 * 4 + 2 * 8;
+const COMMIT_FIXED_LEN: usize = 8 * 4 + 2 * 4 + 2 * 8;
 const RECT_LEN: usize = 4 * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,15 +255,19 @@ pub struct CommitMeta {
     pub stride: u32,
     pub format: u32,
     pub scale_e12: u32,
+    /// Newest host configure serial the client had acked at commit-dispatch time
+    /// (0 = none). The host size-authority machine keys geometry decisions on it.
+    pub serial: u32,
     pub t_client_commit_ns: u64,
     pub t_send_ns: u64,
 }
 
 /// Encode a `commit` payload.
 ///
-/// Layout: a 48-byte fixed prefix (the eight `u32` header fields then the two
-/// guest `CLOCK_MONOTONIC` `u64` timestamps), then the `n_rects` rect table,
-/// then tight row-packed pixel bytes in rect order (`rect.w * 4` bytes/row).
+/// Layout: a 56-byte fixed prefix — the eight `u32` header fields, the acked
+/// host configure `serial`, a reserved `u32` (written 0), then the two guest
+/// `CLOCK_MONOTONIC` `u64` timestamps at offsets 40/48 — then the `n_rects`
+/// rect table, then tight row-packed pixel bytes in rect order.
 pub fn encode_commit(meta: &CommitMeta, rects: &[Rect], packed: &[u8]) -> io::Result<Vec<u8>> {
     let n = u32::try_from(rects.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "too many damage rects"))?;
@@ -297,6 +301,8 @@ pub fn encode_commit(meta: &CommitMeta, rects: &[Rect], packed: &[u8]) -> io::Re
     ] {
         out.extend_from_slice(&v.to_le_bytes());
     }
+    out.extend_from_slice(&meta.serial.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&meta.t_client_commit_ns.to_le_bytes());
     out.extend_from_slice(&meta.t_send_ns.to_le_bytes());
     for r in rects {
@@ -342,8 +348,9 @@ pub fn decode_commit(payload: &[u8]) -> io::Result<(CommitMeta, Vec<Rect>, usize
         stride: g32(16),
         format: g32(20),
         scale_e12: g32(24),
-        t_client_commit_ns: g64(32),
-        t_send_ns: g64(40),
+        serial: g32(32),
+        t_client_commit_ns: g64(40),
+        t_send_ns: g64(48),
     };
     let rects_end = COMMIT_FIXED_LEN
         .checked_add(n.saturating_mul(RECT_LEN))
@@ -480,6 +487,7 @@ mod tests {
             stride: 16,
             format: FMT_XRGB8888,
             scale_e12: 4096,
+            serial: 7,
             t_client_commit_ns: 111,
             t_send_ns: 222,
         };
@@ -515,6 +523,7 @@ mod tests {
             stride: 4,
             format: FMT_ARGB8888,
             scale_e12: 4096,
+            serial: 0,
             t_client_commit_ns: 0,
             t_send_ns: 0,
         };
@@ -540,6 +549,7 @@ mod tests {
             stride: 4,
             format: FMT_XRGB8888,
             scale_e12: 4096,
+            serial: 0,
             t_client_commit_ns: 0,
             t_send_ns: 0,
         };
@@ -555,7 +565,42 @@ mod tests {
     }
 
     #[test]
-    fn commit_fixed_prefix_is_48_bytes() {
-        assert_eq!(COMMIT_FIXED_LEN, 48);
+    fn commit_fixed_prefix_is_56_bytes() {
+        assert_eq!(COMMIT_FIXED_LEN, 56);
+    }
+
+    #[test]
+    fn commit_serial_placement_round_trips() {
+        let meta = CommitMeta {
+            win: 2,
+            seq: 5,
+            w: 1,
+            h: 1,
+            stride: 4,
+            format: FMT_ARGB8888,
+            scale_e12: 8192,
+            serial: 0xAABB_CCDD,
+            t_client_commit_ns: 0x0102_0304_0506_0708,
+            t_send_ns: 0x1112_1314_1516_1718,
+        };
+        let payload = encode_commit(&meta, &[], &[]).expect("encode");
+        assert_eq!(payload.len(), COMMIT_FIXED_LEN, "no rects, no pixels");
+        assert_eq!(&payload[32..36], &meta.serial.to_le_bytes(), "serial at 32");
+        assert_eq!(&payload[36..40], &[0u8; 4], "reserved word is zero");
+        assert_eq!(
+            &payload[40..48],
+            &meta.t_client_commit_ns.to_le_bytes(),
+            "t_client stays 8-aligned at 40"
+        );
+        assert_eq!(
+            &payload[48..56],
+            &meta.t_send_ns.to_le_bytes(),
+            "t_send at 48"
+        );
+        let (got, rects, off) = decode_commit(&payload).expect("decode");
+        assert_eq!(got.serial, meta.serial, "serial survives round-trip");
+        assert_eq!(got, meta);
+        assert!(rects.is_empty());
+        assert_eq!(off, COMMIT_FIXED_LEN);
     }
 }
