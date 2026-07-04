@@ -12,6 +12,7 @@ final class GuiSurfaceView: NSView {
 
     private var tracking: NSTrackingArea?
     private var downModifiers: Set<UInt16> = []
+    private var hasEntered = false
 
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { false }
@@ -39,9 +40,38 @@ final class GuiSurfaceView: NSView {
         return (Double(inView.x), flippedY)
     }
 
+    /// The occlusion verdict for a tracking event: whether this surface is the
+    /// topmost msl window under the cursor. Cheap — one CG lookup and a set hit.
+    private func occlusion(_ event: NSEvent) -> GuiPointerFilter.Decision {
+        guard let owner, let host = window else { return .forward }
+        let screen = host.convertPoint(toScreen: event.locationInWindow)
+        let topmost = NSWindow.windowNumber(at: screen, belowWindowWithWindowNumber: 0)
+        return GuiPointerFilter.decide(
+            topmostWindowNumber: topmost, selfWindowNumber: host.windowNumber,
+            topmostIsOurs: owner.ownsWindowNumber(topmost), hasEntered: hasEntered)
+    }
+
+    /// Send a tracking event only while this surface owns the cursor; when another
+    /// of our windows covers the point, emit one leave and then stay silent.
+    private func routeTracking(_ event: NSEvent, presence: Bool, _ forward: () -> Void) {
+        switch occlusion(event) {
+        case .forward:
+            hasEntered = presence
+            forward()
+        case .suppress:
+            break
+        case .leaveOnce:
+            hasEntered = false
+            let point = localPoint(event)
+            owner?.pointerCrossing(entered: false, posX: point.posX, posY: point.posY)
+        }
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        let point = localPoint(event)
-        owner?.pointerMotion(posX: point.posX, posY: point.posY)
+        routeTracking(event, presence: true) {
+            let point = localPoint(event)
+            owner?.pointerMotion(posX: point.posX, posY: point.posY)
+        }
     }
 
     override func mouseDragged(with event: NSEvent) { mouseMoved(with: event) }
@@ -65,20 +95,26 @@ final class GuiSurfaceView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        let point = localPoint(event)
-        owner?.pointerAxis(
-            dx: Double(event.scrollingDeltaX), dy: Double(event.scrollingDeltaY), posX: point.posX,
-            posY: point.posY)
+        routeTracking(event, presence: true) {
+            let point = localPoint(event)
+            owner?.pointerAxis(
+                dx: Double(event.scrollingDeltaX), dy: Double(event.scrollingDeltaY),
+                posX: point.posX, posY: point.posY)
+        }
     }
 
     override func mouseEntered(with event: NSEvent) {
-        let point = localPoint(event)
-        owner?.pointerCrossing(entered: true, posX: point.posX, posY: point.posY)
+        routeTracking(event, presence: true) {
+            let point = localPoint(event)
+            owner?.pointerCrossing(entered: true, posX: point.posX, posY: point.posY)
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
-        let point = localPoint(event)
-        owner?.pointerCrossing(entered: false, posX: point.posX, posY: point.posY)
+        routeTracking(event, presence: false) {
+            let point = localPoint(event)
+            owner?.pointerCrossing(entered: false, posX: point.posX, posY: point.posY)
+        }
     }
 
     override func keyDown(with event: NSEvent) {

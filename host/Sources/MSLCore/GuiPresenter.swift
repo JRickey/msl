@@ -16,6 +16,7 @@ public final class GuiPresenter: NSObject, GuiHost {
 
     private let commitRouter = GuiCommitRouter()
     private var windows: [UInt32: GuiWindow] = [:]
+    private var windowNumbers: Set<Int> = []
     private let popupManager: GuiPopupManager
     private var ledger = GuiLedger()
     private var guestStatsJSON: String?
@@ -344,5 +345,27 @@ extension GuiPresenter {
     func handlePopupMoved(_ payload: Data) {
         guard let msg = try? GuiProto.decode(GuiPopupMoved.self, from: payload) else { return }
         windows[msg.win]?.popupReposition(posX: msg.posX, posY: msg.posY)
+    }
+}
+
+// On-screen window-number registry for the pointer occlusion filter (GuiHost).
+extension GuiPresenter {
+    public func registerWindowNumber(_ number: Int) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard number > 0 else { return }
+        windowNumbers.insert(number)
+        assert(windowNumbers.contains(number), "registered number is tracked")
+    }
+
+    public func unregisterWindowNumber(_ number: Int) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        windowNumbers.remove(number)
+        assert(!windowNumbers.contains(number), "unregistered number is dropped")
+    }
+
+    public func ownsWindowNumber(_ number: Int) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        assert(windowNumbers.count <= GuiCommitRouter.maxWindows, "number set stays bounded")
+        return number > 0 && windowNumbers.contains(number)
     }
 }

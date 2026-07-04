@@ -8,6 +8,9 @@ public protocol GuiHost: AnyObject {
     func ledgerCommit(_ sample: GuiCommitSample)
     func ledgerInput(_ sample: GuiInputSample)
     func windowClosed(_ win: UInt32)
+    func registerWindowNumber(_ number: Int)
+    func unregisterWindowNumber(_ number: Int)
+    func ownsWindowNumber(_ number: Int) -> Bool
 }
 
 /// One native window for a remote toplevel: presents from a surface pool at
@@ -138,7 +141,15 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         case .popup: attachAsChild()
         }
         startDisplayLink()
+        // Recorded on map so the pointer occlusion filter recognizes our own
+        // windows cheaply; the guard in the presenter drops non-positive numbers.
+        host?.registerWindowNumber(window.windowNumber)
         assert(displayLink != nil, "a mapped window drives a display link")
+    }
+
+    /// True when `number` is one of our live on-screen windows (occlusion filter).
+    func ownsWindowNumber(_ number: Int) -> Bool {
+        return host?.ownsWindowNumber(number) ?? false
     }
 
     func unmapWindow() {
@@ -161,6 +172,7 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     private func teardownResources() {
         displayLink?.invalidate()
         displayLink = nil
+        host?.unregisterWindowNumber(window.windowNumber)
         view.layer?.contents = nil
         pool.detach()
         window.delegate = nil
