@@ -1,21 +1,21 @@
 import Foundation
 
-/// Surface protocol v0 wire (docs/specs/m4-gui-protocol.md): a 16-byte binary
+/// Surface protocol wire (docs/specs/m4-gui-protocol.md): a 16-byte binary
 /// frame header (u32 type, u32 flags, u64 payload_len, little-endian) wrapping
 /// JSON control payloads and one binary commit payload. Pure codec, no I/O.
 ///
-/// Commit payload layout (this codec is the normative host interpretation of
-/// the spec's "timestamps trail the header"): a 48-byte fixed prefix
-/// (win, seq, w, h, stride, format, scale_e12, n_rects as u32; then
+/// Commit payload layout: a 56-byte fixed prefix (win, seq, w, h, stride,
+/// format, scale_e12, n_rects, serial, reserved as u32; then
 /// t_client_commit_ns, t_send_ns as u64), then n_rects × {x,y,w,h u32}, then
-/// per-rect row-packed pixels (rect.w*4 bytes/row) in rect order.
+/// per-rect row-packed pixels (rect.w*4 bytes/row) in rect order. The serial
+/// and reserved u32 keep the u64 timestamps 8-byte aligned at offsets 40/48.
 public enum GuiProto {
     public static let port: UInt32 = 5020
-    public static let version: UInt32 = 1
+    public static let version: UInt32 = 2
     public static let maxFrame = 64 * 1024 * 1024
     public static let headerSize = 16
     public static let maxRects = 4096
-    public static let commitFixed = 48
+    public static let commitFixed = 56
 
     /// Encode the 16-byte frame header, rejecting an oversize payload up front.
     public static func header(type: UInt32, flags: UInt32, payloadLen: Int) throws -> Data {

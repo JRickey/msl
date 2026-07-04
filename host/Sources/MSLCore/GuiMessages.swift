@@ -202,6 +202,8 @@ public struct GuiRect: Sendable, Equatable {
 }
 
 /// A parsed `commit`: header fields, damage rects, and the row-packed pixels.
+/// `serial` is the newest host configure serial the client had acked when the
+/// buffer was committed (0 = none yet); the size-authority machine reads it.
 public struct GuiCommit: Sendable, Equatable {
     public let win: UInt32
     public let seq: UInt32
@@ -210,6 +212,7 @@ public struct GuiCommit: Sendable, Equatable {
     public let stride: UInt32
     public let format: UInt32
     public let scaleE12: UInt32
+    public let serial: UInt32
     public let rects: [GuiRect]
     public let tClientCommitNs: UInt64
     public let tSendNs: UInt64
@@ -255,8 +258,8 @@ extension GuiProto {
         }
         return GuiCommit(
             win: head.win, seq: head.seq, width: head.width, height: head.height,
-            stride: head.stride, format: head.format, scaleE12: head.scaleE12, rects: rects,
-            tClientCommitNs: head.tClient, tSendNs: head.tSend, pixels: pixels)
+            stride: head.stride, format: head.format, scaleE12: head.scaleE12, serial: head.serial,
+            rects: rects, tClientCommitNs: head.tClient, tSendNs: head.tSend, pixels: pixels)
     }
 
     private struct CommitHead {
@@ -268,6 +271,7 @@ extension GuiProto {
         let format: UInt32
         let scaleE12: UInt32
         let nRects: UInt32
+        let serial: UInt32
         let tClient: UInt64
         let tSend: UInt64
     }
@@ -281,12 +285,14 @@ extension GuiProto {
         let format = try reader.u32()
         let scaleE12 = try reader.u32()
         let nRects = try reader.u32()
+        let serial = try reader.u32()
+        _ = try reader.u32()  // reserved: sender writes 0, receiver ignores the value
         let tClient = try reader.u64()
         let tSend = try reader.u64()
-        assert(reader.offset == commitFixed, "commit head must consume 48 bytes")
+        assert(reader.offset == commitFixed, "commit head must consume the fixed prefix")
         return CommitHead(
             win: win, seq: seq, width: width, height: height, stride: stride, format: format,
-            scaleE12: scaleE12, nRects: nRects, tClient: tClient, tSend: tSend)
+            scaleE12: scaleE12, nRects: nRects, serial: serial, tClient: tClient, tSend: tSend)
     }
 
     private static func readRects(
