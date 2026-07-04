@@ -16,6 +16,7 @@ public final class GuiPresenter: NSObject, GuiHost {
 
     private let commitRouter = GuiCommitRouter()
     private var windows: [UInt32: GuiWindow] = [:]
+    private let popupManager: GuiPopupManager
     private var ledger = GuiLedger()
     private var guestStatsJSON: String?
     private var signalSource: DispatchSourceSignal?
@@ -26,6 +27,7 @@ public final class GuiPresenter: NSObject, GuiHost {
         self.channel = channel
         self.distro = distro
         self.csvPath = csvPath
+        self.popupManager = GuiPopupManager(channel: channel)
         let screen = NSScreen.main
         self.scale = Double(screen?.backingScaleFactor ?? 2.0)
         self.refreshHz = Double(screen?.maximumFramesPerSecond ?? 60)
@@ -39,6 +41,7 @@ public final class GuiPresenter: NSObject, GuiHost {
         defer { writeReport() }
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
+        popupManager.begin { [weak self] win in self?.windows[win]?.detachAndHide() }
         installStallHandler()
         installSignalSource()
         startReader()
@@ -77,6 +80,10 @@ public final class GuiPresenter: NSObject, GuiHost {
             }
             if frame.type == GuiType.winNew.rawValue {
                 routeWinNew(frame.payload)
+                continue
+            }
+            if frame.type == GuiType.popupNew.rawValue {
+                routePopupNew(frame.payload)
                 continue
             }
             let type = frame.type
@@ -127,6 +134,7 @@ public final class GuiPresenter: NSObject, GuiHost {
         case .winTitle: handleWinTitle(payload)
         case .winLimits: handleWinLimits(payload)
         case .cursorNamed: handleCursor(payload)
+        case .popupMoved: handlePopupMoved(payload)
         default: break
         }
     }
@@ -164,6 +172,8 @@ public final class GuiPresenter: NSObject, GuiHost {
 
     private func handleWinDestroy(_ payload: Data) {
         guard let ref = try? GuiProto.decode(GuiWinRef.self, from: payload) else { return }
+        popupManager.dismissChildren(of: ref.win)
+        popupManager.unregister(win: ref.win)
         commitRouter.unregister(win: ref.win)
         windows.removeValue(forKey: ref.win)?.destroy()
         writeReport()
@@ -204,6 +214,8 @@ public final class GuiPresenter: NSObject, GuiHost {
     }
 
     public func windowClosed(_ win: UInt32) {
+        popupManager.dismissChildren(of: win)
+        popupManager.unregister(win: win)
         commitRouter.unregister(win: win)
         // AppKit already closed the window and windowShouldClose tore down its
         // resources; just drop our reference (no destroy — that would re-close).
@@ -257,6 +269,7 @@ public final class GuiPresenter: NSObject, GuiHost {
     private func finalizeAndExit(code: Int32) {
         writeReport()
         note(ledger.summary())
+        popupManager.end()
         channel.close()
         exit(code)
     }
@@ -279,5 +292,57 @@ public final class GuiPresenter: NSObject, GuiHost {
     private func note(_ message: String) {
         let line = "gui-spike[\(distro)]: \(message)\n"
         try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
+    }
+}
+
+// Popup routing: mirrors the toplevel win_new path and builds child panels.
+extension GuiPresenter {
+    /// Mirror `routeWinNew` for popups: register the latch on the reader thread
+    /// before the panel build is dispatched, so commits in that gap latch.
+    nonisolated func routePopupNew(_ payload: Data) {
+        guard let spec = try? GuiProto.decode(GuiPopupNew.self, from: payload) else { return }
+        let latch = GuiCommitLatch()
+        commitRouter.register(win: spec.win, latch: latch)
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.createPopup(spec, latch: latch) }
+        }
+    }
+
+    /// Build a popup panel on main against a live parent. An unknown parent is a
+    /// guest bug (pacing's starvation fallback keeps the client alive), so the
+    /// popup is dropped with one line rather than crashing.
+    func createPopup(_ spec: GuiPopupNew, latch: GuiCommitLatch) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if let existing = windows[spec.win] {
+            note("popup \(spec.win) collides with an existing window; re-registering latch")
+            commitRouter.register(win: spec.win, latch: existing.latch)
+            return
+        }
+        guard let parent = windows[spec.parent] else {
+            note("popup \(spec.win) names unknown parent \(spec.parent); dropping")
+            commitRouter.unregister(win: spec.win)
+            return
+        }
+        guard popupManager.hasCapacity else {
+            note("popup \(spec.win) exceeds the \(GuiPopupManager.maxPopups)-popup cap; dropping")
+            commitRouter.unregister(win: spec.win)
+            popupManager.dismiss(win: spec.win)
+            return
+        }
+        guard
+            let popup = GuiWindow(
+                popup: spec, parent: parent, channel: channel, host: self, latch: latch)
+        else {
+            note("failed to create popup \(spec.win)")
+            commitRouter.unregister(win: spec.win)
+            return
+        }
+        windows[spec.win] = popup
+        popupManager.register(win: spec.win, parent: spec.parent, panel: popup.backingWindow)
+    }
+
+    func handlePopupMoved(_ payload: Data) {
+        guard let msg = try? GuiProto.decode(GuiPopupMoved.self, from: payload) else { return }
+        windows[msg.win]?.popupReposition(posX: msg.posX, posY: msg.posY)
     }
 }

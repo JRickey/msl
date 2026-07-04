@@ -11,7 +11,7 @@ import Foundation
 /// and reserved u32 keep the u64 timestamps 8-byte aligned at offsets 40/48.
 public enum GuiProto {
     public static let port: UInt32 = 5020
-    public static let version: UInt32 = 3
+    public static let version: UInt32 = 4
     public static let maxFrame = 64 * 1024 * 1024
     public static let headerSize = 16
     public static let maxRects = 4096
@@ -99,8 +99,11 @@ public enum GuiType: UInt32, Sendable {
     case commit = 13
     case statsReq = 14
     case cursorNamed = 15
+    case popupDismiss = 16
     case stats = 17
     case winLimits = 19
+    case popupNew = 21
+    case popupMoved = 23
 }
 
 /// Little-endian byte cursor over an immutable frame payload; every read is

@@ -132,6 +132,47 @@ final class GuiControlCodecTests: XCTestCase {
     }
 }
 
+final class GuiPopupCodecTests: XCTestCase {
+    func testPopupNewRoundTripAndKeys() throws {
+        let value = GuiPopupNew(
+            win: 5, parent: 3, posX: -12, posY: 40, width: 200, height: 150, scale: 2)
+        let data = try GuiProto.encode(value)
+        XCTAssertEqual(try GuiProto.decode(GuiPopupNew.self, from: data), value)
+        let json = String(bytes: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"parent\""), json)
+        XCTAssertTrue(json.contains("\"w\""), json)
+        XCTAssertTrue(json.contains("\"h\""), json)
+    }
+
+    func testPopupNewDecodesSnakeCaseJSON() throws {
+        let json = #"{"win":5,"parent":3,"x":-12,"y":40,"w":200,"h":150,"scale":2.0}"#
+        let msg = try GuiProto.decode(GuiPopupNew.self, from: Data(json.utf8))
+        XCTAssertEqual(msg.win, 5)
+        XCTAssertEqual(msg.parent, 3)
+        XCTAssertEqual(msg.posX, -12)
+        XCTAssertEqual(msg.posY, 40)
+        XCTAssertEqual(msg.width, 200)
+        XCTAssertEqual(msg.height, 150)
+    }
+
+    func testPopupMovedRoundTripAndKeys() throws {
+        let value = GuiPopupMoved(win: 5, posX: 7, posY: -3)
+        XCTAssertEqual(
+            try GuiProto.decode(GuiPopupMoved.self, from: try GuiProto.encode(value)), value)
+        let json = #"{"win":5,"x":7,"y":-3}"#
+        let msg = try GuiProto.decode(GuiPopupMoved.self, from: Data(json.utf8))
+        XCTAssertEqual(msg, value)
+    }
+
+    func testPopupDismissRoundTrip() throws {
+        let value = GuiPopupDismiss(win: 9)
+        XCTAssertEqual(
+            try GuiProto.decode(GuiPopupDismiss.self, from: try GuiProto.encode(value)), value)
+        let msg = try GuiProto.decode(GuiPopupDismiss.self, from: Data(#"{"win":9}"#.utf8))
+        XCTAssertEqual(msg.win, 9)
+    }
+}
+
 final class GuiWinLimitsTests: XCTestCase {
     func testWinLimitsRoundTrip() throws {
         let msg = GuiWinLimits(win: 4, minWidth: 1365, minHeight: 792, maxWidth: 0, maxHeight: 0)
