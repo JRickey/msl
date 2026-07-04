@@ -64,7 +64,7 @@ final class GuiSurface {
 @MainActor
 final class GuiWindow: NSObject, NSWindowDelegate {
     let win: UInt32
-    let latch = GuiCommitLatch()
+    let latch: GuiCommitLatch
     private weak var host: GuiHost?
     private let channel: GuiChannel
 
@@ -85,11 +85,12 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     private var haveApplied = false
     private var pendingInput: (kind: String, tNs: UInt64)?
 
-    init?(spec: GuiWinNew, channel: GuiChannel, host: GuiHost) {
+    init?(spec: GuiWinNew, channel: GuiChannel, host: GuiHost, latch: GuiCommitLatch) {
         guard spec.scale > 0, spec.width > 0, spec.height > 0 else { return nil }
         guard let surface = GuiSurface(width: Int(spec.width), height: Int(spec.height))
         else { return nil }
         self.win = spec.win
+        self.latch = latch
         self.channel = channel
         self.host = host
         self.surface = surface
@@ -107,6 +108,9 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     private func configureWindow(title: String, scale: Double) {
         assert(scale > 0, "window scale must be positive")
         window.title = title.isEmpty ? "msl" : title
+        // Swift owns the window's lifetime (held in the presenter's dict); without
+        // this AppKit over-releases it on close and crashes in the close animation.
+        window.isReleasedWhenClosed = false
         window.delegate = self
         window.acceptsMouseMovedEvents = true
         window.contentView = view
@@ -142,11 +146,19 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         window.invalidateCursorRects(for: view)
     }
 
-    func destroy() {
+    /// Stop the display link and detach from the surface/event graph. Ordered
+    /// before any window close so no tick or event lands on a tearing-down window.
+    private func teardownResources() {
         displayLink?.invalidate()
         displayLink = nil
+        view.layer?.contents = nil
         window.delegate = nil
         view.owner = nil
+    }
+
+    /// Guest-initiated teardown (`win_destroy`): tear down, then close the window.
+    func destroy() {
+        teardownResources()
         window.close()
     }
 
@@ -177,14 +189,31 @@ final class GuiWindow: NSObject, NSWindowDelegate {
     }
 
     private func applyToSurface(_ commit: GuiCommit) {
-        if commit.width != UInt32(surface.width) || commit.height != UInt32(surface.height) {
+        let bufferChanged =
+            commit.width != UInt32(surface.width) || commit.height != UInt32(surface.height)
+        if bufferChanged {
             guard let fresh = GuiSurface(width: Int(commit.width), height: Int(commit.height))
             else { return }
             surface = fresh
             view.layer?.contents = fresh.ioSurface
         }
         view.layer?.contentsScale = commit.scale > 0 ? commit.scale : 1
+        if bufferChanged { syncLogicalSize(commit) }
         surface.apply(commit)
+    }
+
+    /// Size the window content in logical points = buffer_pixels / scale so the
+    /// layer maps 1:1 at the backing scale (sharp Retina). Skipped during a user
+    /// live resize so it never fights the drag.
+    private func syncLogicalSize(_ commit: GuiCommit) {
+        guard !resizing, commit.scale > 0 else { return }
+        let logical = NSSize(
+            width: Double(commit.width) / commit.scale, height: Double(commit.height) / commit.scale
+        )
+        guard logical.width >= 1, logical.height >= 1 else { return }
+        if view.bounds.width != logical.width || view.bounds.height != logical.height {
+            window.setContentSize(logical)
+        }
     }
 
     @objc private func step() {
@@ -259,6 +288,9 @@ final class GuiWindow: NSObject, NSWindowDelegate {
         if let payload = try? GuiProto.encode(GuiClose(win: win)) {
             channel.send(type: GuiType.close.rawValue, flags: 0, payload: payload)
         }
+        // AppKit is closing the window itself; tear down our resources but do not
+        // call window.close() again (that path is destroy(), guest-initiated).
+        teardownResources()
         host?.windowClosed(win)
         return true
     }
