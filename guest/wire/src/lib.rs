@@ -11,6 +11,7 @@
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
 
 pub mod frame;
+pub mod fs;
 mod poll;
 
 pub use poll::{MAX_POLL_RETRIES, MAX_POLL_TARGETS, PollTarget, poll_fds, set_nonblocking};
