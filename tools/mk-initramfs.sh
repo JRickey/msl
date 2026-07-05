@@ -11,6 +11,7 @@ CACHE_DIR="$BUILD_DIR/cache"
 OUT="$BUILD_DIR/initramfs.cpio"
 AGENT="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-agent"
 SHIM="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/mac"
+FSD="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-fsd"
 
 # Pinned busybox: Alpine v3.21 aarch64 static build. The multiarch busybox.net
 # binaries ship only 32-bit armv8l for ARM, which will not run on this kernel.
@@ -34,6 +35,12 @@ verify_sha256() {
 
 if [ ! -f "$AGENT" ]; then
 	echo "mk-initramfs: missing guest agent: $AGENT" >&2
+	echo "  build it first: (cd guest && cargo zigbuild --target aarch64-unknown-linux-musl --release)" >&2
+	exit 1
+fi
+
+if [ ! -f "$FSD" ]; then
+	echo "mk-initramfs: missing fs worker: $FSD" >&2
 	echo "  build it first: (cd guest && cargo zigbuild --target aarch64-unknown-linux-musl --release)" >&2
 	exit 1
 fi
@@ -91,6 +98,7 @@ mkdir -m 0777 -p "$stage/tmp"
 install -m 0755 "$AGENT" "$stage/init"
 install -m 0755 "$BB" "$stage/bin/busybox"
 install -m 0755 "$SHIM" "$stage/tools/mac"
+install -m 0755 "$FSD" "$stage/tools/msl-fsd"
 ln -s mac "$stage/tools/mac-binfmt"
 
 n=0

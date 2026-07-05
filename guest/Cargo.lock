@@ -294,6 +294,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "msl-fsd"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "msl-wire",
+]
+
+[[package]]
 name = "msl-shim"
 version = "0.2.1"
 dependencies = [
