@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MSLFSWire
 
 /// Accepts FSKit appex connections on the app-group Unix-domain socket, admits
 /// them by peer euid + audit-token designated requirement, validates the hello

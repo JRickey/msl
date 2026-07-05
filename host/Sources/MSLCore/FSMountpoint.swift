@@ -1,4 +1,5 @@
 import Foundation
+import MSLFSWire
 
 /// Mountpoint policy and resource-URL construction for the Finder view. Mounts
 /// live under `~/msl/<distro>`; the resource URL carries only routing data.

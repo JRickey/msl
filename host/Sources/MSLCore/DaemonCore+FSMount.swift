@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MSLFSWire
 
 /// FSKit mount lifecycle for `DaemonCore` (ADR 0009). The daemon owns mount
 /// state, the appex-admission listener, and cleanup; the CLI owns the actual

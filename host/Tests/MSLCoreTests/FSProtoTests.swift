@@ -1,4 +1,5 @@
 import Foundation
+import MSLFSWire
 import XCTest
 
 @testable import MSLCore

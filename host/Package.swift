@@ -23,14 +23,19 @@ let package = Package(
             name: "CMSLSys"
         ),
         .target(
+            name: "MSLFSWire",
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "MSLCore",
-            dependencies: ["CMSLSys"],
+            dependencies: ["CMSLSys", "MSLFSWire"],
             swiftSettings: swiftSettings
         ),
         .executableTarget(
             name: "msl",
             dependencies: [
                 "MSLCore",
+                "MSLFSWire",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: swiftSettings
@@ -47,6 +52,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "msl-fskit",
+            dependencies: ["MSLFSWire"],
             swiftSettings: swiftSettings
         ),
         .executableTarget(
@@ -55,7 +61,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MSLCoreTests",
-            dependencies: ["MSLCore"],
+            dependencies: ["MSLCore", "MSLFSWire"],
             swiftSettings: swiftSettings
         ),
         .testTarget(

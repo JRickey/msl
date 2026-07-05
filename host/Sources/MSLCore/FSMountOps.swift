@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MSLFSWire
 
 /// Kernel-level mount queries and unmounts for the daemon's cleanup paths. The
 /// interactive `/sbin/mount -F` and `/sbin/umount` stay in the CLI so their

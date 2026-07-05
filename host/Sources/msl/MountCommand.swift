@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import MSLCore
+import MSLFSWire
 
 /// `msl mount [<distro>]`: prepare the mount with the daemon, run the actual
 /// `/sbin/mount -F` here so its errors reach this terminal, then commit. The

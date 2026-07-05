@@ -5,9 +5,9 @@ import Foundation
 /// by a shared golden vector in the tests). All integers are little-endian;
 /// strings are u16-length-prefixed UTF-8; read data is a u32-length blob. See
 /// docs/specs/fskit-file-protocol.md. These types nest under `FSProto`, which
-/// also carries the transport constants and the JSON mount hello.
+/// also carries the transport constants (FSProto.swift).
 extension FSProto {
-    /// Single `read` reply data cap in v1 (frame cap stays `Proto.maxPayload`).
+    /// Single `read` reply data cap in v1 (frame cap is `FSProto.frameMax`).
     public static let readReplyMax = 1 << 20
     /// Maximum encodable string byte length (u16 prefix).
     public static let stringMax = Int(UInt16.max)
