@@ -16,6 +16,8 @@ new-worktree.sh
 
 # Codex local hooks/settings
 .codex/
+scripts/hooks/pre-commit
+tools/lint_prefn_comments.py
 
 # Rust
 target/
