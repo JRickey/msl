@@ -2,6 +2,7 @@
 //! Routing, request parsing, and parameter validation are host-testable; the
 //! effectful operations behind them are Linux-gated with non-Linux stubs.
 
+use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::sync::Mutex;
 
@@ -25,6 +26,7 @@ const MKFS_TIMEOUT_MS: u64 = 120_000;
 pub struct Agent {
     sessions: Mutex<Sessions>,
     distros: Mutex<Distros>,
+    fsd_workers: Mutex<HashMap<i32, String>>,
 }
 
 impl Default for Agent {
@@ -39,6 +41,17 @@ impl Agent {
         Self {
             sessions: Mutex::new(Sessions::new()),
             distros: Mutex::new(Distros::new()),
+            fsd_workers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    // Record an msl-fsd worker's leader pid so its reaped exit is attributed to
+    // its distro instead of logged as an orphan. Called under the spawn lock.
+    pub fn note_fsd_spawn(&self, pid: i32, distro: &str) {
+        assert!(pid > 0, "fsd leader pid must be positive");
+        assert!(!distro.is_empty(), "fsd worker needs a distro name");
+        if let Ok(mut guard) = self.fsd_workers.lock() {
+            let _ = guard.insert(pid, distro.to_string());
         }
     }
 
@@ -62,6 +75,14 @@ impl Agent {
             && let Some(name) = guard.on_init_exit(pid)
         {
             crate::log::warn(&format!("distro '{name}' init {pid} exited ({code})"));
+            return;
+        }
+        if let Ok(mut guard) = self.fsd_workers.lock()
+            && let Some(distro) = guard.remove(&pid)
+        {
+            crate::log::info(&format!(
+                "fsd worker for '{distro}' pid {pid} exited ({code})"
+            ));
             return;
         }
         if let Ok(mut guard) = self.sessions.lock()

@@ -89,6 +89,35 @@ public struct FSHello: Codable, Equatable, Sendable {
     }
 }
 
+/// Daemon's first frame to the guest fs-service port (vsock 5030): names the
+/// distro whose mount namespace the msl-fsd worker serves. Routing only — the
+/// appex was already authenticated and its nonce consumed before this is sent.
+public struct FSGuestOpen: Codable, Equatable, Sendable {
+    public let version: Int
+    public let op: String
+    public let distro: String
+
+    enum CodingKeys: String, CodingKey {
+        case op, distro
+        case version = "v"
+    }
+
+    public init(distro: String) {
+        precondition(!distro.isEmpty, "fs_open distro must not be empty")
+        self.version = FSProto.version
+        self.op = "fs_open"
+        self.distro = distro
+    }
+
+    public func encoded() throws -> Data {
+        let data = try JSONEncoder().encode(self)
+        guard data.count <= Proto.maxPayload else {
+            throw MSLError.framing("fs_open \(data.count) exceeds \(Proto.maxPayload)")
+        }
+        return data
+    }
+}
+
 /// Daemon's control reply to the hello, before the stream goes raw.
 public struct FSControlReply: Codable, Equatable, Sendable {
     public let ok: Bool

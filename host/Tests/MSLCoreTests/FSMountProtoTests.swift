@@ -41,6 +41,16 @@ final class FSHelloTests: XCTestCase {
         XCTAssertFalse(err.ok)
         XCTAssertEqual(err.error, "no")
     }
+
+    func testGuestOpenEncodesFsOpenFrame() throws {
+        let data = try FSGuestOpen(distro: "ubuntu").encoded()
+        let json = String(bytes: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"op\":\"fs_open\""), json)
+        XCTAssertTrue(json.contains("\"v\":\(FSProto.version)"), json)
+        XCTAssertTrue(json.contains("\"distro\":\"ubuntu\""), json)
+        let decoded = try JSONDecoder().decode(FSGuestOpen.self, from: data)
+        XCTAssertEqual(decoded, FSGuestOpen(distro: "ubuntu"))
+    }
 }
 
 final class FSLocalProtoTests: XCTestCase {

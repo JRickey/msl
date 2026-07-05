@@ -213,6 +213,16 @@ pub fn set_send_timeout(fd: RawFd, secs: u32) -> io::Result<()> {
     set_sock_timeout(fd, secs, libc::SO_SNDTIMEO)
 }
 
+// SO_RCVTIMEO = 0 blocks indefinitely: clears the handshake timeout before the
+// fd is handed to a worker whose reads must not expire on idle Finder gaps.
+#[cfg(target_os = "linux")]
+pub fn clear_recv_timeout(fd: RawFd) -> io::Result<()> {
+    if fd < 0 {
+        return Err(invalid("bad socket-timeout fd"));
+    }
+    apply_sock_timeout(fd, 0, libc::SO_RCVTIMEO)
+}
+
 #[cfg(target_os = "linux")]
 fn set_sock_timeout(fd: RawFd, secs: u32, opt: libc::c_int) -> io::Result<()> {
     if fd < 0 {
@@ -221,11 +231,17 @@ fn set_sock_timeout(fd: RawFd, secs: u32, opt: libc::c_int) -> io::Result<()> {
     if secs == 0 {
         return Err(invalid("zero socket timeout"));
     }
+    apply_sock_timeout(fd, i64::from(secs), opt)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_sock_timeout(fd: RawFd, secs: i64, opt: libc::c_int) -> io::Result<()> {
+    debug_assert!(fd >= 0);
+    debug_assert!(secs >= 0);
     let tv = libc::timeval {
-        tv_sec: i64::from(secs),
+        tv_sec: secs,
         tv_usec: 0,
     };
-    debug_assert!(tv.tv_sec > 0);
     let len = libc::socklen_t::try_from(std::mem::size_of::<libc::timeval>())
         .map_err(|_| invalid("timeval size overflow"))?;
     let rc = unsafe {
@@ -1017,6 +1033,129 @@ fn child_captured_body(
             libc::_exit(127);
         }
         libc::execve(argv[0], argv.as_ptr(), envp.as_ptr());
+        libc::_exit(127);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub struct FsdSpec {
+    pub ns_fds: Vec<RawFd>,
+    pub conn_fd: RawFd,
+    pub exe: CString,
+    pub argv: Vec<CString>,
+    pub envp: Vec<CString>,
+}
+
+#[cfg(target_os = "linux")]
+impl FsdSpec {
+    // `exe` is a distro-namespace path (the tools bind mount); the connection fd
+    // becomes the worker's fd 3.
+    pub fn new(ns_fds: Vec<RawFd>, conn_fd: RawFd, exe: &str) -> io::Result<Self> {
+        if conn_fd < 0 {
+            return Err(invalid("fsd conn fd must be valid"));
+        }
+        if ns_fds.is_empty() {
+            return Err(invalid("fsd needs namespace fds"));
+        }
+        let exe = CString::new(exe).map_err(|_| invalid("nul in fsd path"))?;
+        let argv = vec![exe.clone()];
+        Ok(Self {
+            ns_fds,
+            conn_fd,
+            exe,
+            argv,
+            envp: Vec::new(),
+        })
+    }
+}
+
+// The double fork mirrors captured exec: the grandchild is born in the distro
+// pid namespace, so a distro poweroff collapses it. Returns the reapable leader.
+#[cfg(target_os = "linux")]
+pub fn spawn_fsd(spec: &FsdSpec) -> io::Result<libc::pid_t> {
+    assert!(!spec.argv.is_empty(), "fsd argv must be non-empty");
+    assert!(spec.conn_fd >= 0, "fsd conn fd must be valid");
+    let pidp = make_pipe()?;
+    let argv_ptrs = null_terminated(&spec.argv);
+    let envp_ptrs = null_terminated(&spec.envp);
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let e = io::Error::last_os_error();
+        close_all(&pidp);
+        return Err(e);
+    }
+    if pid == 0 {
+        child_fsd_intermediate(spec, pidp, &argv_ptrs, &envp_ptrs);
+    }
+    finish_fsd(pid, pidp)
+}
+
+// A setns/fork failure exits the intermediate before it writes its pid, so the
+// blocking read fails and the leader is killed rather than left spinning.
+#[cfg(target_os = "linux")]
+fn finish_fsd(leader: libc::pid_t, pidp: [RawFd; 2]) -> io::Result<libc::pid_t> {
+    close_fd(pidp[1]);
+    let target = read_pid_blocking(pidp[0]);
+    close_fd(pidp[0]);
+    match target {
+        Ok(_grandchild) => Ok(leader),
+        Err(e) => {
+            let _ = send_signal(leader, libc::SIGKILL);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn child_fsd_intermediate(
+    spec: &FsdSpec,
+    pidp: [RawFd; 2],
+    argv: &[*const c_char],
+    envp: &[*const c_char],
+) -> ! {
+    unsafe {
+        // bounded: caller-owned namespace fd set
+        for &fd in &spec.ns_fds {
+            if libc::setns(fd, 0) != 0 {
+                libc::_exit(127);
+            }
+        }
+        let grandchild = libc::fork();
+        if grandchild < 0 {
+            libc::_exit(127);
+        }
+        if grandchild == 0 {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+            libc::close(pidp[0]);
+            libc::close(pidp[1]);
+            child_fsd_body(spec, argv, envp);
+        }
+        // The worker owns the connection now; drop the intermediate's inherited
+        // copy so the daemon sees a prompt guest-side close when the worker exits.
+        libc::close(spec.conn_fd);
+        libc::close(pidp[0]);
+        report_and_wait(pidp[1], grandchild);
+    }
+}
+
+// The connection moves onto fd 3 with cloexec cleared so it survives exec; the
+// cloexec namespace and original-connection fds close automatically at exec.
+#[cfg(target_os = "linux")]
+fn child_fsd_body(spec: &FsdSpec, argv: &[*const c_char], envp: &[*const c_char]) -> ! {
+    unsafe {
+        if spec.conn_fd == 3 {
+            libc::fcntl(3, libc::F_SETFD, 0);
+        } else if libc::dup2(spec.conn_fd, 3) < 0 {
+            libc::_exit(127);
+        }
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
+        if devnull >= 0 {
+            libc::dup2(devnull, 0);
+            if devnull > 3 {
+                libc::close(devnull);
+            }
+        }
+        libc::execve(spec.exe.as_ptr(), argv.as_ptr(), envp.as_ptr());
         libc::_exit(127);
     }
 }

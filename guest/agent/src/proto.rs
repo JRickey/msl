@@ -104,6 +104,17 @@ pub struct ForwardHello {
     pub port: u16,
 }
 
+// Daemon's first frame on the fs-service port (5030): names the distro whose
+// mount namespace the msl-fsd worker serves. Routing only, never a secret — the
+// daemon already authenticated the appex and consumed the mount nonce.
+#[derive(Debug, Deserialize)]
+pub struct FsOpenHello {
+    #[serde(default)]
+    pub v: u32,
+    pub op: String,
+    pub distro: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PingData {
     pub agent: &'static str,
@@ -209,4 +220,34 @@ pub fn encode_err(id: u64, message: &str) -> Vec<u8> {
     };
     serde_json::to_vec(&envelope)
         .unwrap_or_else(|_| br#"{"id":0,"ok":false,"error":"encode failed"}"#.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FsOpenHello;
+
+    #[test]
+    fn fs_open_hello_parses_daemon_frame() {
+        let hello: FsOpenHello =
+            serde_json::from_slice(br#"{"v":1,"op":"fs_open","distro":"ubuntu"}"#)
+                .expect("valid fs_open frame");
+        assert_eq!(hello.v, 1);
+        assert_eq!(hello.op, "fs_open");
+        assert_eq!(hello.distro, "ubuntu");
+    }
+
+    #[test]
+    fn fs_open_hello_defaults_missing_version_to_zero() {
+        // A frame without `v` parses (default 0) so the handler can reject it as a
+        // version mismatch rather than a malformed frame.
+        let hello: FsOpenHello =
+            serde_json::from_slice(br#"{"op":"fs_open","distro":"ubuntu"}"#).expect("parses");
+        assert_eq!(hello.v, 0);
+    }
+
+    #[test]
+    fn fs_open_hello_requires_distro() {
+        let err = serde_json::from_slice::<FsOpenHello>(br#"{"v":1,"op":"fs_open"}"#);
+        assert!(err.is_err(), "missing distro must fail to parse");
+    }
 }

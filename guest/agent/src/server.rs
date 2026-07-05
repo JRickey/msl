@@ -13,24 +13,33 @@ use serde::Serialize;
 use vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
 use crate::agent::Agent;
-use crate::proto::{DataHello, ForwardHello};
-use crate::{conn, frame, log, net, proto, session, sys, wait};
+use crate::proto::{DataHello, ForwardHello, FsOpenHello};
+use crate::{conn, distro, frame, log, net, proto, session, sys, wait};
 
 const CONTROL_PORT: u32 = 5000;
 const DATA_PORT: u32 = 5001;
 const LOG_PORT: u32 = 5002;
 const FORWARD_PORT: u32 = 5003;
+const FS_PORT: u32 = 5030;
 const MAX_CONTROL_CONNS: usize = 16;
 const MAX_FORWARD_CONNS: usize = 64;
 // Sessions cap at 64; the extra headroom absorbs handshake churn.
 const MAX_DATA_CONNS: usize = 80;
+// One live volume per distro (<=26); the cap bounds in-flight fs handshakes.
+const MAX_FS_CONNS: usize = 32;
 const HELLO_TIMEOUT_SECS: u32 = 10;
+// fs-service protocol version (FSProto.version on the host), independent of the
+// control PROTOCOL_VERSION.
+const FS_PROTOCOL_VERSION: u32 = 1;
+// msl-fsd inside a distro: the initramfs /tools bind mount (same as mac-binfmt).
+const FSD_GUEST_PATH: &str = "/run/msl/tools/msl-fsd";
 const IDLE_POLL: Duration = Duration::from_millis(100);
 const REBIND_PAUSE: Duration = Duration::from_secs(1);
 
 static CONTROL_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static DATA_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static FORWARD_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static FS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Serialize)]
 struct HelloReply<'a> {
@@ -51,6 +60,10 @@ pub fn spawn_background(agent: &Arc<Agent>) {
     let _ = thread::Builder::new()
         .name("forward".to_string())
         .spawn(forward_listener_loop);
+    let fs = Arc::clone(agent);
+    let _ = thread::Builder::new()
+        .name("fs".to_string())
+        .spawn(move || fs_listener_loop(&fs));
     let _ = thread::Builder::new()
         .name("logs".to_string())
         .spawn(log_listener_loop);
@@ -247,6 +260,99 @@ fn handle_forward(mut stream: VsockStream) {
         }
         Err(message) => write_hello(&mut stream, Some(&message)),
     }
+}
+
+fn fs_listener_loop(agent: &Arc<Agent>) -> ! {
+    // sanctioned infinite rebind loop: the fs listener must always recover
+    loop {
+        match bind(FS_PORT) {
+            Ok(listener) => fs_accept_loop(agent, &listener),
+            Err(e) => {
+                log::error(&format!("fs bind failed: {e}"));
+                thread::sleep(REBIND_PAUSE);
+            }
+        }
+    }
+}
+
+fn fs_accept_loop(agent: &Arc<Agent>, listener: &VsockListener) {
+    // sanctioned infinite accept loop: fs connections, one handshake thread each
+    loop {
+        let Ok((stream, _addr)) = listener.accept() else {
+            return;
+        };
+        let _ = sys::set_cloexec(stream.as_raw_fd());
+        let Some(slot) = conn::try_reserve(&FS_ACTIVE, MAX_FS_CONNS) else {
+            reject_fs(stream);
+            continue;
+        };
+        let _ = sys::set_recv_timeout(stream.as_raw_fd(), HELLO_TIMEOUT_SECS);
+        let agent = Arc::clone(agent);
+        let _ = thread::Builder::new()
+            .name("fs".to_string())
+            .spawn(move || {
+                let _slot = slot;
+                handle_fs(&agent, stream);
+            });
+    }
+}
+
+fn reject_fs(mut stream: VsockStream) {
+    let _ = sys::set_send_timeout(stream.as_raw_fd(), HELLO_TIMEOUT_SECS);
+    write_hello(&mut stream, Some("too many fs connections"));
+}
+
+// After the ack the worker owns the stream on its fd 3; the agent's copy drops
+// when this thread returns.
+fn handle_fs(agent: &Arc<Agent>, mut stream: VsockStream) {
+    let Ok(payload) = frame::read_frame(&mut stream) else {
+        return;
+    };
+    let Ok(hello) = serde_json::from_slice::<FsOpenHello>(&payload) else {
+        write_hello(&mut stream, Some("bad fs handshake"));
+        return;
+    };
+    match spawn_fs_worker(agent, &hello, &stream) {
+        Ok(()) => write_hello(&mut stream, None),
+        Err(message) => write_hello(&mut stream, Some(&message)),
+    }
+}
+
+// The spawn lock keeps {fork, note_fsd_spawn} atomic against the reaper's
+// classify step, so a just-forked leader is always already attributable.
+fn spawn_fs_worker(
+    agent: &Arc<Agent>,
+    hello: &FsOpenHello,
+    stream: &VsockStream,
+) -> Result<(), String> {
+    if hello.op != "fs_open" {
+        return Err(format!("unexpected fs op: {}", hello.op));
+    }
+    if hello.v != FS_PROTOCOL_VERSION {
+        return Err(format!("fs protocol {} != {FS_PROTOCOL_VERSION}", hello.v));
+    }
+    distro::validate_name(&hello.distro)?;
+    let init_pid = agent
+        .distro_pid(&hello.distro)
+        .ok_or_else(|| "distro not running".to_string())?;
+    assert!(init_pid > 0, "resolved init pid must be positive");
+    // The handshake read timeout is shared with the worker's inherited fd 3;
+    // clear it so idle Finder gaps don't expire the worker's blocking reads.
+    sys::clear_recv_timeout(stream.as_raw_fd()).map_err(|e| format!("fs clear timeout: {e}"))?;
+    let ns_fds = sys::open_ns_fds(init_pid).map_err(|e| format!("fs ns open: {e}"))?;
+    let spec = sys::FsdSpec::new(ns_fds, stream.as_raw_fd(), FSD_GUEST_PATH)
+        .map_err(|e| format!("fs spec: {e}"))?;
+    let leader = {
+        let _spawn = wait::spawn_lock();
+        let spawned = sys::spawn_fsd(&spec);
+        sys::close_all(&spec.ns_fds);
+        let leader = spawned.map_err(|e| format!("spawn fsd: {e}"))?;
+        agent.note_fsd_spawn(leader, &hello.distro);
+        leader
+    };
+    assert!(leader > 0, "fsd leader pid must be positive");
+    log::info(&format!("fs worker up for '{}' pid {leader}", hello.distro));
+    Ok(())
 }
 
 fn log_listener_loop() -> ! {

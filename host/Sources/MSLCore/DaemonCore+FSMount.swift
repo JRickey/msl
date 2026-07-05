@@ -143,9 +143,10 @@ extension DaemonCore {
     }
 
     /// Open the guest file-service channel for a routed mount. The distro must be
-    /// running. The daemon-to-guest handshake (naming the distro) lands with the
-    /// guest worker; until then the fs-service vsock port has no listener and
-    /// this throws, so the appex gets a clean "guest unavailable".
+    /// running. Connects vsock 5030, sends the `fs_open` control frame naming the
+    /// distro, and returns the raw fd only after the guest acks that its msl-fsd
+    /// worker is up — a guest-side failure surfaces as "guest unavailable", never
+    /// a Finder hang.
     private func connectGuestFileService(_ hello: FSHello) throws -> Int32 {
         guard let host = withLock({ self.host }), withLock({ running }) else {
             throw MSLError.configuration("VM not running")
@@ -153,8 +154,18 @@ extension DaemonCore {
         guard withLock({ distrosUp.contains(hello.distro) }) else {
             throw MSLError.configuration("distro '\(hello.distro)' not running")
         }
-        let fd = try host.connectRaw(port: FSProto.vsockPort, timeout: min(config.bootTimeout, 10))
+        let timeout = min(config.bootTimeout, 10)
+        let fd = try host.connectRaw(port: FSProto.vsockPort, timeout: timeout)
         assert(fd >= 0, "connectRaw returns a valid fd or throws")
-        return fd
+        let framed = try VsockClient(fileDescriptor: fd)
+        try framed.setReceiveTimeout(seconds: timeout)
+        try framed.send(try FSGuestOpen(distro: hello.distro).encoded())
+        let reply = try DataHandshakeReply.decode(try framed.receive())
+        guard reply.ok else {
+            framed.close()
+            throw MSLError.configuration(
+                "guest fs worker failed for '\(hello.distro)': \(reply.error ?? "unknown")")
+        }
+        return framed.detachDescriptor()
     }
 }
