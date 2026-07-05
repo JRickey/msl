@@ -176,24 +176,36 @@ fn reopen(node: Handle, flags: i32) -> Result<Handle, i32> {
     if fd < 0 { Err(errno()) } else { Ok(fd) }
 }
 
+// A generic `TryInto` bound stays correct where a source field is u32 on one
+// musl arch and u64 on another (st_nlink); a concrete cast would be a lint on one.
+fn narrow_u32<T: TryInto<u32>>(value: T, default: u32) -> u32 {
+    value.try_into().unwrap_or(default)
+}
+
+// Translate an OS `stat` into the portable `Stat`; the sole conversion point so
+// both fstat paths agree on width narrowing.
+fn stat_from_raw(raw: &libc::stat) -> Stat {
+    Stat {
+        ino: raw.st_ino,
+        mode: raw.st_mode,
+        uid: raw.st_uid,
+        gid: raw.st_gid,
+        nlink: narrow_u32(raw.st_nlink, 1),
+        size: u64::try_from(raw.st_size).unwrap_or(0),
+        blocks: u64::try_from(raw.st_blocks).unwrap_or(0),
+        atime: (raw.st_atime, narrow_u32(raw.st_atime_nsec, 0)),
+        mtime: (raw.st_mtime, narrow_u32(raw.st_mtime_nsec, 0)),
+        ctime: (raw.st_ctime, narrow_u32(raw.st_ctime_nsec, 0)),
+    }
+}
+
 fn fstat(fd: RawFd) -> Result<Stat, i32> {
     let mut raw: libc::stat = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::fstat(fd, &raw mut raw) };
     if rc < 0 {
         return Err(errno());
     }
-    Ok(Stat {
-        ino: raw.st_ino,
-        mode: raw.st_mode,
-        uid: raw.st_uid,
-        gid: raw.st_gid,
-        nlink: u32::try_from(raw.st_nlink).unwrap_or(1),
-        size: u64::try_from(raw.st_size).unwrap_or(0),
-        blocks: u64::try_from(raw.st_blocks).unwrap_or(0),
-        atime: (raw.st_atime, u32::try_from(raw.st_atime_nsec).unwrap_or(0)),
-        mtime: (raw.st_mtime, u32::try_from(raw.st_mtime_nsec).unwrap_or(0)),
-        ctime: (raw.st_ctime, u32::try_from(raw.st_ctime_nsec).unwrap_or(0)),
-    })
+    Ok(stat_from_raw(&raw))
 }
 
 /// Parse `getdents64` records from a readable directory fd, fstatting each child
@@ -235,15 +247,15 @@ fn parse_dents(node: Handle, block: &[u8], out: &mut Vec<DirItem>) {
             .iter()
             .position(|&byte| byte == 0)
             .unwrap_or(name_bytes.len());
-        if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
-            if name != "." && name != ".." {
-                if let Ok(stat) = fstatat_name(node, name) {
-                    out.push(DirItem {
-                        name: name.to_string(),
-                        stat,
-                    });
-                }
-            }
+        if let Ok(name) = std::str::from_utf8(&name_bytes[..end])
+            && name != "."
+            && name != ".."
+            && let Ok(stat) = fstatat_name(node, name)
+        {
+            out.push(DirItem {
+                name: name.to_string(),
+                stat,
+            });
         }
         offset += reclen;
     }
@@ -263,16 +275,5 @@ fn fstatat_name(node: Handle, name: &str) -> Result<Stat, i32> {
     if rc < 0 {
         return Err(errno());
     }
-    Ok(Stat {
-        ino: raw.st_ino,
-        mode: raw.st_mode,
-        uid: raw.st_uid,
-        gid: raw.st_gid,
-        nlink: u32::try_from(raw.st_nlink).unwrap_or(1),
-        size: u64::try_from(raw.st_size).unwrap_or(0),
-        blocks: u64::try_from(raw.st_blocks).unwrap_or(0),
-        atime: (raw.st_atime, u32::try_from(raw.st_atime_nsec).unwrap_or(0)),
-        mtime: (raw.st_mtime, u32::try_from(raw.st_mtime_nsec).unwrap_or(0)),
-        ctime: (raw.st_ctime, u32::try_from(raw.st_ctime_nsec).unwrap_or(0)),
-    })
+    Ok(stat_from_raw(&raw))
 }
