@@ -1,14 +1,12 @@
 import Darwin
 import FSKit
 import Foundation
+import MSLFSWire
 
-/// Unary FSKit delegate for the `mslfs` file system. Unit 0 proves the appex is
-/// reachable through `mount -F` and can drive the app-group UDS probe; it does
-/// not mount a volume, so `loadResource` returns a controlled `ENODEV`.
+/// Unary FSKit delegate for the `mslfs` file system. `probeResource` recognizes
+/// the msl-scheme resource URL; `loadResource` connects the app-group channel to
+/// the daemon and returns a read-only `MSLVolume`.
 final class MSLFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
-    private static let fallbackAppGroup = "group.dev.msl.app"
-    private static let fallbackAppexID = "dev.msl.app.fsmodule"
-
     func probeResource(
         resource: FSResource,
         replyHandler reply: @escaping (FSProbeResult?, (any Error)?) -> Void
@@ -23,7 +21,7 @@ final class MSLFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         MSLFSKitLog.volume.info("probe recognized distro=\(parsed.distro, privacy: .public)")
         let containerID = FSContainerIdentifier(uuid: UUID())
-        reply(FSProbeResult.usable(name: "mslfs", containerID: containerID), nil)
+        reply(FSProbeResult.usable(name: FSProto.shortName, containerID: containerID), nil)
     }
 
     func loadResource(
@@ -37,11 +35,19 @@ final class MSLFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             reply(nil, fs_errorForPOSIXError(EINVAL))
             return
         }
-        let outcome = ProbeClient.run(
-            appGroup: Self.appGroup(), resource: parsed, appexID: Self.appexID())
-        logProbe(outcome, distro: parsed.distro)
-        containerStatus = FSContainerStatus.notReady(status: fs_errorForPOSIXError(ENODEV))
-        reply(nil, fs_errorForPOSIXError(ENODEV))
+        let client = FSClient()
+        do {
+            try client.connect(distro: parsed.distro, mountID: parsed.mount, nonce: parsed.nonce)
+            containerStatus = FSContainerStatus.active
+            MSLFSKitLog.volume.info("loadResource ready distro=\(parsed.distro, privacy: .public)")
+            reply(MSLVolume(client: client, distro: parsed.distro), nil)
+        } catch {
+            let mapped = Self.loadError(error)
+            containerStatus = FSContainerStatus.notReady(status: mapped as NSError)
+            MSLFSKitLog.volume.error(
+                "loadResource failed distro=\(parsed.distro, privacy: .public)")
+            reply(nil, mapped)
+        }
     }
 
     func unloadResource(
@@ -54,29 +60,10 @@ final class MSLFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         reply(nil)
     }
 
-    private func logProbe(_ outcome: ProbeOutcome, distro: String) {
-        assert(!distro.isEmpty, "distro must be non-empty for logging")
-        if outcome.connected {
-            MSLFSKitLog.probe.info(
-                "UDS probe ok distro=\(distro, privacy: .public) reply=\(outcome.reply, privacy: .public)"
-            )
-        } else {
-            MSLFSKitLog.probe.error(
-                "UDS probe failed distro=\(distro, privacy: .public) detail=\(outcome.detail, privacy: .public)"
-            )
+    private static func loadError(_ error: any Error) -> any Error {
+        if let posix = error as? FSProto.PosixError {
+            return fs_errorForPOSIXError(posix.errno == 0 ? ENODEV : posix.errno)
         }
-    }
-
-    /// App group from the appex `Info.plist` (`MSLAppGroup`), else the default.
-    private static func appGroup() -> String {
-        let value = Bundle.main.object(forInfoDictionaryKey: "MSLAppGroup") as? String
-        guard let group = value, !group.isEmpty else { return fallbackAppGroup }
-        return group
-    }
-
-    private static func appexID() -> String {
-        let value = Bundle.main.bundleIdentifier
-        guard let identifier = value, !identifier.isEmpty else { return fallbackAppexID }
-        return identifier
+        return fs_errorForPOSIXError(ENODEV)
     }
 }
