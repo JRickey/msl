@@ -11,6 +11,9 @@ GUEST_BIN    := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-agent
 WAY_BIN      := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-way
 XKB_MUSL_LIB := $(GUEST_DIR)/target/xkb-musl/libxkbcommon.a
 HOST_BIN     := $(HOST_DIR)/.build/release/msl
+MENUBAR_BIN  := $(HOST_DIR)/.build/release/msl-menubar
+APP_DIR      := $(BUILD_DIR)/msl.app
+APP_PLIST    := $(HOST_DIR)/Resources/msl-menubar/Info.plist
 KERNEL_IMAGE := $(KERNEL_DIR)/build/Image
 INITRAMFS    := $(BUILD_DIR)/initramfs.cpio
 BUILDER_INITRAMFS := $(BUILD_DIR)/builder-initramfs.cpio
@@ -28,6 +31,7 @@ help:
 	echo "  make msl-way    - build the aarch64-musl msl-way GUI compositor (needs xkb)"; \
 	echo "  make host       - build the host msl VMM (release)"; \
 	echo "  make sign       - codesign msl with the virtualization entitlement"; \
+	echo "  make app        - assemble msl.app (menu-bar app + bundled CLI)"; \
 	echo "  make kernel     - fetch the pinned arm64 kernel Image"; \
 	echo "  make initramfs  - assemble $(INITRAMFS) (needs guest)"; \
 	echo "  make builder-initramfs - assemble $(BUILDER_INITRAMFS) (needs guest)"; \
@@ -74,6 +78,31 @@ sign:
 	fi; \
 	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" "$(HOST_BIN)"; \
 	echo "sign: signed $(HOST_BIN)"
+
+# Assemble the distributable app bundle: the menu-bar executable plus a copy of
+# the CLI, both signed with the virtualization entitlement so the in-process
+# InstallDriver builder VM works. Signing the bundle with the same entitlements
+# reseals the main executable; the nested CLI keeps its own signature.
+.PHONY: app
+app: host sign
+	@set -eu; \
+	if [ ! -f "$(MENUBAR_BIN)" ]; then \
+	  echo "app: $(MENUBAR_BIN) missing; run 'make host' first" >&2; exit 1; \
+	fi; \
+	if [ ! -f "$(HOST_BIN)" ]; then \
+	  echo "app: $(HOST_BIN) missing; run 'make host' first" >&2; exit 1; \
+	fi; \
+	rm -rf "$(APP_DIR)"; \
+	mkdir -p "$(APP_DIR)/Contents/MacOS"; \
+	cp "$(MENUBAR_BIN)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
+	cp "$(HOST_BIN)" "$(APP_DIR)/Contents/MacOS/msl"; \
+	cp "$(APP_PLIST)" "$(APP_DIR)/Contents/Info.plist"; \
+	plutil -lint "$(APP_DIR)/Contents/Info.plist"; \
+	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" \
+	  "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
+	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)"; \
+	codesign --verify --strict "$(APP_DIR)"; \
+	echo "app: assembled $(APP_DIR)"
 
 .PHONY: kernel
 kernel:
