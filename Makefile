@@ -21,6 +21,23 @@ ROOTFS_IMG   := $(BUILD_DIR)/ubuntu.img
 CONSOLE_LOG  := $(BUILD_DIR)/console.log
 ENTITLEMENTS := entitlements/dev.entitlements
 
+# FSKit appex (ADR 0009): the sole real-cert-signed product. The appex bundle
+# ID nests under the menu-bar app's dev.msl.app; the executable is msl-fskit.
+FSKIT_BIN         := $(HOST_DIR)/.build/release/msl-fskit
+FSKIT_APPEX_ID    := dev.msl.app.fsmodule
+FSKIT_APPEX_DIR   := $(APP_DIR)/Contents/Extensions/$(FSKIT_APPEX_ID).appex
+FSKIT_PLIST_SRC   := $(HOST_DIR)/Resources/msl-fskit/Info.plist
+FSKIT_ENT_SRC     := entitlements/fskit-appex.entitlements
+FSKIT_ENT_RENDER  := $(BUILD_DIR)/fskit-appex.entitlements
+MSL_APP_GROUP_ID  ?= group.dev.msl.app
+# Real Apple Development identity by default; pass FSKIT_SIGN_IDENTITY=- to
+# ad-hoc sign for CI (the appex builds but AMFI blocks its load without the
+# restricted entitlement's provisioning profile).
+FSKIT_SIGN_IDENTITY     ?= Apple Development
+# Optional: path to embedded.provisionprofile authorizing fskit.fsmodule +
+# the app group. Required for the appex to actually load, not to build/sign.
+FSKIT_PROVISION_PROFILE ?=
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -31,7 +48,8 @@ help:
 	echo "  make msl-way    - build the aarch64-musl msl-way GUI compositor (needs xkb)"; \
 	echo "  make host       - build the host msl VMM (release)"; \
 	echo "  make sign       - codesign msl with the virtualization entitlement"; \
-	echo "  make app        - assemble msl.app (menu-bar app + bundled CLI)"; \
+	echo "  make app        - assemble msl.app (menu-bar app + bundled CLI + FSKit appex)"; \
+	echo "  make appex      - assemble+sign the FSKit appex into an existing msl.app"; \
 	echo "  make kernel     - fetch the pinned arm64 kernel Image"; \
 	echo "  make initramfs  - assemble $(INITRAMFS) (needs guest)"; \
 	echo "  make builder-initramfs - assemble $(BUILDER_INITRAMFS) (needs guest)"; \
@@ -98,11 +116,51 @@ app: host sign
 	cp "$(HOST_BIN)" "$(APP_DIR)/Contents/MacOS/msl"; \
 	cp "$(APP_PLIST)" "$(APP_DIR)/Contents/Info.plist"; \
 	plutil -lint "$(APP_DIR)/Contents/Info.plist"; \
+	$(MAKE) appex; \
 	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" \
 	  "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
 	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)"; \
 	codesign --verify --strict "$(APP_DIR)"; \
 	echo "app: assembled $(APP_DIR)"
+
+# Assemble and sign the FSKit appex inside an already-created app bundle. The
+# app group is rendered into both the appex Info.plist and the entitlements so
+# no generated file is committed. The appex is the only real-cert product; the
+# app bundle seal (signed last, in `app`) covers the appex by cdhash.
+.PHONY: appex
+appex:
+	@set -eu; \
+	if [ ! -f "$(FSKIT_BIN)" ]; then \
+	  echo "appex: $(FSKIT_BIN) missing; run 'make host' first" >&2; exit 1; \
+	fi; \
+	if [ ! -d "$(APP_DIR)/Contents" ]; then \
+	  echo "appex: $(APP_DIR) not assembled; run 'make app'" >&2; exit 1; \
+	fi; \
+	mkdir -p "$(FSKIT_APPEX_DIR)/Contents/MacOS"; \
+	cp "$(FSKIT_BIN)" "$(FSKIT_APPEX_DIR)/Contents/MacOS/msl-fskit"; \
+	cp "$(FSKIT_PLIST_SRC)" "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
+	/usr/libexec/PlistBuddy -c "Set :MSLAppGroup $(MSL_APP_GROUP_ID)" \
+	  "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
+	plutil -lint "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
+	mkdir -p "$(BUILD_DIR)"; \
+	cp "$(FSKIT_ENT_SRC)" "$(FSKIT_ENT_RENDER)"; \
+	/usr/libexec/PlistBuddy -c \
+	  "Set :com.apple.security.application-groups:0 $(MSL_APP_GROUP_ID)" \
+	  "$(FSKIT_ENT_RENDER)"; \
+	plutil -lint "$(FSKIT_ENT_RENDER)"; \
+	if [ -n "$(FSKIT_PROVISION_PROFILE)" ]; then \
+	  if [ ! -f "$(FSKIT_PROVISION_PROFILE)" ]; then \
+	    echo "appex: FSKIT_PROVISION_PROFILE=$(FSKIT_PROVISION_PROFILE) not found" >&2; exit 1; \
+	  fi; \
+	  cp "$(FSKIT_PROVISION_PROFILE)" "$(FSKIT_APPEX_DIR)/Contents/embedded.provisionprofile"; \
+	  echo "appex: embedded provisioning profile"; \
+	else \
+	  echo "appex: no FSKIT_PROVISION_PROFILE; appex will sign but AMFI blocks load until one is embedded" >&2; \
+	fi; \
+	codesign --force --timestamp=none --sign "$(FSKIT_SIGN_IDENTITY)" \
+	  --entitlements "$(FSKIT_ENT_RENDER)" "$(FSKIT_APPEX_DIR)"; \
+	codesign --verify --strict "$(FSKIT_APPEX_DIR)"; \
+	echo "appex: signed $(FSKIT_APPEX_DIR) (identity: $(FSKIT_SIGN_IDENTITY), group: $(MSL_APP_GROUP_ID))"
 
 .PHONY: kernel
 kernel:

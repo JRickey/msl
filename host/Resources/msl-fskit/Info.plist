@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>mslfs</string>
+    <key>CFBundleDisplayName</key>
+    <string>msl File System</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.msl.app.fsmodule</string>
+    <key>CFBundleExecutable</key>
+    <string>msl-fskit</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>msl is licensed under Apache-2.0.</string>
+    <key>MSLAppGroup</key>
+    <string>group.dev.msl.app</string>
+    <key>EXAppExtensionAttributes</key>
+    <dict>
+        <key>EXExtensionPointIdentifier</key>
+        <string>com.apple.fskit.fsmodule</string>
+        <key>FSShortName</key>
+        <string>mslfs</string>
+        <key>FSSupportsBlockResources</key>
+        <false/>
+        <key>FSSupportsGenericURLResources</key>
+        <true/>
+        <key>FSSupportsPathURLs</key>
+        <false/>
+        <key>FSSupportedSchemes</key>
+        <array>
+            <string>msl</string>
+        </array>
+        <key>FSMediaTypes</key>
+        <dict/>
+        <key>FSPersonalities</key>
+        <dict/>
+        <key>FSActivateOptionSyntax</key>
+        <dict>
+            <key>shortOptions</key>
+            <string></string>
+        </dict>
+    </dict>
+</dict>
+</plist>

@@ -12,6 +12,8 @@ let package = Package(
     products: [
         .executable(name: "msl", targets: ["msl"]),
         .executable(name: "msl-menubar", targets: ["msl-menubar"]),
+        .executable(name: "msl-fskit", targets: ["msl-fskit"]),
+        .executable(name: "msl-fskit-probe-server", targets: ["msl-fskit-probe-server"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0")
@@ -41,6 +43,14 @@ let package = Package(
         .executableTarget(
             name: "msl-menubar",
             dependencies: ["MSLCore", "MSLMenuBarCore"],
+            swiftSettings: swiftSettings
+        ),
+        .executableTarget(
+            name: "msl-fskit",
+            swiftSettings: swiftSettings
+        ),
+        .executableTarget(
+            name: "msl-fskit-probe-server",
             swiftSettings: swiftSettings
         ),
         .testTarget(
