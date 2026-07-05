@@ -29,6 +29,10 @@ public enum LocalRequest: Sendable, Equatable {
     case resize(sessionID: UInt64, rows: UInt16, cols: UInt16)
     case signal(sessionID: UInt64, signal: Int32)
     case wait(sessionID: UInt64)
+    case mountPrepare(name: String?)
+    case mountCommit(name: String, mountpoint: String)
+    case mountUnmount(name: String, force: Bool)
+    case mountStatus
     case shutdown
 
     /// Encode to a UTF-8 JSON frame payload, enforcing the 4 MiB bound.
@@ -74,7 +78,7 @@ public struct ShellRequest: Sendable, Equatable, Codable {
 
 extension LocalRequest: Codable {
     private enum CodingKeys: String, CodingKey {
-        case op, name, all, argv, env, rows, cols, cwd, token, signal
+        case op, name, all, argv, env, rows, cols, cwd, token, signal, mountpoint, force
         case timeoutMs = "timeout_ms"
         case sessionID = "session_id"
     }
@@ -92,13 +96,22 @@ extension LocalRequest: Codable {
             try container.encode(all, forKey: .all)
             try container.encodeIfPresent(timeoutMs, forKey: .timeoutMs)
         case .shell(let req): try encodeShell(req, into: &container)
+        case .guiConnect(let name):
+            try container.encode("gui_connect", forKey: .op)
+            try container.encodeIfPresent(name, forKey: .name)
+        case .shutdown: try container.encode("shutdown", forKey: .op)
+        case .attach, .resize, .signal, .wait: try encodeSession(into: &container)
+        case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
+            try encodeMount(into: &container)
+        }
+    }
+
+    private func encodeSession(into container: inout KeyedEncodingContainer<CodingKeys>) throws {
+        switch self {
         case .attach(let sessionID, let token):
             try container.encode("attach", forKey: .op)
             try container.encode(sessionID, forKey: .sessionID)
             try container.encode(token, forKey: .token)
-        case .guiConnect(let name):
-            try container.encode("gui_connect", forKey: .op)
-            try container.encodeIfPresent(name, forKey: .name)
         case .resize(let sessionID, let rows, let cols):
             try container.encode("resize", forKey: .op)
             try container.encode(sessionID, forKey: .sessionID)
@@ -111,7 +124,25 @@ extension LocalRequest: Codable {
         case .wait(let sessionID):
             try container.encode("wait", forKey: .op)
             try container.encode(sessionID, forKey: .sessionID)
-        case .shutdown: try container.encode("shutdown", forKey: .op)
+        default: break
+        }
+    }
+
+    private func encodeMount(into container: inout KeyedEncodingContainer<CodingKeys>) throws {
+        switch self {
+        case .mountPrepare(let name):
+            try container.encode("mount_prepare", forKey: .op)
+            try container.encodeIfPresent(name, forKey: .name)
+        case .mountCommit(let name, let mountpoint):
+            try container.encode("mount_commit", forKey: .op)
+            try container.encode(name, forKey: .name)
+            try container.encode(mountpoint, forKey: .mountpoint)
+        case .mountUnmount(let name, let force):
+            try container.encode("mount_unmount", forKey: .op)
+            try container.encode(name, forKey: .name)
+            try container.encode(force, forKey: .force)
+        case .mountStatus: try container.encode("mount_status", forKey: .op)
+        default: break
         }
     }
 
@@ -148,6 +179,25 @@ extension LocalRequest: Codable {
         case "gui_connect":
             return .guiConnect(name: try container.decodeIfPresent(String.self, forKey: .name))
         case "shutdown": return .shutdown
+        default: return try decodeMountOp(op, from: container)
+        }
+    }
+
+    private static func decodeMountOp(
+        _ op: String, from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> LocalRequest {
+        switch op {
+        case "mount_prepare":
+            return .mountPrepare(name: try container.decodeIfPresent(String.self, forKey: .name))
+        case "mount_commit":
+            return .mountCommit(
+                name: try container.decode(String.self, forKey: .name),
+                mountpoint: try container.decode(String.self, forKey: .mountpoint))
+        case "mount_unmount":
+            return .mountUnmount(
+                name: try container.decode(String.self, forKey: .name),
+                force: try container.decodeIfPresent(Bool.self, forKey: .force) ?? false)
+        case "mount_status": return .mountStatus
         default: return try decodeSessionOp(op, from: container)
         }
     }

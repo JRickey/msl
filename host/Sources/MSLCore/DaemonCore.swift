@@ -34,6 +34,10 @@ public final class DaemonCore: @unchecked Sendable {
     let pollQueue = DispatchQueue(label: "msl.daemon.poll", qos: .utility)
     private var idleTimer: DispatchSourceTimer?
 
+    let mountTable = FSMountTable()
+    var mountListener: FSMountListener?
+    let mountInitLock = NSLock()
+
     public init(config: DaemonConfig) {
         self.config = config
     }
@@ -81,6 +85,7 @@ public final class DaemonCore: @unchecked Sendable {
                 return
             }
             guard let resolved, let control = withLock({ self.control }) else { return }
+            unmountForDistroDown(resolved)
             _ = try control.distroDown(name: resolved, timeoutMs: timeoutMs ?? 15000)
             withLock {
                 distrosUp.remove(resolved)

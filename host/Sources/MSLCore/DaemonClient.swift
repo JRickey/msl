@@ -70,6 +70,31 @@ public enum DaemonClient {
         try control.shutdown()
     }
 
+    public static func mountPrepare(_ home: MSLHome, name: String?) throws -> MountPrepareData {
+        try ensureRunning(home)
+        let control = try connect(home)
+        defer { control.close() }
+        return try control.mountPrepare(name: name)
+    }
+
+    public static func mountCommit(_ home: MSLHome, name: String, mountpoint: String) throws {
+        let control = try connect(home)
+        defer { control.close() }
+        try control.mountCommit(name: name, mountpoint: mountpoint)
+    }
+
+    public static func mountUnmount(_ home: MSLHome, name: String, force: Bool) throws {
+        let control = try connect(home)
+        defer { control.close() }
+        try control.mountUnmount(name: name, force: force)
+    }
+
+    public static func mountStatus(_ home: MSLHome) throws -> MountStatusData {
+        let control = try connect(home)
+        defer { control.close() }
+        return try control.mountStatus()
+    }
+
     private static func buildRequest(name: String?, argv: [String], term: String) -> ShellRequest {
         let size = Terminal.windowSize(STDIN_FILENO) ?? Terminal.windowSize(STDOUT_FILENO)
         let cwd = mapSessionCwd(

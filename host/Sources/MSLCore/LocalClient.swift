@@ -44,6 +44,22 @@ public final class LocalClient: @unchecked Sendable {
         let _: LocalEmpty = try roundTrip(.shutdown)
     }
 
+    public func mountPrepare(name: String?) throws -> MountPrepareData {
+        return try roundTrip(.mountPrepare(name: name))
+    }
+
+    public func mountCommit(name: String, mountpoint: String) throws {
+        let _: LocalEmpty = try roundTrip(.mountCommit(name: name, mountpoint: mountpoint))
+    }
+
+    public func mountUnmount(name: String, force: Bool) throws {
+        let _: LocalEmpty = try roundTrip(.mountUnmount(name: name, force: force))
+    }
+
+    public func mountStatus() throws -> MountStatusData {
+        return try roundTrip(.mountStatus)
+    }
+
     /// Send `attach`, read the framed `{ok}` reply, then detach the raw fd; the
     /// connection is now a byte pipe to the guest PTY (the caller owns the fd).
     public func attachRaw(sessionID: UInt64, token: String) throws -> Int32 {

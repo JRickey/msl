@@ -22,6 +22,7 @@ public enum DaemonRuntime: Sendable {
         if !spawned { log("listening on \(socketPath)") }
         let core = DaemonCore(config: config)
         core.startIdleTimer()
+        core.reconcileMounts()
         let cleanup: @Sendable () -> Void = { teardown(core, lock, socketPath, pidPath) }
         installSignals(cleanup)
         let server = DaemonServer(
@@ -51,6 +52,7 @@ public enum DaemonRuntime: Sendable {
     private static func teardown(
         _ core: DaemonCore, _ lock: DaemonLock, _ socketPath: String, _ pidPath: String
     ) {
+        core.stopMountListener()
         core.shutdown()
         _ = Darwin.unlink(socketPath)
         _ = Darwin.unlink(pidPath)

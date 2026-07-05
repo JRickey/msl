@@ -79,10 +79,26 @@ public final class DaemonServer: @unchecked Sendable {
                 try core.signal(sessionID: sessionID, signal: sig)
                 return okFrame(LocalEmpty())
             case .wait(let sessionID): return okFrame(try core.wait(sessionID: sessionID))
+            case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
+                return try mountReply(request)
             default: return errorFrame("unsupported request")
             }
         } catch {
             return errorFrame(describe(error))
+        }
+    }
+
+    private func mountReply(_ request: LocalRequest) throws -> Data {
+        switch request {
+        case .mountPrepare(let name): return okFrame(try core.prepareMount(name: name))
+        case .mountCommit(let name, let mountpoint):
+            try core.finishMount(name: name, mountpoint: mountpoint)
+            return okFrame(LocalEmpty())
+        case .mountUnmount(let name, let force):
+            try core.unmount(name: name, force: force)
+            return okFrame(LocalEmpty())
+        case .mountStatus: return okFrame(core.mountStatus())
+        default: return errorFrame("unsupported request")
         }
     }
 

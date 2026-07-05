@@ -158,6 +158,7 @@ extension DaemonCore {
     func performStop() {
         guard let control = withLock({ self.control }), let host = withLock({ self.host })
         else { return }
+        drainMounts()
         for name in withLock({ Array(distrosUp) }).sorted() {  // bounded: <=26 distros
             _ = try? control.distroDown(name: name, timeoutMs: 15000)
         }
@@ -199,6 +200,7 @@ extension DaemonCore {
     private func handleStop(_ error: Error?, requested: Bool) {
         guard !requested, withLock({ running }) else { return }
         log("VM stopped unexpectedly; will re-boot on next use")
+        failMountsOnVMLoss()
         teardownState()
     }
 
@@ -387,14 +389,4 @@ extension DaemonCore {
 
     func beginOp() { withLock { pendingOps += 1 } }
     func endOp() { withLock { pendingOps = max(0, pendingOps - 1) } }
-}
-
-/// The per-boot resources `teardownState` detaches under the lock and then stops
-/// outside it (stopping a forwarder or timer must never hold `stateLock`).
-private struct TeardownBundle {
-    let wake: PowerWake?
-    let forwarder: PortForwarder?
-    let pollTimer: DispatchSourceTimer?
-    let interop: InteropListener?
-    let host: VMHost?
 }
