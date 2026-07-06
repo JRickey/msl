@@ -60,7 +60,7 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     private func appendHeader(_ model: MenuModel?) {
         guard let model else {
-            menu.addItem(disabled(title: "Checking daemon…"))
+            menu.addItem(disabled(title: "Checking subsystem…"))
             return
         }
         menu.addItem(disabled(title: model.daemonTitle))
@@ -83,7 +83,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     }
 
     private func appendActions(_ model: MenuModel?, finderEnabled: Bool?) {
-        let start = action(title: "Start daemon", selector: #selector(startDaemon))
+        let start = action(title: "Start subsystem", selector: #selector(startDaemon))
         start.isEnabled = model?.startEnabled ?? false
         menu.addItem(start)
         let stop = action(title: "Shut down", selector: #selector(shutDown))
@@ -110,7 +110,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         let home = self.home
         Task { @MainActor in
             if let error = await DaemonAction.start(home: home) {
-                Notifier.postDaemon(title: "Start daemon failed", message: error)
+                Notifier.postDaemon(title: "Start subsystem failed", message: error)
             }
         }
     }

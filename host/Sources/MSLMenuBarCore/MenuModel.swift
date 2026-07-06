@@ -66,7 +66,7 @@ public struct MenuModel: Equatable, Sendable {
     }
 
     public var daemonTitle: String {
-        return daemon == .running ? "Daemon: running" : "Daemon: not running"
+        return daemon == .running ? "Subsystem: running" : "Subsystem: not running"
     }
 
     /// The VM-state line, present only when the daemon answered.

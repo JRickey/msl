@@ -13,7 +13,7 @@ final class MenuModelTests: XCTestCase {
         XCTAssertTrue(model.startEnabled)
         XCTAssertFalse(model.shutDownEnabled)
         XCTAssertNil(model.vmTitle)
-        XCTAssertEqual(model.daemonTitle, "Daemon: not running")
+        XCTAssertEqual(model.daemonTitle, "Subsystem: not running")
     }
 
     func testRunningWithoutStatusIsTreatedAsStopped() {
@@ -34,6 +34,7 @@ final class MenuModelTests: XCTestCase {
         let probe = DaemonProbe(running: true, status: status, defaultDistro: "alpine")
         let model = MenuModel.make(probe: probe)
         XCTAssertEqual(model.daemon, .running)
+        XCTAssertEqual(model.daemonTitle, "Subsystem: running")
         XCTAssertEqual(model.vm, "running")
         XCTAssertEqual(model.vmTitle, "VM: running")
         XCTAssertFalse(model.startEnabled)
