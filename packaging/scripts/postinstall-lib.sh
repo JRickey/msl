@@ -52,6 +52,65 @@ maybe_restart_fskitd() {
 	fi
 }
 
+msl_process_report() {
+	if [ -n "${MSL_TEST_PROCESS_REPORT+x}" ]; then
+		printf '%s\n' "$MSL_TEST_PROCESS_REPORT"
+		return 0
+	fi
+	/bin/ps -axo pid=,args= | /usr/bin/awk '
+		/\/Applications\/msl\.app\/Contents\/MacOS\/msl/ ||
+		/\/usr\/local\/bin\/msl/ ||
+		/\/host\/\.build\/release\/msl/ { print }
+	'
+}
+
+msl_mount_report() {
+	if [ -n "${MSL_TEST_MOUNT_REPORT+x}" ]; then
+		printf '%s\n' "$MSL_TEST_MOUNT_REPORT"
+		return 0
+	fi
+	/sbin/mount | /usr/bin/awk '/mslfs/ { print }'
+}
+
+remove_existing_app() {
+	if [ "${MSL_TEST_DRY_RUN:-0}" = "1" ]; then
+		printf 'remove-app %s\n' "$APP"
+		return 0
+	fi
+	if [ -d "$APP" ]; then
+		/bin/rm -rf "$APP"
+	fi
+}
+
+msl_preinstall_main() {
+	processes=$(msl_process_report)
+	mounts=$(msl_mount_report)
+	if [ -n "$processes" ] || [ -n "$mounts" ]; then
+		{
+			echo "msl is currently running."
+			echo
+			echo "Close Linux shells, unmount Finder volumes, and quit msl before installing."
+			echo "Suggested commands:"
+			echo "  msl unmount <distro>"
+			echo "  msl shutdown"
+			echo
+			if [ -n "$mounts" ]; then
+				echo "Active mslfs mounts:"
+				printf '%s\n' "$mounts"
+				echo
+			fi
+			if [ -n "$processes" ]; then
+				echo "Active msl processes:"
+				printf '%s\n' "$processes"
+				echo
+			fi
+		} >&2
+		return 1
+	fi
+	remove_existing_app
+	return 0
+}
+
 msl_postinstall_main() {
 	maybe_register_app
 
