@@ -23,7 +23,7 @@ jobs:
 
       - name: Install toolchain helpers
         run: |
-          brew install cargo-zigbuild xcodegen zig
+          brew install cargo-zigbuild xcodegen zig meson ninja bison
           rustup target add aarch64-unknown-linux-musl
 
       - name: Cache SwiftPM
