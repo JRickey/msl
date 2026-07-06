@@ -19,6 +19,7 @@ jobs:
 
       - name: Install toolchain helpers
         run: |
+          brew tap | grep -qx aws/tap && brew untap aws/tap || true
           brew install cargo-zigbuild cargo-deny swiftlint xcodegen zig
           rustup target add aarch64-unknown-linux-musl
 

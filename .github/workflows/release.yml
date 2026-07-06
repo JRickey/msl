@@ -23,6 +23,7 @@ jobs:
 
       - name: Install toolchain helpers
         run: |
+          brew tap | grep -qx aws/tap && brew untap aws/tap || true
           brew install cargo-zigbuild xcodegen zig meson ninja bison
           rustup target add aarch64-unknown-linux-musl
 
@@ -114,4 +115,7 @@ jobs:
           files: |
             build/msl-${{ steps.version.outputs.version }}.pkg
             build/msl-${{ steps.version.outputs.version }}.pkg.sha256
+            build/msl-agent-skill-${{ steps.version.outputs.version }}.tar.gz
+            build/msl-agent-skill-${{ steps.version.outputs.version }}.tar.gz.sha256
+          overwrite_files: true
           draft: true

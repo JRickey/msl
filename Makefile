@@ -23,6 +23,7 @@ ROOTFS_IMG   := $(BUILD_DIR)/ubuntu.img
 PKG_ROOT     := $(BUILD_DIR)/pkgroot
 PKG_COMPONENT := $(BUILD_DIR)/msl-component.pkg
 PKG_PRODUCT  := $(BUILD_DIR)/msl-$(VERSION).pkg
+SKILL_ARCHIVE := $(BUILD_DIR)/msl-agent-skill-$(VERSION).tar.gz
 CONSOLE_LOG  := $(BUILD_DIR)/console.log
 ENTITLEMENTS ?= entitlements/dev.entitlements
 RELEASE_ENTITLEMENTS := entitlements/release.entitlements
@@ -82,6 +83,7 @@ help:
 	echo "  make app        - assemble msl.app (menu-bar app + bundled CLI + FSKit appex)"; \
 	echo "  make packaging-test - run pkg script unit tests"; \
 	echo "  make release-pkg - build a signed Developer ID pkg at $(PKG_PRODUCT)"; \
+	echo "  make skill-archive - build $(SKILL_ARCHIVE)"; \
 	echo "  make notarize   - submit, staple, and verify $(PKG_PRODUCT)"; \
 	echo "  make appex      - assemble+sign the FSKit appex into an existing msl.app"; \
 	echo "  make kernel     - fetch the pinned arm64 kernel Image"; \
@@ -236,6 +238,15 @@ packaging-test:
 	@set -eu; \
 	packaging/tests/postinstall_test.sh
 
+.PHONY: skill-archive
+skill-archive:
+	@set -eu; \
+	rm -f "$(SKILL_ARCHIVE)"; \
+	mkdir -p "$(BUILD_DIR)"; \
+	tar -czf "$(SKILL_ARCHIVE)" -C packaging/agent-skill msl; \
+	shasum -a 256 "$(SKILL_ARCHIVE)" >"$(SKILL_ARCHIVE).sha256"; \
+	echo "skill-archive: wrote $(SKILL_ARCHIVE)"
+
 .PHONY: release-app
 release-app:
 	@set -eu; \
@@ -268,7 +279,7 @@ release-app:
 	test -f "$(APP_DIR)/Contents/Resources/builder-initramfs.cpio"
 
 .PHONY: release-pkg
-release-pkg: release-app
+release-pkg: release-app skill-archive
 	@set -eu; \
 	rm -rf "$(PKG_ROOT)" "$(PKG_COMPONENT)" "$(PKG_PRODUCT)"; \
 	mkdir -p "$(PKG_ROOT)/Applications" "$(PKG_ROOT)/usr/local/bin"; \

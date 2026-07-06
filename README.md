@@ -138,7 +138,9 @@ binary.
 Public releases are Developer ID `.pkg` installers. The pkg installs
 `/Applications/msl.app`, adds `/usr/local/bin/msl`, embeds the kernel and
 initramfs assets in the app bundle, and enables the FSKit module for the
-installing console user via `msl fskit enable --no-restart`.
+installing console user via `msl fskit enable --no-restart`. Each release also
+publishes `msl-agent-skill-${VERSION}.tar.gz` for agent harnesses that can
+install skill bundles.
 
 Local release builds read optional private values from `.env`:
 
