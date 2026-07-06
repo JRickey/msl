@@ -6,11 +6,16 @@ import XCTest
 
 final class FSHelloTests: XCTestCase {
     func testHelloRoundTrip() throws {
-        let hello = FSHello(distro: "ubuntu", mountID: "abcd", nonce: "ef01", readonly: true)
+        let hello = FSHello(distro: "ubuntu", mountID: "abcd", nonce: "ef01", readonly: false)
         let decoded = try FSHello.decode(try hello.encoded())
         XCTAssertEqual(decoded, hello)
         XCTAssertEqual(decoded.version, FSProto.version)
         XCTAssertEqual(decoded.op, "hello")
+    }
+
+    func testHelloDefaultsAbsentReadonlyToTrue() throws {
+        let bytes = Data(#"{"v":2,"op":"hello","distro":"u","mount_id":"a","nonce":"b"}"#.utf8)
+        XCTAssertTrue(try FSHello.decode(bytes).readonly)
     }
 
     func testHelloUsesSnakeCaseAndShortVersionKey() throws {
@@ -44,14 +49,20 @@ final class FSHelloTests: XCTestCase {
     }
 
     func testGuestOpenEncodesFsOpenFrame() throws {
-        let data = try FSGuestOpen(distro: "ubuntu").encoded()
+        let data = try FSGuestOpen(distro: "ubuntu", readonly: false).encoded()
         let json = String(bytes: data, encoding: .utf8) ?? ""
         XCTAssertTrue(json.contains("\"op\":\"fs_open\""), json)
         XCTAssertTrue(json.contains("\"v\":\(FSProto.version)"), json)
         XCTAssertTrue(json.contains("\"distro\":\"ubuntu\""), json)
-        XCTAssertTrue(json.contains("\"readonly\":true"), json)
+        XCTAssertTrue(json.contains("\"readonly\":false"), json)
         let decoded = try JSONDecoder().decode(FSGuestOpen.self, from: data)
-        XCTAssertEqual(decoded, FSGuestOpen(distro: "ubuntu"))
+        XCTAssertEqual(decoded, FSGuestOpen(distro: "ubuntu", readonly: false))
+    }
+
+    func testGuestOpenDefaultsAbsentReadonlyToTrue() throws {
+        let bytes = Data(#"{"v":2,"op":"fs_open","distro":"ubuntu"}"#.utf8)
+        let decoded = try JSONDecoder().decode(FSGuestOpen.self, from: bytes)
+        XCTAssertTrue(decoded.readonly)
     }
 }
 
@@ -62,8 +73,8 @@ final class FSLocalProtoTests: XCTestCase {
 
     func testMountRequestsRoundTrip() throws {
         let cases: [LocalRequest] = [
-            .mountPrepare(name: "ubuntu"),
-            .mountPrepare(name: nil),
+            .mountPrepare(name: "ubuntu", readonly: true),
+            .mountPrepare(name: nil, readonly: false),
             .mountCommit(name: "ubuntu", mountpoint: "/Users/x/msl/ubuntu"),
             .mountUnmount(name: "ubuntu", force: true),
             .mountUnmount(name: "ubuntu", force: false),
@@ -72,6 +83,12 @@ final class FSLocalProtoTests: XCTestCase {
         for request in cases {
             XCTAssertEqual(try roundTrip(request), request)
         }
+    }
+
+    func testMountPrepareDefaultsAbsentReadonlyToTrue() throws {
+        let bytes = Data(#"{"op":"mount_prepare","name":"ubuntu"}"#.utf8)
+        XCTAssertEqual(
+            try LocalRequest.decode(bytes), .mountPrepare(name: "ubuntu", readonly: true))
     }
 
     func testMountPrepareReplyRoundTrip() throws {

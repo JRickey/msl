@@ -5,8 +5,7 @@ import Foundation
 import MSLFSWire
 
 /// Unary FSKit delegate for the `mslfs` file system. `probeResource` recognizes
-/// the msl-scheme resource URL; `loadResource` connects the app-group channel to
-/// the daemon and returns a read-only `MSLVolume`.
+/// the msl-scheme resource URL; `loadResource` returns a volume for the requested mode.
 final class MSLFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     func probeResource(
         resource: FSResource,
@@ -38,10 +37,12 @@ final class MSLFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         let client = FSClient()
         do {
-            try client.connect(distro: parsed.distro, mountID: parsed.mount, nonce: parsed.nonce)
+            try client.connect(
+                distro: parsed.distro, mountID: parsed.mount, nonce: parsed.nonce,
+                readonly: parsed.readonly)
             containerStatus = FSContainerStatus.ready
             MSLFSKitLog.volume.info("loadResource ready distro=\(parsed.distro, privacy: .public)")
-            reply(MSLVolume(client: client, distro: parsed.distro), nil)
+            reply(MSLVolume(client: client, distro: parsed.distro, readonly: parsed.readonly), nil)
         } catch {
             let mapped = Self.loadError(error)
             containerStatus = FSContainerStatus.notReady(status: mapped as NSError)
@@ -61,10 +62,8 @@ final class MSLFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         reply(nil)
     }
 
-    /// Deterministic per-distro container identity. FSKit correlates the probe
-    /// result with the load, so a fresh random uuid each probe yields an
-    /// "unexpected container state" fault. A namespaced SHA-256 keeps it stable
-    /// per distro and collision-resistant across distinct names.
+    /// FSKit correlates probe and load by container ID; a namespaced hash keeps
+    /// the ID stable per distro and avoids "unexpected container state".
     private static func containerUUID(for distro: String) -> UUID {
         assert(!distro.isEmpty, "distro must not be empty")
         let digest = Array(SHA256.hash(data: Data("dev.msl.fskit:\(distro)".utf8)))

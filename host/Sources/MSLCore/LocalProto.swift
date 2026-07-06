@@ -29,7 +29,7 @@ public enum LocalRequest: Sendable, Equatable {
     case resize(sessionID: UInt64, rows: UInt16, cols: UInt16)
     case signal(sessionID: UInt64, signal: Int32)
     case wait(sessionID: UInt64)
-    case mountPrepare(name: String?)
+    case mountPrepare(name: String?, readonly: Bool)
     case mountCommit(name: String, mountpoint: String)
     case mountUnmount(name: String, force: Bool)
     case mountStatus
@@ -78,7 +78,7 @@ public struct ShellRequest: Sendable, Equatable, Codable {
 
 extension LocalRequest: Codable {
     private enum CodingKeys: String, CodingKey {
-        case op, name, all, argv, env, rows, cols, cwd, token, signal, mountpoint, force
+        case op, name, all, argv, env, rows, cols, cwd, token, signal, mountpoint, force, readonly
         case timeoutMs = "timeout_ms"
         case sessionID = "session_id"
     }
@@ -130,9 +130,10 @@ extension LocalRequest: Codable {
 
     private func encodeMount(into container: inout KeyedEncodingContainer<CodingKeys>) throws {
         switch self {
-        case .mountPrepare(let name):
+        case .mountPrepare(let name, let readonly):
             try container.encode("mount_prepare", forKey: .op)
             try container.encodeIfPresent(name, forKey: .name)
+            try container.encode(readonly, forKey: .readonly)
         case .mountCommit(let name, let mountpoint):
             try container.encode("mount_commit", forKey: .op)
             try container.encode(name, forKey: .name)
@@ -188,7 +189,9 @@ extension LocalRequest: Codable {
     ) throws -> LocalRequest {
         switch op {
         case "mount_prepare":
-            return .mountPrepare(name: try container.decodeIfPresent(String.self, forKey: .name))
+            return .mountPrepare(
+                name: try container.decodeIfPresent(String.self, forKey: .name),
+                readonly: try container.decodeIfPresent(Bool.self, forKey: .readonly) ?? true)
         case "mount_commit":
             return .mountCommit(
                 name: try container.decode(String.self, forKey: .name),

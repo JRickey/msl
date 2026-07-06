@@ -14,7 +14,7 @@ final class FSClient {
     private var nextID: UInt64 = 0
     private var dead = false
 
-    func connect(distro: String, mountID: String, nonce: String) throws {
+    func connect(distro: String, mountID: String, nonce: String, readonly: Bool) throws {
         guard !distro.isEmpty else {
             throw FSProto.PosixError(errno: EINVAL, message: "empty distro")
         }
@@ -40,7 +40,7 @@ final class FSClient {
                 errno: savedErrno == 0 ? ENODEV : savedErrno, message: "connect")
         }
         fd = sock
-        try handshake(distro: distro, mountID: mountID, nonce: nonce)
+        try handshake(distro: distro, mountID: mountID, nonce: nonce, readonly: readonly)
     }
 
     func close() {
@@ -150,16 +150,111 @@ final class FSClient {
     func sync() throws {
         guard case .empty = try roundTrip(.sync) else { throw Self.wrongReply }
     }
+}
 
+extension FSClient {
+    func write(node: UInt64, offset: UInt64, data: [UInt8]) throws -> (
+        count: UInt32, attr: FSProto.Attr
+    ) {
+        try Self.requireNode(node)
+        guard data.count <= FSProto.writeRequestCap else {
+            throw FSProto.PosixError(errno: EINVAL, message: "write too large")
+        }
+        guard
+            case .write(let count, let attr) = try roundTrip(
+                .write(node: node, offset: offset, data: data)
+            )
+        else { throw Self.wrongReply }
+        return (count, attr)
+    }
+
+    func setattr(node: UInt64, setattr: FSProto.SetAttr) throws -> FSProto.Attr {
+        try Self.requireNode(node)
+        guard case .attr(let attr) = try roundTrip(.setattr(node: node, setattr: setattr)) else {
+            throw Self.wrongReply
+        }
+        return attr
+    }
+
+    // swiftlint:disable:next function_parameter_count
+    func create(
+        parent: UInt64, name: String, itemType: FSProto.ItemType, mode: UInt32, uid: UInt32,
+        gid: UInt32
+    ) throws -> FSProto.Attr {
+        try Self.requireNode(parent)
+        try Self.requireName(name)
+        let request = FSProto.Request.create(
+            parent: parent, name: name, itemType: itemType, mode: mode, uid: uid, gid: gid)
+        guard case .attr(let attr) = try roundTrip(request) else { throw Self.wrongReply }
+        return attr
+    }
+
+    func symlink(
+        parent: UInt64, name: String, target: String, uid: UInt32, gid: UInt32
+    ) throws -> FSProto.Attr {
+        try Self.requireNode(parent)
+        try Self.requireName(name)
+        guard !target.isEmpty else {
+            throw FSProto.PosixError(errno: EINVAL, message: "empty symlink target")
+        }
+        let request = FSProto.Request.symlink(
+            parent: parent, name: name, target: target, uid: uid, gid: gid)
+        guard case .attr(let attr) = try roundTrip(request) else { throw Self.wrongReply }
+        return attr
+    }
+
+    func link(node: UInt64, newParent: UInt64, newName: String) throws -> FSProto.Attr {
+        try Self.requireNode(node)
+        try Self.requireNode(newParent)
+        try Self.requireName(newName)
+        guard
+            case .attr(let attr) = try roundTrip(
+                .link(node: node, newParent: newParent, newName: newName)
+            )
+        else { throw Self.wrongReply }
+        return attr
+    }
+
+    func remove(parent: UInt64, name: String, itemType: FSProto.ItemType) throws {
+        try Self.requireNode(parent)
+        try Self.requireName(name)
+        guard case .empty = try roundTrip(.remove(parent: parent, name: name, itemType: itemType))
+        else { throw Self.wrongReply }
+    }
+
+    // swiftlint:disable:next function_parameter_count
+    func rename(
+        node: UInt64, srcParent: UInt64, srcName: String, dstParent: UInt64, dstName: String,
+        replace: Bool
+    ) throws -> FSProto.Attr {
+        try Self.requireNode(node)
+        try Self.requireNode(srcParent)
+        try Self.requireNode(dstParent)
+        try Self.requireName(srcName)
+        try Self.requireName(dstName)
+        let flags: UInt8 = replace ? 1 : 0
+        guard
+            case .attr(let attr) = try roundTrip(
+                .rename(
+                    node: node, srcParent: srcParent, srcName: srcName, dstParent: dstParent,
+                    dstName: dstName, flags: flags)
+            )
+        else { throw Self.wrongReply }
+        return attr
+    }
+}
+
+extension FSClient {
     // MARK: - Internals
 
     private static let wrongReply = FSProto.PosixError(errno: EIO, message: "unexpected reply body")
 
-    private func handshake(distro: String, mountID: String, nonce: String) throws {
+    private func handshake(distro: String, mountID: String, nonce: String, readonly: Bool) throws {
         assert(fd >= 0, "handshake needs a connected fd")
         assert(!distro.isEmpty, "distro validated before handshake")
         do {
-            let hello = FSHello(distro: distro, mountID: mountID, nonce: nonce)
+            let hello = FSHello(
+                distro: distro, mountID: mountID, nonce: nonce, readonly: readonly)
             try FSFrame.writeFrame(fd, [UInt8](hello.encoded()))
             let reply = try FSControlReply.decode(Data(FSFrame.readFrame(fd)))
             guard reply.ok else {
@@ -201,6 +296,18 @@ final class FSClient {
         return sock.path
     }
 
+    private static func requireNode(_ node: UInt64) throws {
+        guard node != 0 else {
+            throw FSProto.PosixError(errno: EINVAL, message: "zero node id")
+        }
+    }
+
+    private static func requireName(_ name: String) throws {
+        guard !name.isEmpty else {
+            throw FSProto.PosixError(errno: EINVAL, message: "empty name")
+        }
+    }
+
     /// The per-op deadline is a reliability guarantee, so a failed install fails
     /// the connect rather than leaving a socket that could block a Finder op.
     private static func applyTimeout(_ fd: Int32, _ option: Int32, _ seconds: Double) -> Bool {
@@ -212,9 +319,8 @@ final class FSClient {
         return setsockopt(fd, SOL_SOCKET, option, &tv, socklen_t(MemoryLayout<timeval>.size)) == 0
     }
 
-    /// Disable SIGPIPE for this socket: a peer close between ops must surface as
-    /// an `EPIPE` write error the round trip maps, never a signal that kills the
-    /// appex process.
+    /// Disable SIGPIPE so peer-close writes report `EPIPE` through `roundTrip`
+    /// instead of terminating the appex process.
     private static func setNoSigPipe(_ fd: Int32) -> Bool {
         assert(fd >= 0, "fd must be valid")
         var one: Int32 = 1

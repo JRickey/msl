@@ -90,7 +90,8 @@ public final class DaemonServer: @unchecked Sendable {
 
     private func mountReply(_ request: LocalRequest) throws -> Data {
         switch request {
-        case .mountPrepare(let name): return okFrame(try core.prepareMount(name: name))
+        case .mountPrepare(let name, let readonly):
+            return okFrame(try core.prepareMount(name: name, readonly: readonly))
         case .mountCommit(let name, let mountpoint):
             try core.finishMount(name: name, mountpoint: mountpoint)
             return okFrame(LocalEmpty())

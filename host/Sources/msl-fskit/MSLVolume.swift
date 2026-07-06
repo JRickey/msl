@@ -3,24 +3,25 @@ import FSKit
 import Foundation
 import MSLFSWire
 
-/// Read-only FSKit volume backed by the guest fs service. Every Finder operation
-/// becomes an `FSClient` round trip; every mutation entrypoint returns `EROFS`
-/// so read-only is structural, not advisory. A per-`nodeID` item cache gives
-/// each guest node a stable `FSItem` identity across lookups.
+/// FSKit volume backed by the guest fs service. Every Finder operation becomes
+/// an `FSClient` round trip, with read-only mounts rejecting mutations locally.
 final class MSLVolume: FSVolume, FSVolume.Operations {
     static let fullWanted: UInt32 = 0xFFFF_FFFF
     static let rootNodeID: UInt64 = 1
     static let stableVerifier = FSDirectoryVerifier(rawValue: 1)
 
     let client: FSClient
+    let readonly: Bool
     private let distro: String
     private let cacheLock = NSLock()
     private var items: [UInt64: MSLItem] = [:]
+    private var directoryGenerations: [UInt64: UInt64] = [MSLVolume.rootNodeID: 1]
     private var cachedStatfs: FSProto.Statfs?
 
-    init(client: FSClient, distro: String) {
+    init(client: FSClient, distro: String, readonly: Bool) {
         assert(!distro.isEmpty, "volume distro must not be empty")
         self.client = client
+        self.readonly = readonly
         self.distro = distro
         super.init(volumeID: FSVolume.Identifier(), volumeName: FSFileName(string: distro))
     }
@@ -30,8 +31,8 @@ final class MSLVolume: FSVolume, FSVolume.Operations {
         caps.caseFormat = .sensitive
         caps.supports64BitObjectIDs = true
         caps.supportsSymbolicLinks = true
+        caps.supportsHardLinks = true
         caps.doesNotSupportImmutableFiles = true
-        caps.doesNotSupportSettingFilePermissions = true
         return caps
     }
 
@@ -85,6 +86,33 @@ extension MSLVolume {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         return cachedStatfs
+    }
+
+    func invalidateStatfs() {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        cachedStatfs = nil
+    }
+
+    func directoryVerifier(nodeID: UInt64) -> FSDirectoryVerifier {
+        assert(nodeID != 0, "directory node id must be non-zero")
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let raw = directoryGenerations[nodeID] ?? 1
+        return FSDirectoryVerifier(rawValue: raw)
+    }
+
+    func bumpDirectory(nodeID: UInt64) {
+        assert(nodeID != 0, "directory node id must be non-zero")
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let next = (directoryGenerations[nodeID] ?? 1) &+ 1
+        directoryGenerations[nodeID] = next == 0 ? 1 : next
+    }
+
+    func bumpDirectories(_ first: UInt64, _ second: UInt64? = nil) {
+        bumpDirectory(nodeID: first)
+        if let second, second != first { bumpDirectory(nodeID: second) }
     }
 
     func apply(_ stat: FSProto.Statfs, to result: FSStatFSResult) {
@@ -224,7 +252,7 @@ extension MSLVolume {
         }
         do {
             try enumerate(dir: dir, cookie: cookie, attributes: attributes, packer: packer)
-            reply(Self.stableVerifier, nil)
+            reply(directoryVerifier(nodeID: dir.nodeID), nil)
         } catch {
             reply(Self.stableVerifier, Self.mapError(error))
         }
@@ -279,9 +307,8 @@ extension MSLVolume {
         return true
     }
 
-    /// Fill up to `min(length, buffer.length)` bytes by looping guest reads: each
-    /// guest reply is capped at 1 MiB, so a larger FSKit request needs several,
-    /// and a short/eof reply ends the fill (never truncates a >1 MiB read).
+    /// FSKit reads can exceed the guest's 1 MiB reply cap, so reads loop until
+    /// the caller buffer is full, EOF arrives, or a short non-EOF reply fails.
     func readBytes(
         node: UInt64, offset: UInt64, length: Int, buffer: FSMutableFileDataBuffer
     ) throws -> Int {

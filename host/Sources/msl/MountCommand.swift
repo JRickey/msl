@@ -9,7 +9,7 @@ import MSLFSWire
 struct MountCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mount",
-        abstract: "Mount a distro's filesystem in Finder at ~/msl/<distro> (read-only).")
+        abstract: "Mount a distro's filesystem in Finder at ~/msl/<distro>.")
 
     @Argument(help: "Distro to mount (default: the registry default).")
     var name: String?
@@ -17,9 +17,12 @@ struct MountCommand: ParsableCommand {
     @Flag(name: .long, help: "Reveal the mountpoint in Finder after mounting.")
     var reveal: Bool = false
 
+    @Flag(name: .long, help: "Mount with writes disabled.")
+    var readOnly: Bool = false
+
     func run() throws {
         let home = MSLHome.resolve()
-        let prep = try DaemonClient.mountPrepare(home, name: name)
+        let prep = try DaemonClient.mountPrepare(home, name: name, readonly: readOnly)
         try FileManager.default.createDirectory(
             atPath: prep.mountpoint, withIntermediateDirectories: true)
         do {
@@ -33,11 +36,8 @@ struct MountCommand: ParsableCommand {
         if reveal { Self.reveal(prep.mountpoint) }
     }
 
-    /// `/sbin/mount -F -t mslfs <url> <mountpoint>`. The FSKit generic-URL mount
-    /// path accepts exactly two positional arguments; any `-o` option makes
-    /// mount(8) reject the invocation ("argument count N not equal to expected
-    /// count 2"). Read-only is enforced by the volume (EROFS on every mutation)
-    /// and advertised through its capabilities, so no `-o rdonly` is needed.
+    /// FSKit generic-URL mounts accept exactly `<url> <mountpoint>`; `-o` options
+    /// trigger mount(8)'s argument-count rejection, so mode travels in the URL.
     private static func mountVolume(url: String, mountpoint: String) throws {
         precondition(!url.isEmpty, "resource url must not be empty")
         precondition(!mountpoint.isEmpty, "mountpoint must not be empty")

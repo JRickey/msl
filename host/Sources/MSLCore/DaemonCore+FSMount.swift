@@ -7,10 +7,9 @@ import MSLFSWire
 /// `/sbin/mount -F` and `/sbin/umount`. A live mount holds an activity
 /// reference so idle VM shutdown cannot pull the rug from under Finder.
 extension DaemonCore {
-    /// Resolve + ensure the distro is up, mint a mount id/nonce, ensure the
-    /// appex listener is running, record a prepared mount, and return the routing
-    /// URL + mountpoint the CLI hands to `/sbin/mount -F`.
-    public func prepareMount(name: String?) throws -> MountPrepareData {
+    /// Prepare a routed FSKit mount: ensure the distro, bind appex admission,
+    /// record the nonce-backed mount, and return the CLI's URL and mountpoint.
+    public func prepareMount(name: String?, readonly: Bool) throws -> MountPrepareData {
         let entry = try ensureUp(name)
         let distro = entry.name
         guard FSMountpoint.isValidDistroName(distro) else {
@@ -20,10 +19,11 @@ extension DaemonCore {
             throw MSLError.configuration("cannot resolve mountpoint for '\(distro)'")
         }
         try ensureMountListener()
-        let record = mountTable.prepare(name: distro, mountpoint: mountpoint, readonly: true)
+        let record = mountTable.prepare(name: distro, mountpoint: mountpoint, readonly: readonly)
         guard
             let url = FSMountpoint.resourceURL(
-                distro: distro, mountID: record.mountID, nonce: record.nonce)
+                distro: distro, mountID: record.mountID, nonce: record.nonce,
+                readonly: record.readonly)
         else {
             mountTable.remove(name: distro)
             throw MSLError.configuration("cannot build resource URL for '\(distro)'")
@@ -34,9 +34,8 @@ extension DaemonCore {
             nonce: record.nonce)
     }
 
-    /// Record that macOS mounted the volume: validate the mountpoint, transition
-    /// the record to mounted, and take an activity hold (a live mount blocks idle
-    /// VM shutdown).
+    /// Commit the macOS mount and take an activity hold so live Finder volumes
+    /// block idle VM shutdown.
     public func finishMount(name: String, mountpoint: String) throws {
         guard FSMountpoint.validate(mountpoint: mountpoint, distro: name) else {
             throw MSLError.configuration("mountpoint '\(mountpoint)' invalid for '\(name)'")
@@ -67,9 +66,8 @@ extension DaemonCore {
         return MountStatusData(mounts: entries)
     }
 
-    /// Force-unmount stranded `mslfs` mounts under `~/msl` at daemon startup: a
-    /// fresh daemon has no adoptable state, so every discovered mount is stale
-    /// and reclaimed — no crash may leave an indefinitely wedged Finder mount.
+    /// Startup cleanup force-unmounts `mslfs` mounts under `~/msl`; daemon state
+    /// is not adoptable, so discovered mounts are stale.
     public func reconcileMounts() {
         let base = FSMountpoint.base()
         let discovered = FSMountOps.discoverMounts(base: base)
@@ -143,11 +141,8 @@ extension DaemonCore {
         log("fs appex listener on \(FSProto.appexSocketPath())")
     }
 
-    /// Open the guest file-service channel for a routed mount. The distro must be
-    /// running. Connects vsock 5030, sends the `fs_open` control frame naming the
-    /// distro, and returns the raw fd only after the guest acks that its msl-fsd
-    /// worker is up — a guest-side failure surfaces as "guest unavailable", never
-    /// a Finder hang.
+    /// Connect vsock 5030 and send `fs_open`; return the fd only after guest ack
+    /// so worker failure becomes an error instead of a Finder hang.
     private func connectGuestFileService(_ hello: FSHello) throws -> Int32 {
         guard let host = withLock({ self.host }), withLock({ running }) else {
             throw MSLError.configuration("VM not running")

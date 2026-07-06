@@ -37,8 +37,10 @@ public enum FSMountpoint {
         return standardized(mountpoint) == expected
     }
 
-    /// `msl://<percent-encoded-distro>?mount=<id>&nonce=<single-use>`.
-    public static func resourceURL(distro: String, mountID: String, nonce: String) -> String? {
+    /// `msl://<percent-encoded-distro>?mount=<id>&nonce=<single-use>&readonly=<mode>`.
+    public static func resourceURL(
+        distro: String, mountID: String, nonce: String, readonly: Bool
+    ) -> String? {
         guard isValidDistroName(distro), !mountID.isEmpty, !nonce.isEmpty else { return nil }
         var comps = URLComponents()
         comps.scheme = FSProto.scheme
@@ -46,6 +48,7 @@ public enum FSMountpoint {
         comps.queryItems = [
             URLQueryItem(name: "mount", value: mountID),
             URLQueryItem(name: "nonce", value: nonce),
+            URLQueryItem(name: "readonly", value: readonly ? "1" : "0"),
         ]
         guard let url = comps.url?.absoluteString else { return nil }
         assert(url.hasPrefix("msl://"), "resource URL must use the msl scheme")

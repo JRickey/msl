@@ -70,11 +70,13 @@ public enum DaemonClient {
         try control.shutdown()
     }
 
-    public static func mountPrepare(_ home: MSLHome, name: String?) throws -> MountPrepareData {
+    public static func mountPrepare(
+        _ home: MSLHome, name: String?, readonly: Bool
+    ) throws -> MountPrepareData {
         try ensureRunning(home)
         let control = try connect(home)
         defer { control.close() }
-        return try control.mountPrepare(name: name)
+        return try control.mountPrepare(name: name, readonly: readonly)
     }
 
     public static func mountCommit(_ home: MSLHome, name: String, mountpoint: String) throws {

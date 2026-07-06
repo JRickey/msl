@@ -26,7 +26,6 @@ final class FSMountpointTests: XCTestCase {
         XCTAssertTrue(
             FSMountpoint.validate(
                 mountpoint: "/Users/tester/msl/ubuntu", distro: "ubuntu", home: home))
-        // traversal or a different location is rejected
         XCTAssertFalse(
             FSMountpoint.validate(
                 mountpoint: "/Users/tester/msl/ubuntu/../../etc", distro: "ubuntu", home: home))
@@ -39,21 +38,39 @@ final class FSMountpointTests: XCTestCase {
 
     func testResourceURLShape() throws {
         let url = try XCTUnwrap(
-            FSMountpoint.resourceURL(distro: "ubuntu", mountID: "abcd", nonce: "ef01"))
+            FSMountpoint.resourceURL(
+                distro: "ubuntu", mountID: "abcd", nonce: "ef01", readonly: true))
         XCTAssertTrue(url.hasPrefix("msl://ubuntu?"))
         XCTAssertTrue(url.contains("mount=abcd"))
         XCTAssertTrue(url.contains("nonce=ef01"))
-        // reparse via the appex-side parser proves the URL round-trips
+        XCTAssertTrue(url.contains("readonly=1"))
         let parsed = try XCTUnwrap(MSLResourceURLProbe.parse(url))
         XCTAssertEqual(parsed.distro, "ubuntu")
         XCTAssertEqual(parsed.mount, "abcd")
         XCTAssertEqual(parsed.nonce, "ef01")
+        XCTAssertTrue(parsed.readonly)
+    }
+
+    func testResourceURLRoundTripsReadWriteMode() throws {
+        let url = try XCTUnwrap(
+            FSMountpoint.resourceURL(
+                distro: "ubuntu", mountID: "abcd", nonce: "ef01", readonly: false))
+        let parsed = try XCTUnwrap(MSLResourceURLProbe.parse(url))
+        XCTAssertFalse(parsed.readonly)
+    }
+
+    func testResourceURLProbeDefaultsAbsentReadonlyToTrue() throws {
+        let parsed = try XCTUnwrap(MSLResourceURLProbe.parse("msl://ubuntu?mount=a&nonce=b"))
+        XCTAssertTrue(parsed.readonly)
     }
 
     func testResourceURLRejectsBadInputs() {
-        XCTAssertNil(FSMountpoint.resourceURL(distro: "a/b", mountID: "x", nonce: "y"))
-        XCTAssertNil(FSMountpoint.resourceURL(distro: "ubuntu", mountID: "", nonce: "y"))
-        XCTAssertNil(FSMountpoint.resourceURL(distro: "ubuntu", mountID: "x", nonce: ""))
+        XCTAssertNil(
+            FSMountpoint.resourceURL(distro: "a/b", mountID: "x", nonce: "y", readonly: true))
+        XCTAssertNil(
+            FSMountpoint.resourceURL(distro: "ubuntu", mountID: "", nonce: "y", readonly: true))
+        XCTAssertNil(
+            FSMountpoint.resourceURL(distro: "ubuntu", mountID: "x", nonce: "", readonly: true))
     }
 }
 
@@ -64,6 +81,7 @@ enum MSLResourceURLProbe {
         let distro: String
         let mount: String
         let nonce: String
+        let readonly: Bool
     }
 
     static func parse(_ string: String) -> Parsed? {
@@ -73,6 +91,9 @@ enum MSLResourceURLProbe {
         func value(_ name: String) -> String {
             items.first { $0.name == name }?.value ?? ""
         }
-        return Parsed(distro: host, mount: value("mount"), nonce: value("nonce"))
+        let mode = value("readonly").lowercased()
+        return Parsed(
+            distro: host, mount: value("mount"), nonce: value("nonce"),
+            readonly: !(mode == "0" || mode == "false"))
     }
 }

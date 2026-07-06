@@ -1,16 +1,16 @@
 import Foundation
 
-/// Routing data parsed from an `msl://<distro>?mount=<id>&nonce=<single-use>`
-/// resource URL. This is routing only, never an authorization secret: msld
-/// authenticates the peer and validates the mount id and nonce independently.
+/// Routing data parsed from an `msl://<distro>` resource URL. This is routing
+/// only, never an authorization secret: msld authenticates the peer and
+/// validates the mount id and nonce independently.
 struct MSLResourceURL: Sendable, Equatable {
     let distro: String
     let mount: String
     let nonce: String
+    let readonly: Bool
 
-    /// Parse an `msl` URL into routing fields. Returns nil when the scheme is
-    /// wrong or the distro component is empty; mount/nonce may be empty in the
-    /// Unit 0 probe path and are validated by the daemon in later units.
+    /// Parse routing fields; mount/nonce may be empty during FSKit probe, but the
+    /// daemon still validates them before load admission.
     static func parse(_ url: URL) -> MSLResourceURL? {
         guard url.scheme == "msl" else { return nil }
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
@@ -22,7 +22,8 @@ struct MSLResourceURL: Sendable, Equatable {
         let parsed = MSLResourceURL(
             distro: distro,
             mount: value(items, name: "mount"),
-            nonce: value(items, name: "nonce"))
+            nonce: value(items, name: "nonce"),
+            readonly: readonlyValue(items))
         assert(!parsed.distro.isEmpty, "distro validated non-empty above")
         return parsed
     }
@@ -43,5 +44,10 @@ struct MSLResourceURL: Sendable, Equatable {
             return item.value ?? ""
         }
         return ""
+    }
+
+    private static func readonlyValue(_ items: [URLQueryItem]) -> Bool {
+        let raw = value(items, name: "readonly").lowercased()
+        return !(raw == "0" || raw == "false")
     }
 }

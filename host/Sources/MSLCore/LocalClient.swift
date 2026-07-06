@@ -44,8 +44,8 @@ public final class LocalClient: @unchecked Sendable {
         let _: LocalEmpty = try roundTrip(.shutdown)
     }
 
-    public func mountPrepare(name: String?) throws -> MountPrepareData {
-        return try roundTrip(.mountPrepare(name: name))
+    public func mountPrepare(name: String?, readonly: Bool) throws -> MountPrepareData {
+        return try roundTrip(.mountPrepare(name: name, readonly: readonly))
     }
 
     public func mountCommit(name: String, mountpoint: String) throws {
@@ -60,8 +60,8 @@ public final class LocalClient: @unchecked Sendable {
         return try roundTrip(.mountStatus)
     }
 
-    /// Send `attach`, read the framed `{ok}` reply, then detach the raw fd; the
-    /// connection is now a byte pipe to the guest PTY (the caller owns the fd).
+    /// After a framed OK, detach the fd; the caller owns a raw PTY byte pipe
+    /// to the guest.
     public func attachRaw(sessionID: UInt64, token: String) throws -> Int32 {
         precondition(!token.isEmpty, "attach token must not be empty")
         lock.lock()
@@ -74,8 +74,8 @@ public final class LocalClient: @unchecked Sendable {
         return framed.detachDescriptor()
     }
 
-    /// Send `gui_connect`, read the framed `{ok}` reply, then detach the raw fd;
-    /// the connection is now a byte pipe to the guest surface plane (vsock 5020).
+    /// After a framed OK, detach the fd; the caller owns a raw surface-plane byte
+    /// pipe to the guest.
     public func guiConnectRaw(name: String?) throws -> Int32 {
         lock.lock()
         defer { lock.unlock() }
