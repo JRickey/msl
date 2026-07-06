@@ -213,6 +213,28 @@ appex:
 	/usr/libexec/PlistBuddy -c \
 	  "Set :com.apple.security.application-groups:0 $(MSL_APP_GROUP_ID)" \
 	  "$(FSKIT_ENT_RENDER)"; \
+	if [ -n "$(MSL_TEAM_ID)" ]; then \
+	  /usr/libexec/PlistBuddy -c \
+	    "Add :com.apple.application-identifier string $(MSL_TEAM_ID).$(FSKIT_APPEX_ID)" \
+	    "$(FSKIT_ENT_RENDER)" 2>/dev/null || \
+	    /usr/libexec/PlistBuddy -c \
+	    "Set :com.apple.application-identifier $(MSL_TEAM_ID).$(FSKIT_APPEX_ID)" \
+	    "$(FSKIT_ENT_RENDER)"; \
+	  /usr/libexec/PlistBuddy -c \
+	    "Add :com.apple.developer.team-identifier string $(MSL_TEAM_ID)" \
+	    "$(FSKIT_ENT_RENDER)" 2>/dev/null || \
+	    /usr/libexec/PlistBuddy -c \
+	    "Set :com.apple.developer.team-identifier $(MSL_TEAM_ID)" \
+	    "$(FSKIT_ENT_RENDER)"; \
+	  /usr/libexec/PlistBuddy -c \
+	    "Add :com.apple.security.application-groups:1 string $(MSL_TEAM_ID).*" \
+	    "$(FSKIT_ENT_RENDER)" 2>/dev/null || true; \
+	  /usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" \
+	    "$(FSKIT_ENT_RENDER)" 2>/dev/null || true; \
+	  /usr/libexec/PlistBuddy -c \
+	    "Add :keychain-access-groups:0 string $(MSL_TEAM_ID).*" \
+	    "$(FSKIT_ENT_RENDER)" 2>/dev/null || true; \
+	fi; \
 	plutil -lint "$(FSKIT_ENT_RENDER)"; \
 	if [ -n "$(FSKIT_PROVISION_PROFILE)" ]; then \
 	  if [ ! -f "$(FSKIT_PROVISION_PROFILE)" ]; then \
