@@ -1,7 +1,6 @@
 //! The request dispatcher: decode one `fs` request, drive the backend through
-//! the node table, and encode the reply. Read-only — no mutation entrypoint
-//! exists, so the guest never opens the root writable. Generic over `Backend`
-//! so the whole dispatch is host-tested against an in-memory mock.
+//! the node table, and encode the reply. Generic over `Backend` so the whole
+//! dispatch is host-tested against an in-memory mock.
 
 use std::collections::HashMap;
 
@@ -9,7 +8,7 @@ use crate::backend::Backend;
 use crate::names::is_valid_component;
 use crate::nodes::{NodeTable, ROOT_ID};
 use crate::stat;
-use msl_wire::fs::{DirEntry, ReplyBody, ReplyFrame, Request, RequestFrame};
+use msl_wire::fs::{DirEntry, ItemType, ReplyBody, ReplyFrame, Request, RequestFrame, SetAttr};
 
 /// Serves file operations for one mounted volume over one backend.
 pub struct Server<B: Backend> {
@@ -17,18 +16,20 @@ pub struct Server<B: Backend> {
     nodes: NodeTable,
     next_handle: u64,
     open_reads: HashMap<u64, i32>,
+    read_only: bool,
 }
 
 impl<B: Backend> Server<B> {
     /// Open the root authority and seed the node table. `fd_cap` bounds cached
     /// node handles.
-    pub fn new(mut backend: B, fd_cap: usize) -> Result<Self, i32> {
+    pub fn new(mut backend: B, fd_cap: usize, read_only: bool) -> Result<Self, i32> {
         let root = backend.root()?;
         Ok(Self {
             backend,
             nodes: NodeTable::new(root, fd_cap),
             next_handle: 1,
             open_reads: HashMap::new(),
+            read_only,
         })
     }
 
@@ -61,14 +62,43 @@ impl<B: Backend> Server<B> {
             Request::CloseFile { handle } => Ok(self.close_file(*handle)),
             Request::Readlink { node } => self.readlink(*node),
             Request::Reclaim { node } => Ok(self.reclaim(*node)),
-            Request::Sync | Request::Close => Ok(ReplyBody::Empty),
-            Request::Write { .. }
-            | Request::Setattr { .. }
-            | Request::Create { .. }
-            | Request::Symlink { .. }
-            | Request::Link { .. }
-            | Request::Remove { .. }
-            | Request::Rename { .. } => Err(libc::EROFS),
+            Request::Sync => self.sync(),
+            Request::Close => Ok(ReplyBody::Empty),
+            Request::Write { node, offset, data } => self.write(*node, *offset, data),
+            Request::Setattr { node, setattr } => self.setattr(*node, *setattr),
+            Request::Create {
+                parent,
+                name,
+                item_type,
+                mode,
+                uid,
+                gid,
+            } => self.create(*parent, name, *item_type, *mode, *uid, *gid),
+            Request::Symlink {
+                parent,
+                name,
+                target,
+                uid,
+                gid,
+            } => self.symlink(*parent, name, target, *uid, *gid),
+            Request::Link {
+                node,
+                new_parent,
+                new_name,
+            } => self.link(*node, *new_parent, new_name),
+            Request::Remove {
+                parent,
+                name,
+                item_type,
+            } => self.remove(*parent, name, *item_type),
+            Request::Rename {
+                node,
+                src_parent,
+                src_name,
+                dst_parent,
+                dst_name,
+                flags,
+            } => self.rename(*node, *src_parent, src_name, *dst_parent, dst_name, *flags),
         }
     }
 
@@ -83,7 +113,9 @@ impl<B: Backend> Server<B> {
         }
         let parent_handle = self.nodes.resolve(parent, &mut self.backend)?;
         let (_child, child_stat) = self.backend.lookup(parent_handle, name)?;
-        let node_id = self.nodes.intern(parent, name, child_stat.item_type());
+        let node_id = self
+            .nodes
+            .observe_child(parent, name, child_stat.item_type());
         Ok(ReplyBody::Attr(stat::to_attr(node_id, parent, &child_stat)))
     }
 
@@ -103,7 +135,9 @@ impl<B: Backend> Server<B> {
             if !is_valid_component(&item.name) {
                 continue;
             }
-            let child_id = self.nodes.intern(node, &item.name, item.stat.item_type());
+            let child_id = self
+                .nodes
+                .observe_child(node, &item.name, item.stat.item_type());
             entries.push(DirEntry {
                 name: item.name,
                 attr: stat::to_attr(child_id, node, &item.stat),
@@ -150,10 +184,157 @@ impl<B: Backend> Server<B> {
         self.nodes.reclaim(node, &mut self.backend);
         ReplyBody::Empty
     }
+
+    fn sync(&mut self) -> Result<ReplyBody, i32> {
+        let root = self.nodes.resolve(ROOT_ID, &mut self.backend)?;
+        self.backend.sync(root)?;
+        Ok(ReplyBody::Empty)
+    }
+
+    fn write(&mut self, node: u64, offset: u64, data: &[u8]) -> Result<ReplyBody, i32> {
+        self.ensure_writable()?;
+        let handle = self.nodes.resolve(node, &mut self.backend)?;
+        let (count, value) = self.backend.write_at(handle, offset, data)?;
+        let parent = self.nodes.parent_of(node).unwrap_or(0);
+        Ok(ReplyBody::Write {
+            count: u32::try_from(count).map_err(|_| libc::EOVERFLOW)?,
+            attr: stat::to_attr(node, parent, &value),
+        })
+    }
+
+    fn setattr(&mut self, node: u64, setattr: SetAttr) -> Result<ReplyBody, i32> {
+        self.ensure_writable()?;
+        let handle = self.nodes.resolve(node, &mut self.backend)?;
+        let value = self.backend.setattr(handle, setattr)?;
+        let parent = self.nodes.parent_of(node).unwrap_or(0);
+        Ok(ReplyBody::Attr(stat::to_attr(node, parent, &value)))
+    }
+
+    fn create(
+        &mut self,
+        parent: u64,
+        name: &str,
+        item_type: ItemType,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<ReplyBody, i32> {
+        self.ensure_name_writable(name)?;
+        let parent_handle = self.nodes.resolve(parent, &mut self.backend)?;
+        let (handle, value) =
+            self.backend
+                .create(parent_handle, name, item_type, mode, uid, gid)?;
+        let node =
+            self.nodes
+                .attach_child(parent, name, value.item_type(), handle, &mut self.backend);
+        Ok(ReplyBody::Attr(stat::to_attr(node, parent, &value)))
+    }
+
+    fn symlink(
+        &mut self,
+        parent: u64,
+        name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<ReplyBody, i32> {
+        self.ensure_name_writable(name)?;
+        let parent_handle = self.nodes.resolve(parent, &mut self.backend)?;
+        let (handle, value) = self
+            .backend
+            .symlink(parent_handle, name, target, uid, gid)?;
+        let node =
+            self.nodes
+                .attach_child(parent, name, value.item_type(), handle, &mut self.backend);
+        Ok(ReplyBody::Attr(stat::to_attr(node, parent, &value)))
+    }
+
+    fn link(&mut self, node: u64, new_parent: u64, new_name: &str) -> Result<ReplyBody, i32> {
+        self.ensure_name_writable(new_name)?;
+        let handle = self.nodes.resolve(node, &mut self.backend)?;
+        let parent_handle = self.nodes.resolve(new_parent, &mut self.backend)?;
+        let (linked_handle, value) = self.backend.link(handle, parent_handle, new_name)?;
+        let linked = self.nodes.attach_child(
+            new_parent,
+            new_name,
+            value.item_type(),
+            linked_handle,
+            &mut self.backend,
+        );
+        Ok(ReplyBody::Attr(stat::to_attr(linked, new_parent, &value)))
+    }
+
+    fn remove(&mut self, parent: u64, name: &str, item_type: ItemType) -> Result<ReplyBody, i32> {
+        self.ensure_name_writable(name)?;
+        let parent_handle = self.nodes.resolve(parent, &mut self.backend)?;
+        self.backend.remove(parent_handle, name, item_type)?;
+        self.nodes.remove_child(parent, name, &mut self.backend);
+        Ok(ReplyBody::Empty)
+    }
+
+    fn rename(
+        &mut self,
+        node: u64,
+        src_parent: u64,
+        src_name: &str,
+        dst_parent: u64,
+        dst_name: &str,
+        flags: u8,
+    ) -> Result<ReplyBody, i32> {
+        self.ensure_name_writable(src_name)?;
+        validate_component(dst_name)?;
+        if flags & !1 != 0 {
+            return Err(libc::EINVAL);
+        }
+        self.nodes.expect_child(node, src_parent, src_name)?;
+        let handle = self.nodes.resolve(node, &mut self.backend)?;
+        let src_handle = self.nodes.resolve(src_parent, &mut self.backend)?;
+        let dst_handle = self.nodes.resolve(dst_parent, &mut self.backend)?;
+        let result = self.backend.rename(
+            handle,
+            src_handle,
+            src_name,
+            dst_handle,
+            dst_name,
+            flags & 1 != 0,
+        )?;
+        if result.moved {
+            self.nodes.rename_child(
+                node,
+                src_parent,
+                src_name,
+                dst_parent,
+                dst_name,
+                &mut self.backend,
+            )?;
+        }
+        let parent = if result.moved { dst_parent } else { src_parent };
+        Ok(ReplyBody::Attr(stat::to_attr(node, parent, &result.stat)))
+    }
+
+    fn ensure_name_writable(&self, name: &str) -> Result<(), i32> {
+        self.ensure_writable()?;
+        validate_component(name)
+    }
+
+    const fn ensure_writable(&self) -> Result<(), i32> {
+        if self.read_only {
+            return Err(libc::EROFS);
+        }
+        Ok(())
+    }
 }
 
 fn errno_message(errno: i32) -> String {
     format!("errno {errno}")
+}
+
+fn validate_component(name: &str) -> Result<(), i32> {
+    if is_valid_component(name) {
+        Ok(())
+    } else {
+        Err(libc::EINVAL)
+    }
 }
 
 #[cfg(test)]
@@ -165,9 +346,13 @@ fn errno_message(errno: i32) -> String {
 )]
 mod tests {
     use super::Server;
-    use crate::backend::{Backend, DirItem, Handle};
+    use crate::backend::{Backend, DirItem, Handle, RenameResult};
+    use crate::names::is_valid_component;
     use crate::stat::Stat;
-    use msl_wire::fs::{ItemType, ReplyBody, Request, RequestFrame, SetAttr, Statfs};
+    use msl_wire::fs::{
+        ItemType, ReplyBody, Request, RequestFrame, SETATTR_ATIME, SETATTR_GID, SETATTR_MODE,
+        SETATTR_MTIME, SETATTR_SIZE, SETATTR_UID, SetAttr, Statfs,
+    };
 
     enum Kind {
         Dir(Vec<usize>),
@@ -217,14 +402,14 @@ mod tests {
             ctime: (3, 0),
         }
     }
-    fn link_stat(ino: u64) -> Stat {
+    fn symlink_stat(ino: u64, size: u64, uid: u32, gid: u32) -> Stat {
         Stat {
             ino,
             mode: 0o120_777,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             nlink: 1,
-            size: 7,
+            size,
             blocks: 0,
             atime: (1, 0),
             mtime: (2, 0),
@@ -253,7 +438,7 @@ mod tests {
             },
             Entry {
                 name: "link".into(),
-                stat: link_stat(12),
+                stat: symlink_stat(12, 2, 0, 0),
                 kind: Kind::Link("os".into()),
             },
             Entry {
@@ -277,6 +462,109 @@ mod tests {
             self.open += 1;
             Ok(())
         }
+
+        fn child_pos(&self, parent: Handle, name: &str) -> Result<(usize, usize), i32> {
+            if !is_valid_component(name) {
+                return Err(libc::EINVAL);
+            }
+            let Kind::Dir(children) = &self.entries[parent as usize].kind else {
+                return Err(libc::ENOTDIR);
+            };
+            children
+                .iter()
+                .position(|&idx| self.entries[idx].name == name)
+                .map_or(Err(libc::ENOENT), |pos| Ok((pos, children[pos])))
+        }
+
+        fn find_child(&self, parent: Handle, name: &str) -> Result<usize, i32> {
+            self.child_pos(parent, name).map(|(_, idx)| idx)
+        }
+
+        fn ensure_absent(&self, parent: Handle, name: &str) -> Result<(), i32> {
+            match self.find_child(parent, name) {
+                Ok(_) => Err(libc::EEXIST),
+                Err(libc::ENOENT) => Ok(()),
+                Err(err) => Err(err),
+            }
+        }
+
+        fn add_child(&mut self, parent: Handle, entry: Entry) -> Result<usize, i32> {
+            let idx = self.entries.len();
+            let Kind::Dir(children) = &mut self.entries[parent as usize].kind else {
+                return Err(libc::ENOTDIR);
+            };
+            children.push(idx);
+            self.entries.push(entry);
+            Ok(idx)
+        }
+
+        fn remove_child_at(&mut self, parent: Handle, pos: usize) -> Result<usize, i32> {
+            let Kind::Dir(children) = &mut self.entries[parent as usize].kind else {
+                return Err(libc::ENOTDIR);
+            };
+            if pos >= children.len() {
+                return Err(libc::ENOENT);
+            }
+            Ok(children.remove(pos))
+        }
+
+        fn ino(&self) -> u64 {
+            1_000 + self.entries.len() as u64
+        }
+
+        fn prepare_rename_dst(
+            &mut self,
+            src_idx: usize,
+            dst_parent: Handle,
+            dst_name: &str,
+            replace: bool,
+        ) -> Result<(), i32> {
+            match self.child_pos(dst_parent, dst_name) {
+                Ok((_, dst_idx)) if dst_idx == src_idx && replace => Ok(()),
+                Ok((_, dst_idx)) if dst_idx == src_idx => Err(libc::EEXIST),
+                Ok((pos, dst_idx)) if replace => {
+                    self.ensure_replace_ok(src_idx, dst_idx)?;
+                    self.remove_child_at(dst_parent, pos)?;
+                    Ok(())
+                }
+                Ok(_) => Err(libc::EEXIST),
+                Err(libc::ENOENT) => Ok(()),
+                Err(err) => Err(err),
+            }
+        }
+
+        fn destination_is_same_file(
+            &self,
+            src_idx: usize,
+            dst_parent: Handle,
+            dst_name: &str,
+        ) -> Result<bool, i32> {
+            match self.child_pos(dst_parent, dst_name) {
+                Ok((_, dst_idx)) => {
+                    Ok(self.entries[src_idx].stat.ino == self.entries[dst_idx].stat.ino)
+                }
+                Err(libc::ENOENT) => Ok(false),
+                Err(err) => Err(err),
+            }
+        }
+
+        fn ensure_replace_ok(&self, src_idx: usize, dst_idx: usize) -> Result<(), i32> {
+            match (&self.entries[src_idx].kind, &self.entries[dst_idx].kind) {
+                (Kind::Dir(_), Kind::Dir(children)) if !children.is_empty() => Err(libc::ENOTEMPTY),
+                (Kind::Dir(_), Kind::Dir(_)) => Ok(()),
+                (Kind::Dir(_), _) => Err(libc::ENOTDIR),
+                (_, Kind::Dir(_)) => Err(libc::EISDIR),
+                _ => Ok(()),
+            }
+        }
+
+        fn add_renamed_child(&mut self, parent: Handle, idx: usize) -> Result<(), i32> {
+            let Kind::Dir(children) = &mut self.entries[parent as usize].kind else {
+                return Err(libc::ENOTDIR);
+            };
+            children.push(idx);
+            Ok(())
+        }
     }
 
     impl Backend for MockFs {
@@ -285,14 +573,7 @@ mod tests {
             Ok(0)
         }
         fn lookup(&mut self, parent: Handle, name: &str) -> Result<(Handle, Stat), i32> {
-            let Kind::Dir(children) = &self.entries[parent as usize].kind else {
-                return Err(libc::ENOTDIR);
-            };
-            let found = children
-                .iter()
-                .find(|&&idx| self.entries[idx].name == name)
-                .copied();
-            let idx = found.ok_or(libc::ENOENT)?;
+            let idx = self.find_child(parent, name)?;
             self.acquire()?;
             Ok((idx as Handle, self.entries[idx].stat))
         }
@@ -352,13 +633,240 @@ mod tests {
                 namemax: 255,
             })
         }
+        fn sync(&mut self, _root: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+        fn write_at(
+            &mut self,
+            node: Handle,
+            offset: u64,
+            data: &[u8],
+        ) -> Result<(usize, Stat), i32> {
+            let idx = node as usize;
+            let Kind::File(contents) = &mut self.entries[idx].kind else {
+                return Err(libc::EINVAL);
+            };
+            let start = usize::try_from(offset).map_err(|_| libc::EINVAL)?;
+            let end = start.checked_add(data.len()).ok_or(libc::EFBIG)?;
+            if start > contents.len() {
+                contents.resize(start, 0);
+            }
+            if end > contents.len() {
+                contents.resize(end, 0);
+            }
+            contents[start..end].copy_from_slice(data);
+            self.entries[idx].stat.size = contents.len() as u64;
+            self.entries[idx].stat.blocks = self.entries[idx].stat.size.div_ceil(512);
+            Ok((data.len(), self.entries[idx].stat))
+        }
+        fn setattr(&mut self, node: Handle, setattr: SetAttr) -> Result<Stat, i32> {
+            if setattr.mask
+                & !(SETATTR_MODE
+                    | SETATTR_UID
+                    | SETATTR_GID
+                    | SETATTR_SIZE
+                    | SETATTR_ATIME
+                    | SETATTR_MTIME)
+                != 0
+            {
+                return Err(libc::EINVAL);
+            }
+            apply_mock_attr(&mut self.entries[node as usize], setattr)?;
+            Ok(self.entries[node as usize].stat)
+        }
+        fn create(
+            &mut self,
+            parent: Handle,
+            name: &str,
+            item_type: ItemType,
+            mode: u32,
+            uid: u32,
+            gid: u32,
+        ) -> Result<(Handle, Stat), i32> {
+            self.ensure_absent(parent, name)?;
+            let entry = new_mock_entry(self.ino(), name, item_type, mode, uid, gid)?;
+            let idx = self.add_child(parent, entry)?;
+            Ok((idx as Handle, self.entries[idx].stat))
+        }
+        fn symlink(
+            &mut self,
+            parent: Handle,
+            name: &str,
+            target: &str,
+            uid: u32,
+            gid: u32,
+        ) -> Result<(Handle, Stat), i32> {
+            self.ensure_absent(parent, name)?;
+            let stat = symlink_stat(self.ino(), target.len() as u64, uid, gid);
+            let entry = Entry {
+                name: name.into(),
+                stat,
+                kind: Kind::Link(target.into()),
+            };
+            let idx = self.add_child(parent, entry)?;
+            Ok((idx as Handle, stat))
+        }
+        fn link(
+            &mut self,
+            node: Handle,
+            new_parent: Handle,
+            new_name: &str,
+        ) -> Result<(Handle, Stat), i32> {
+            self.ensure_absent(new_parent, new_name)?;
+            if matches!(self.entries[node as usize].kind, Kind::Dir(_)) {
+                return Err(libc::EPERM);
+            }
+            self.entries[node as usize].stat.nlink += 1;
+            let mut entry = clone_link_entry(&self.entries[node as usize], new_name);
+            entry.stat = self.entries[node as usize].stat;
+            let idx = self.add_child(new_parent, entry)?;
+            Ok((idx as Handle, self.entries[idx].stat))
+        }
+        fn remove(&mut self, parent: Handle, name: &str, item_type: ItemType) -> Result<(), i32> {
+            let (pos, idx) = self.child_pos(parent, name)?;
+            if item_type == ItemType::Dir {
+                match &self.entries[idx].kind {
+                    Kind::Dir(children) if children.is_empty() => {}
+                    Kind::Dir(_) => return Err(libc::ENOTEMPTY),
+                    _ => return Err(libc::ENOTDIR),
+                }
+            } else if matches!(self.entries[idx].kind, Kind::Dir(_)) {
+                return Err(libc::EISDIR);
+            }
+            self.remove_child_at(parent, pos)?;
+            Ok(())
+        }
+        fn rename(
+            &mut self,
+            node: Handle,
+            src_parent: Handle,
+            src_name: &str,
+            dst_parent: Handle,
+            dst_name: &str,
+            replace: bool,
+        ) -> Result<RenameResult, i32> {
+            let (_, src_idx) = self.child_pos(src_parent, src_name)?;
+            if src_idx != node as usize {
+                return Err(libc::ESTALE);
+            }
+            if replace && self.destination_is_same_file(src_idx, dst_parent, dst_name)? {
+                return Ok(RenameResult {
+                    stat: self.entries[src_idx].stat,
+                    moved: false,
+                });
+            }
+            self.prepare_rename_dst(src_idx, dst_parent, dst_name, replace)?;
+            let (src_pos, _) = self.child_pos(src_parent, src_name)?;
+            self.remove_child_at(src_parent, src_pos)?;
+            self.entries[src_idx].name = dst_name.into();
+            self.add_renamed_child(dst_parent, src_idx)?;
+            Ok(RenameResult {
+                stat: self.entries[src_idx].stat,
+                moved: true,
+            })
+        }
         fn close(&mut self, _handle: Handle) {
             self.open = self.open.saturating_sub(1);
         }
     }
 
+    fn new_mock_entry(
+        ino: u64,
+        name: &str,
+        item_type: ItemType,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Entry, i32> {
+        if !is_valid_component(name) {
+            return Err(libc::EINVAL);
+        }
+        match item_type {
+            ItemType::File => Ok(Entry {
+                name: name.into(),
+                stat: typed_stat(ino, 0o100_000, mode, uid, gid, 0),
+                kind: Kind::File(Vec::new()),
+            }),
+            ItemType::Dir => Ok(Entry {
+                name: name.into(),
+                stat: typed_stat(ino, 0o040_000, mode, uid, gid, 4096),
+                kind: Kind::Dir(Vec::new()),
+            }),
+            _ => Err(libc::EOPNOTSUPP),
+        }
+    }
+
+    fn typed_stat(ino: u64, kind: u32, mode: u32, uid: u32, gid: u32, size: u64) -> Stat {
+        Stat {
+            ino,
+            mode: kind | (mode & 0o7777),
+            uid,
+            gid,
+            nlink: if kind == 0o040_000 { 2 } else { 1 },
+            size,
+            blocks: size.div_ceil(512),
+            atime: (1, 0),
+            mtime: (2, 0),
+            ctime: (3, 0),
+        }
+    }
+
+    fn clone_link_entry(entry: &Entry, name: &str) -> Entry {
+        let kind = match &entry.kind {
+            Kind::File(data) => Kind::File(data.clone()),
+            Kind::Link(target) => Kind::Link(target.clone()),
+            Kind::Dir(children) => Kind::Dir(children.clone()),
+        };
+        Entry {
+            name: name.into(),
+            stat: entry.stat,
+            kind,
+        }
+    }
+
+    fn apply_mock_attr(entry: &mut Entry, setattr: SetAttr) -> Result<(), i32> {
+        if setattr.mask & SETATTR_SIZE != 0 {
+            resize_mock_file(entry, setattr.size)?;
+        }
+        if setattr.mask & SETATTR_MODE != 0 {
+            entry.stat.mode = (entry.stat.mode & !0o7777) | (setattr.mode & 0o7777);
+        }
+        if setattr.mask & SETATTR_UID != 0 {
+            entry.stat.uid = setattr.uid;
+        }
+        if setattr.mask & SETATTR_GID != 0 {
+            entry.stat.gid = setattr.gid;
+        }
+        apply_mock_times(entry, setattr);
+        Ok(())
+    }
+
+    fn resize_mock_file(entry: &mut Entry, size: u64) -> Result<(), i32> {
+        let Kind::File(data) = &mut entry.kind else {
+            return Err(libc::EINVAL);
+        };
+        let len = usize::try_from(size).map_err(|_| libc::EFBIG)?;
+        data.resize(len, 0);
+        entry.stat.size = size;
+        entry.stat.blocks = size.div_ceil(512);
+        Ok(())
+    }
+
+    fn apply_mock_times(entry: &mut Entry, setattr: SetAttr) {
+        if setattr.mask & SETATTR_ATIME != 0 {
+            entry.stat.atime = (setattr.atime.sec, setattr.atime.nsec);
+        }
+        if setattr.mask & SETATTR_MTIME != 0 {
+            entry.stat.mtime = (setattr.mtime.sec, setattr.mtime.nsec);
+        }
+    }
+
     fn server(fs: MockFs) -> Server<MockFs> {
-        Server::new(fs, 64).expect("root")
+        Server::new(fs, 64, false).expect("root")
+    }
+
+    fn read_only_server(fs: MockFs) -> Server<MockFs> {
+        Server::new(fs, 64, true).expect("root")
     }
 
     fn call(server: &mut Server<MockFs>, request: Request) -> ReplyBody {
@@ -375,6 +883,80 @@ mod tests {
         match server.dispatch(&frame).expect("reply").result {
             Ok(_) => panic!("expected an error"),
             Err(error) => error.errno,
+        }
+    }
+
+    fn lookup_node(server: &mut Server<MockFs>, parent: u64, name: &str) -> u64 {
+        match call(
+            server,
+            Request::Lookup {
+                parent,
+                name: name.into(),
+            },
+        ) {
+            ReplyBody::Attr(attr) => attr.node_id,
+            _ => panic!("wrong body"),
+        }
+    }
+
+    fn open_node(server: &mut Server<MockFs>, node: u64) -> u64 {
+        match call(server, Request::Open { node, mode: 0 }) {
+            ReplyBody::Open { handle } => handle,
+            _ => panic!("wrong body"),
+        }
+    }
+
+    fn read_bytes(server: &mut Server<MockFs>, node: u64, length: u32) -> Vec<u8> {
+        let handle = open_node(server, node);
+        match call(
+            server,
+            Request::Read {
+                handle,
+                offset: 0,
+                length,
+            },
+        ) {
+            ReplyBody::Read { data, .. } => data,
+            _ => panic!("wrong body"),
+        }
+    }
+
+    fn create_node(
+        server: &mut Server<MockFs>,
+        parent: u64,
+        name: &str,
+        item_type: ItemType,
+    ) -> u64 {
+        match call(
+            server,
+            Request::Create {
+                parent,
+                name: name.into(),
+                item_type,
+                mode: 0o755,
+                uid: 1000,
+                gid: 1000,
+            },
+        ) {
+            ReplyBody::Attr(attr) => attr.node_id,
+            _ => panic!("wrong body"),
+        }
+    }
+
+    fn write_ok(server: &mut Server<MockFs>, node: u64, offset: u64, data: &[u8]) {
+        match call(
+            server,
+            Request::Write {
+                node,
+                offset,
+                data: data.to_vec(),
+            },
+        ) {
+            ReplyBody::Write { count, attr } => {
+                assert_eq!(usize::try_from(count).unwrap(), data.len());
+                assert!(attr.size >= u64::try_from(data.len()).unwrap());
+            }
+            _ => panic!("wrong body"),
         }
     }
 
@@ -595,8 +1177,354 @@ mod tests {
     }
 
     #[test]
-    fn mutation_ops_return_erofs() {
+    fn write_readback_and_offset_write() {
         let mut srv = server(sample());
+        let os = lookup_node(&mut srv, 1, "os");
+        write_ok(&mut srv, os, 0, b"bye");
+        assert_eq!(read_bytes(&mut srv, os, 8), b"bye");
+        write_ok(&mut srv, os, 1, b"I");
+        assert_eq!(read_bytes(&mut srv, os, 8), b"bIe");
+    }
+
+    #[test]
+    fn truncate_with_setattr() {
+        let mut srv = server(sample());
+        let os = lookup_node(&mut srv, 1, "os");
+        let shrink = SetAttr {
+            mask: SETATTR_SIZE,
+            size: 1,
+            ..SetAttr::default()
+        };
+        match call(
+            &mut srv,
+            Request::Setattr {
+                node: os,
+                setattr: shrink,
+            },
+        ) {
+            ReplyBody::Attr(attr) => assert_eq!(attr.size, 1),
+            _ => panic!("wrong body"),
+        }
+        assert_eq!(read_bytes(&mut srv, os, 8), b"h");
+    }
+
+    #[test]
+    fn create_file_and_directory() {
+        let mut srv = server(sample());
+        let file = create_node(&mut srv, 1, "new", ItemType::File);
+        write_ok(&mut srv, file, 0, b"created");
+        assert_eq!(read_bytes(&mut srv, file, 16), b"created");
+        let dir = create_node(&mut srv, 1, "dir", ItemType::Dir);
+        match call(
+            &mut srv,
+            Request::Getattr {
+                node: dir,
+                wanted: 0,
+            },
+        ) {
+            ReplyBody::Attr(attr) => assert_eq!(attr.item_type, ItemType::Dir),
+            _ => panic!("wrong body"),
+        }
+    }
+
+    #[test]
+    fn symlink_returns_payload() {
+        let mut srv = server(sample());
+        let link = match call(
+            &mut srv,
+            Request::Symlink {
+                parent: 1,
+                name: "sym".into(),
+                target: "../target".into(),
+                uid: 1000,
+                gid: 1000,
+            },
+        ) {
+            ReplyBody::Attr(attr) => attr.node_id,
+            _ => panic!("wrong body"),
+        };
+        match call(&mut srv, Request::Readlink { node: link }) {
+            ReplyBody::Readlink { target } => assert_eq!(target, "../target"),
+            _ => panic!("wrong body"),
+        }
+    }
+
+    #[test]
+    fn hard_link_reads_existing_file() {
+        let mut srv = server(sample());
+        let os = lookup_node(&mut srv, 1, "os");
+        let hard = match call(
+            &mut srv,
+            Request::Link {
+                node: os,
+                new_parent: 1,
+                new_name: "hard".into(),
+            },
+        ) {
+            ReplyBody::Attr(attr) => {
+                assert_eq!(attr.nlink, 2);
+                attr.node_id
+            }
+            _ => panic!("wrong body"),
+        };
+        assert_eq!(read_bytes(&mut srv, hard, 8), b"hi\n");
+    }
+
+    #[test]
+    fn rename_over_hard_link_alias_preserves_both_names() {
+        let mut srv = server(sample());
+        let os = lookup_node(&mut srv, 1, "os");
+        let hard = match call(
+            &mut srv,
+            Request::Link {
+                node: os,
+                new_parent: 1,
+                new_name: "hard".into(),
+            },
+        ) {
+            ReplyBody::Attr(attr) => attr.node_id,
+            _ => panic!("wrong body"),
+        };
+        let alias_rename = Request::Rename {
+            node: os,
+            src_parent: 1,
+            src_name: "os".into(),
+            dst_parent: 1,
+            dst_name: "hard".into(),
+            flags: 0,
+        };
+        assert_eq!(call_err(&mut srv, alias_rename), libc::EEXIST);
+        match call(
+            &mut srv,
+            Request::Rename {
+                node: os,
+                src_parent: 1,
+                src_name: "os".into(),
+                dst_parent: 1,
+                dst_name: "hard".into(),
+                flags: 1,
+            },
+        ) {
+            ReplyBody::Attr(attr) => assert_eq!(attr.node_id, os),
+            _ => panic!("wrong body"),
+        }
+        assert_eq!(lookup_node(&mut srv, 1, "os"), os);
+        assert_eq!(lookup_node(&mut srv, 1, "hard"), hard);
+    }
+
+    #[test]
+    fn same_dir_and_cross_dir_rename() {
+        let mut srv = server(sample());
+        let os = lookup_node(&mut srv, 1, "os");
+        call(
+            &mut srv,
+            Request::Rename {
+                node: os,
+                src_parent: 1,
+                src_name: "os".into(),
+                dst_parent: 1,
+                dst_name: "renamed".into(),
+                flags: 1,
+            },
+        );
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Lookup {
+                    parent: 1,
+                    name: "os".into()
+                }
+            ),
+            libc::ENOENT
+        );
+        let renamed = lookup_node(&mut srv, 1, "renamed");
+        assert_eq!(renamed, os);
+        let etc = lookup_node(&mut srv, 1, "etc");
+        call(
+            &mut srv,
+            Request::Rename {
+                node: os,
+                src_parent: 1,
+                src_name: "renamed".into(),
+                dst_parent: etc,
+                dst_name: "moved".into(),
+                flags: 1,
+            },
+        );
+        assert_eq!(lookup_node(&mut srv, etc, "moved"), os);
+    }
+
+    #[test]
+    fn rename_overwrite_and_no_overwrite() {
+        let mut srv = server(sample());
+        let a = create_node(&mut srv, 1, "a", ItemType::File);
+        let b = create_node(&mut srv, 1, "b", ItemType::File);
+        write_ok(&mut srv, a, 0, b"aaa");
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Rename {
+                    node: a,
+                    src_parent: 1,
+                    src_name: "a".into(),
+                    dst_parent: 1,
+                    dst_name: "b".into(),
+                    flags: 0,
+                }
+            ),
+            libc::EEXIST
+        );
+        call(
+            &mut srv,
+            Request::Rename {
+                node: a,
+                src_parent: 1,
+                src_name: "a".into(),
+                dst_parent: 1,
+                dst_name: "b".into(),
+                flags: 1,
+            },
+        );
+        assert_eq!(read_bytes(&mut srv, a, 8), b"aaa");
+        assert_eq!(
+            call_err(&mut srv, Request::Getattr { node: b, wanted: 0 }),
+            libc::ESTALE
+        );
+    }
+
+    #[test]
+    fn remove_file_and_empty_directory() {
+        let mut srv = server(sample());
+        create_node(&mut srv, 1, "gone", ItemType::File);
+        call(
+            &mut srv,
+            Request::Remove {
+                parent: 1,
+                name: "gone".into(),
+                item_type: ItemType::File,
+            },
+        );
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Lookup {
+                    parent: 1,
+                    name: "gone".into()
+                }
+            ),
+            libc::ENOENT
+        );
+        create_node(&mut srv, 1, "empty", ItemType::Dir);
+        call(
+            &mut srv,
+            Request::Remove {
+                parent: 1,
+                name: "empty".into(),
+                item_type: ItemType::Dir,
+            },
+        );
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Lookup {
+                    parent: 1,
+                    name: "empty".into()
+                }
+            ),
+            libc::ENOENT
+        );
+    }
+
+    #[test]
+    fn reject_non_empty_directory_remove() {
+        let mut srv = server(sample());
+        let dir = create_node(&mut srv, 1, "dir", ItemType::Dir);
+        create_node(&mut srv, dir, "child", ItemType::File);
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Remove {
+                    parent: 1,
+                    name: "dir".into(),
+                    item_type: ItemType::Dir,
+                }
+            ),
+            libc::ENOTEMPTY
+        );
+    }
+
+    #[test]
+    fn mutation_rejects_invalid_names() {
+        let mut srv = server(sample());
+        let os = lookup_node(&mut srv, 1, "os");
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Create {
+                    parent: 1,
+                    name: "a/b".into(),
+                    item_type: ItemType::File,
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                }
+            ),
+            libc::EINVAL
+        );
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Link {
+                    node: os,
+                    new_parent: 1,
+                    new_name: "..".into(),
+                }
+            ),
+            libc::EINVAL
+        );
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Rename {
+                    node: os,
+                    src_parent: 1,
+                    src_name: "os".into(),
+                    dst_parent: 1,
+                    dst_name: "bad/name".into(),
+                    flags: 1,
+                }
+            ),
+            libc::EINVAL
+        );
+    }
+
+    #[test]
+    fn removed_node_is_stale() {
+        let mut srv = server(sample());
+        let os = lookup_node(&mut srv, 1, "os");
+        call(
+            &mut srv,
+            Request::Remove {
+                parent: 1,
+                name: "os".into(),
+                item_type: ItemType::File,
+            },
+        );
+        assert_eq!(
+            call_err(
+                &mut srv,
+                Request::Getattr {
+                    node: os,
+                    wanted: 0
+                }
+            ),
+            libc::ESTALE
+        );
+    }
+
+    #[test]
+    fn read_only_mutation_ops_return_erofs() {
+        let mut srv = read_only_server(sample());
         let requests = vec![
             Request::Write {
                 node: 2,
@@ -672,7 +1600,7 @@ mod tests {
     #[test]
     fn fd_pressure_evicts_and_still_browses() {
         // fd cap of 4 with 20 siblings: eviction must keep browse succeeding.
-        let mut srv = Server::new(wide(20), 4).expect("root");
+        let mut srv = Server::new(wide(20), 4, false).expect("root");
         for index in 1..=20 {
             // bounded: 20 siblings
             let name = format!("file{index}");

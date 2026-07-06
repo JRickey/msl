@@ -14,7 +14,7 @@ use msl_wire::MAX_POLL_RETRIES;
 #[cfg(target_os = "linux")]
 pub use msl_wire::{close_fd, read_fd, write_fd};
 
-// Decode the 4-byte native-endian pid the session intermediate reports.
+// Session intermediates report outer pids as four native-endian bytes.
 #[must_use]
 pub const fn decode_pid(buf: [u8; 4]) -> i32 {
     i32::from_ne_bytes(buf)
@@ -85,8 +85,8 @@ fn mount_one(src: &str, target: &str, fstype: &str, data: Option<&str>) -> io::R
     Ok(())
 }
 
-// Flush the page cache to the block device, then detach the distro root. The
-// ext4 lives in init's (now dead) mount ns, so "not mounted here" is expected.
+// The ext4 root is mounted in init's namespace; from the agent namespace,
+// EINVAL/ENOENT means no local mount is present.
 #[cfg(target_os = "linux")]
 pub fn sync_and_unmount(newroot: &str) -> io::Result<()> {
     if newroot.is_empty() {
@@ -201,7 +201,7 @@ pub fn set_cloexec(fd: RawFd) -> io::Result<()> {
 }
 
 // Bound a blocking recv so a stalled peer cannot pin the handler thread; the
-// pump switches to nonblocking after the handshake, so this only times the hello.
+// timeout applies only to the hello because data I/O uses nonblocking mode.
 #[cfg(target_os = "linux")]
 pub fn set_recv_timeout(fd: RawFd, secs: u32) -> io::Result<()> {
     set_sock_timeout(fd, secs, libc::SO_RCVTIMEO)
@@ -213,8 +213,8 @@ pub fn set_send_timeout(fd: RawFd, secs: u32) -> io::Result<()> {
     set_sock_timeout(fd, secs, libc::SO_SNDTIMEO)
 }
 
-// SO_RCVTIMEO = 0 blocks indefinitely: clears the handshake timeout before the
-// fd is handed to a worker whose reads must not expire on idle Finder gaps.
+// SO_RCVTIMEO = 0 blocks indefinitely; workers need inherited fd 3 reads to
+// survive idle Finder gaps.
 #[cfg(target_os = "linux")]
 pub fn clear_recv_timeout(fd: RawFd) -> io::Result<()> {
     if fd < 0 {
@@ -421,7 +421,7 @@ pub struct ToolsBind {
 
 // systemd binfmt.d drop-in: the distro's own systemd-binfmt owns its
 // binfmt_misc set, so registration must live in the distro, not the agent's
-// namespace. F pins /run/msl/tools/mac-binfmt (present before init) at boot.
+// namespace. F pins the tools-bind interpreter path.
 #[cfg(target_os = "linux")]
 pub const BINFMT_CONF: &[u8] = b":msl-macho:M::\\xcf\\xfa\\xed\\xfe::/run/msl/tools/mac-binfmt:F\n\
 :msl-macho-fat:M::\\xca\\xfe\\xba\\xbe::/run/msl/tools/mac-binfmt:F\n";
@@ -438,7 +438,7 @@ pub struct RosettaBind {
 }
 
 // binfmt.d drop-in registering 64-bit LE x86-64 ELF (EM_X86_64 == 0x3e,
-// exec-or-dyn) against Rosetta. F pins /run/msl/rosetta/rosetta at boot.
+// exec-or-dyn) against Rosetta. F pins the shared interpreter path.
 #[cfg(target_os = "linux")]
 pub const ROSETTA_CONF: &[u8] = b":rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:/run/msl/rosetta/rosetta:F\n";
 
@@ -511,7 +511,7 @@ fn child_boot(spec: &BootSpec, argv: &[*const c_char], envp: &[*const c_char]) -
 #[cfg(target_os = "linux")]
 unsafe fn child_mounts(spec: &BootSpec) {
     unsafe {
-        // bounded: fixed pseudo-filesystem list built before clone
+        // bounded: fixed pseudo-filesystem list from the boot spec
         for m in &spec.mounts {
             libc::mkdir(m.target.as_ptr(), 0o755);
             let data = m
@@ -795,7 +795,7 @@ fn child_intermediate(
             libc::_exit(127);
         }
         if grandchild == 0 {
-            // Orphan insurance first, before any close, then run the session body.
+            // PDEATHSIG is armed while the parent relationship is intact.
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
             libc::close(pipe_w);
             child_session_body(spec, argv, envp);
@@ -995,7 +995,7 @@ fn child_captured_intermediate(
             libc::_exit(127);
         }
         if grandchild == 0 {
-            // Orphan insurance first, before any close, then run the captured body.
+            // PDEATHSIG is armed while the parent relationship is intact.
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
             libc::close(pidp[0]);
             libc::close(pidp[1]);
@@ -1041,6 +1041,7 @@ fn child_captured_body(
 pub struct FsdSpec {
     pub ns_fds: Vec<RawFd>,
     pub conn_fd: RawFd,
+    pub read_only: bool,
     pub exe: CString,
     pub argv: Vec<CString>,
     pub envp: Vec<CString>,
@@ -1050,7 +1051,7 @@ pub struct FsdSpec {
 impl FsdSpec {
     // `exe` is a distro-namespace path (the tools bind mount); the connection fd
     // becomes the worker's fd 3.
-    pub fn new(ns_fds: Vec<RawFd>, conn_fd: RawFd, exe: &str) -> io::Result<Self> {
+    pub fn new(ns_fds: Vec<RawFd>, conn_fd: RawFd, exe: &str, read_only: bool) -> io::Result<Self> {
         if conn_fd < 0 {
             return Err(invalid("fsd conn fd must be valid"));
         }
@@ -1058,10 +1059,16 @@ impl FsdSpec {
             return Err(invalid("fsd needs namespace fds"));
         }
         let exe = CString::new(exe).map_err(|_| invalid("nul in fsd path"))?;
-        let argv = vec![exe.clone()];
+        let mode = if read_only {
+            CString::new("--read-only").map_err(|_| invalid("nul in fsd mode"))?
+        } else {
+            CString::new("--read-write").map_err(|_| invalid("nul in fsd mode"))?
+        };
+        let argv = vec![exe.clone(), mode];
         Ok(Self {
             ns_fds,
             conn_fd,
+            read_only,
             exe,
             argv,
             envp: Vec::new(),
@@ -1074,7 +1081,13 @@ impl FsdSpec {
 #[cfg(target_os = "linux")]
 pub fn spawn_fsd(spec: &FsdSpec) -> io::Result<libc::pid_t> {
     assert!(!spec.argv.is_empty(), "fsd argv must be non-empty");
+    assert_eq!(spec.argv.len(), 2, "fsd mode argv must be explicit");
     assert!(spec.conn_fd >= 0, "fsd conn fd must be valid");
+    assert_eq!(
+        spec.argv[1].as_bytes() == b"--read-only",
+        spec.read_only,
+        "fsd argv mode must match spec"
+    );
     let pidp = make_pipe()?;
     let argv_ptrs = null_terminated(&spec.argv);
     let envp_ptrs = null_terminated(&spec.envp);
@@ -1090,7 +1103,7 @@ pub fn spawn_fsd(spec: &FsdSpec) -> io::Result<libc::pid_t> {
     finish_fsd(pid, pidp)
 }
 
-// A setns/fork failure exits the intermediate before it writes its pid, so the
+// A setns/fork failure exits the intermediate without writing its pid, so the
 // blocking read fails and the leader is killed rather than left spinning.
 #[cfg(target_os = "linux")]
 fn finish_fsd(leader: libc::pid_t, pidp: [RawFd; 2]) -> io::Result<libc::pid_t> {
@@ -1130,8 +1143,8 @@ fn child_fsd_intermediate(
             libc::close(pidp[1]);
             child_fsd_body(spec, argv, envp);
         }
-        // The worker owns the connection now; drop the intermediate's inherited
-        // copy so the daemon sees a prompt guest-side close when the worker exits.
+        // The worker is the sole intended connection owner; closing the
+        // intermediate copy gives the daemon a prompt guest-side close.
         libc::close(spec.conn_fd);
         libc::close(pidp[0]);
         report_and_wait(pidp[1], grandchild);
@@ -1163,7 +1176,7 @@ fn child_fsd_body(spec: &FsdSpec, argv: &[*const c_char], envp: &[*const c_char]
 #[cfg(target_os = "linux")]
 fn null_terminated(items: &[CString]) -> Vec<*const c_char> {
     let mut ptrs: Vec<*const c_char> = Vec::with_capacity(items.len() + 1);
-    // bounded: argv/envp length fixed before clone/fork
+    // bounded: caller-fixed argv/envp length
     for item in items {
         ptrs.push(item.as_ptr());
     }

@@ -302,8 +302,8 @@ fn reject_fs(mut stream: VsockStream) {
     write_hello(&mut stream, Some("too many fs connections"));
 }
 
-// After the ack the worker owns the stream on its fd 3; the agent's copy drops
-// when this thread returns.
+// The worker owns the stream on fd 3 once acknowledged; this thread drops the
+// agent copy as it returns.
 fn handle_fs(agent: &Arc<Agent>, mut stream: VsockStream) {
     let Ok(payload) = frame::read_frame(&mut stream) else {
         return;
@@ -318,8 +318,8 @@ fn handle_fs(agent: &Arc<Agent>, mut stream: VsockStream) {
     }
 }
 
-// The spawn lock keeps {fork, note_fsd_spawn} atomic against the reaper's
-// classify step, so a just-forked leader is always already attributable.
+// The spawn lock makes {fork, note_fsd_spawn} atomic against reaper
+// classification, preserving leader-to-distro attribution.
 fn spawn_fs_worker(
     agent: &Arc<Agent>,
     hello: &FsOpenHello,
@@ -340,7 +340,7 @@ fn spawn_fs_worker(
     // clear it so idle Finder gaps don't expire the worker's blocking reads.
     sys::clear_recv_timeout(stream.as_raw_fd()).map_err(|e| format!("fs clear timeout: {e}"))?;
     let ns_fds = sys::open_ns_fds(init_pid).map_err(|e| format!("fs ns open: {e}"))?;
-    let spec = sys::FsdSpec::new(ns_fds, stream.as_raw_fd(), FSD_GUEST_PATH)
+    let spec = sys::FsdSpec::new(ns_fds, stream.as_raw_fd(), FSD_GUEST_PATH, hello.readonly)
         .map_err(|e| format!("fs spec: {e}"))?;
     let leader = {
         let _spawn = wait::spawn_lock();

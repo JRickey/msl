@@ -34,7 +34,7 @@ pub struct NodeTable {
 
 impl NodeTable {
     /// Seed the table with the pinned root authority. `fd_cap` bounds cached
-    /// handles (root excluded); exceeding it evicts the least-recently-used.
+    /// handles (root excluded); exceeding it evicts the LRU handle.
     pub fn new(root_handle: Handle, fd_cap: usize) -> Self {
         assert!(root_handle >= 0, "root handle must be valid");
         assert!(fd_cap >= 1, "fd cap must be positive");
@@ -58,9 +58,70 @@ impl NodeTable {
         }
     }
 
+    /// Record a child seen by lookup/readdir, refreshing any existing type.
+    pub fn observe_child(&mut self, parent_id: u64, name: &str, item_type: ItemType) -> u64 {
+        self.intern(parent_id, name, item_type)
+    }
+
+    /// Record a child whose backend handle was opened by a mutation.
+    pub fn attach_child<B: Backend>(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        item_type: ItemType,
+        handle: Handle,
+        backend: &mut B,
+    ) -> u64 {
+        assert!(handle >= 0, "attached handle must be valid");
+        let id = self.intern(parent_id, name, item_type);
+        self.store_handle(id, handle, backend);
+        id
+    }
+
+    /// Forget a removed child so later use of its old id reports `ESTALE`.
+    pub fn remove_child<B: Backend>(&mut self, parent_id: u64, name: &str, backend: &mut B) {
+        let key = (parent_id, name.to_string());
+        if let Some(id) = self.index.remove(&key) {
+            self.remove_node(id, backend);
+        }
+    }
+
+    /// Move an existing node id to its destination parent/name, retiring an
+    /// overwritten destination mapping if one was known locally.
+    pub fn rename_child<B: Backend>(
+        &mut self,
+        node_id: u64,
+        src_parent: u64,
+        src_name: &str,
+        dst_parent: u64,
+        dst_name: &str,
+        backend: &mut B,
+    ) -> Result<(), i32> {
+        self.validate_source(node_id, src_parent, src_name)?;
+        let dst_key = (dst_parent, dst_name.to_string());
+        if let Some(&dst_id) = self.index.get(&dst_key)
+            && dst_id != node_id
+        {
+            self.remove_node(dst_id, backend);
+        }
+        let src_key = (src_parent, src_name.to_string());
+        self.index.remove(&src_key);
+        self.index.insert(dst_key, node_id);
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.parent_id = dst_parent;
+            node.name = dst_name.to_string();
+        }
+        Ok(())
+    }
+
+    /// Confirm a request names the same parent/component the node table knows.
+    pub fn expect_child(&self, node_id: u64, parent_id: u64, name: &str) -> Result<(), i32> {
+        self.validate_source(node_id, parent_id, name)
+    }
+
     /// Intern a child of `parent_id`, returning a stable node id. The same
     /// (parent, name) always maps to the same id; the type is refreshed.
-    pub fn intern(&mut self, parent_id: u64, name: &str, item_type: ItemType) -> u64 {
+    fn intern(&mut self, parent_id: u64, name: &str, item_type: ItemType) -> u64 {
         assert!(!name.is_empty(), "interned name must not be empty");
         let key = (parent_id, name.to_string());
         if let Some(&id) = self.index.get(&key) {
@@ -142,6 +203,23 @@ impl NodeTable {
         if node_id == ROOT_ID {
             return;
         }
+        self.remove_node(node_id, backend);
+    }
+
+    fn validate_source(&self, node_id: u64, parent_id: u64, name: &str) -> Result<(), i32> {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return Err(libc_estale());
+        };
+        if node.parent_id != parent_id || node.name != name {
+            return Err(libc_estale());
+        }
+        Ok(())
+    }
+
+    fn remove_node<B: Backend>(&mut self, node_id: u64, backend: &mut B) {
+        if node_id == ROOT_ID {
+            return;
+        }
         if let Some(node) = self.nodes.remove(&node_id) {
             if let Some(handle) = node.handle {
                 backend.close(handle);
@@ -207,7 +285,9 @@ impl NodeTable {
         }
         let tick = self.tick;
         if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.handle = Some(handle);
+            if let Some(old) = node.handle.replace(handle) {
+                backend.close(old);
+            }
             node.last_used = tick;
         } else {
             backend.close(handle);
@@ -216,7 +296,7 @@ impl NodeTable {
 
     fn evict_until_room<B: Backend>(&mut self, backend: &mut B) {
         for _ in 0..RETRY_EVICTIONS {
-            // bounded
+            // bounded: RETRY_EVICTIONS
             if !self.evict_one(backend) {
                 return;
             }
