@@ -73,6 +73,15 @@ jobs:
           security import "$RUNNER_TEMP/app.p12" -k release.keychain-db -P "$APP_CERT_PASSWORD" -T /usr/bin/codesign
           security import "$RUNNER_TEMP/installer.p12" -k release.keychain-db -P "$INSTALLER_CERT_PASSWORD" -T /usr/bin/productbuild
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RUNNER_TEMP" release.keychain-db
+          app_identity=$(security find-identity -v -p codesigning release.keychain-db | awk -F '"' '/Developer ID Application/ { print $2; exit }')
+          installer_identity=$(security find-identity -v -p basic release.keychain-db | awk -F '"' '/Developer ID Installer/ { print $2; exit }')
+          if [ -z "$app_identity" ] || [ -z "$installer_identity" ]; then
+            security find-identity -v -p codesigning release.keychain-db
+            security find-identity -v -p basic release.keychain-db
+            exit 1
+          fi
+          echo "RELEASE_APP_SIGN_IDENTITY=$app_identity" >> "$GITHUB_ENV"
+          echo "RELEASE_INSTALLER_SIGN_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
           echo "$FSKIT_PROFILE" | base64 --decode > "$RUNNER_TEMP/fskit.provisionprofile"
 
       - name: Build signed pkg
