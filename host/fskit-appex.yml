@@ -1,0 +1,47 @@
+# xcodegen spec for the FSKit appex. SwiftPM cannot emit a working ExtensionKit
+# extension (AppExtension.main() returns instead of running the service loop on
+# macOS 26), so the appex is built here as a real extensionkit-extension product
+# and packaged into msl.app by the Makefile. The Swift sources are shared with
+# the SwiftPM package verbatim.
+name: msl-fskit
+options:
+  minimumXcodeGenVersion: "2.40.0"
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: "YES"
+    ONLY_ACTIVE_ARCH: "YES"
+targets:
+  MSLFSWire:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/MSLFSWire
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: "YES"
+        SWIFT_STRICT_CONCURRENCY: complete
+  msl-fskit:
+    type: extensionkit-extension
+    platform: macOS
+    sources:
+      - path: Sources/msl-fskit
+    dependencies:
+      - target: MSLFSWire
+        link: true
+    settings:
+      base:
+        PRODUCT_NAME: msl-fskit
+        PRODUCT_BUNDLE_IDENTIFIER: dev.msl.app.fsmodule
+        INFOPLIST_FILE: Resources/msl-fskit/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        APPLICATION_EXTENSION_API_ONLY: "YES"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SKIP_INSTALL: "YES"

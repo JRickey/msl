@@ -1,6 +1,8 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import MSLCore
+import MSLFSWire
 
 /// `msl unmount [<distro>]`: run `/sbin/umount` here (so errors reach this
 /// terminal), then tell the daemon to drop its mount state and release the
@@ -19,7 +21,7 @@ struct UnmountCommand: ParsableCommand {
     func run() throws {
         let home = MSLHome.resolve()
         guard DaemonClient.isRunning(home) else {
-            print("daemon not running")
+            try forceUnmountWithoutDaemon()
             return
         }
         let entry = try resolveMount(home)
@@ -30,6 +32,43 @@ struct UnmountCommand: ParsableCommand {
         }
         try DaemonClient.mountUnmount(home, name: entry.name, force: force)
         print("unmounted \(entry.name)")
+    }
+
+    /// With the daemon down, `--force` still clears a stranded kernel mount so a
+    /// daemon crash cannot wedge Finder. Needs an explicit distro name — there is
+    /// no daemon state to resolve "the only mount" against.
+    private func forceUnmountWithoutDaemon() throws {
+        guard force, let name else {
+            print("daemon not running")
+            return
+        }
+        guard let mountpoint = FSMountpoint.directory(distro: name) else {
+            throw MSLError.configuration("'\(name)' is not a valid distro name")
+        }
+        guard Self.isMSLFSMounted(at: mountpoint) else {
+            print("no mslfs mount at \(mountpoint)")
+            return
+        }
+        let result = Subprocess.run("/sbin/umount", ["-f", mountpoint])
+        guard result.status == 0 else {
+            throw MSLError.io("umount -f failed (exit \(result.status)): \(result.stderr)")
+        }
+        print("unmounted \(name)")
+    }
+
+    /// True only when an `mslfs` volume is mounted exactly at `mountpoint`, so a
+    /// daemon-down force unmount never tears down another filesystem that happens
+    /// to occupy the reserved path.
+    private static func isMSLFSMounted(at mountpoint: String) -> Bool {
+        assert(!mountpoint.isEmpty, "mountpoint must not be empty")
+        assert(mountpoint.hasPrefix("/"), "mountpoint must be absolute")
+        var buf = statfs()
+        let rc = mountpoint.withCString { path in statfs(path, &buf) }
+        guard rc == 0 else { return false }
+        let fstype = withUnsafeBytes(of: buf.f_fstypename) { raw -> String in
+            String(bytes: raw.prefix { $0 != 0 }, encoding: .utf8) ?? ""
+        }
+        return fstype == FSProto.shortName
     }
 
     /// Resolve which mount to unmount: the named one, or the sole mount when no

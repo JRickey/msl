@@ -33,13 +33,16 @@ struct MountCommand: ParsableCommand {
         if reveal { Self.reveal(prep.mountpoint) }
     }
 
-    /// `/sbin/mount -F -t mslfs -o rdonly,nosuid,nodev,noexec <url> <mountpoint>`.
+    /// `/sbin/mount -F -t mslfs <url> <mountpoint>`. The FSKit generic-URL mount
+    /// path accepts exactly two positional arguments; any `-o` option makes
+    /// mount(8) reject the invocation ("argument count N not equal to expected
+    /// count 2"). Read-only is enforced by the volume (EROFS on every mutation)
+    /// and advertised through its capabilities, so no `-o rdonly` is needed.
     private static func mountVolume(url: String, mountpoint: String) throws {
         precondition(!url.isEmpty, "resource url must not be empty")
         precondition(!mountpoint.isEmpty, "mountpoint must not be empty")
         let result = Subprocess.run(
-            "/sbin/mount",
-            ["-F", "-t", FSProto.shortName, "-o", "rdonly,nosuid,nodev,noexec", url, mountpoint])
+            "/sbin/mount", ["-F", "-t", FSProto.shortName, url, mountpoint])
         guard result.status == 0 else {
             throw MSLError.io("mount -F failed (exit \(result.status)): \(result.stderr)")
         }

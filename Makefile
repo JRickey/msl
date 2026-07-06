@@ -23,10 +23,14 @@ ENTITLEMENTS := entitlements/dev.entitlements
 
 # FSKit appex (ADR 0009): the sole real-cert-signed product. The appex bundle
 # ID nests under the menu-bar app's dev.msl.app; the executable is msl-fskit.
-FSKIT_BIN         := $(HOST_DIR)/.build/release/msl-fskit
+# Built by xcodebuild, not SwiftPM: a hand-wrapped SwiftPM executable is not a
+# working ExtensionKit extension on macOS 26 (AppExtension.main() returns instead
+# of running the service loop). host/fskit-appex.yml is the xcodegen spec.
 FSKIT_APPEX_ID    := dev.msl.app.fsmodule
 FSKIT_APPEX_DIR   := $(APP_DIR)/Contents/Extensions/$(FSKIT_APPEX_ID).appex
-FSKIT_PLIST_SRC   := $(HOST_DIR)/Resources/msl-fskit/Info.plist
+FSKIT_XC_SPEC     := fskit-appex.yml
+FSKIT_XC_PROJECT  := $(HOST_DIR)/msl-fskit.xcodeproj
+FSKIT_XC_APPEX    := $(HOST_DIR)/.xcbuild/Build/Products/Release/msl-fskit.appex
 FSKIT_ENT_SRC     := entitlements/fskit-appex.entitlements
 FSKIT_ENT_RENDER  := $(BUILD_DIR)/fskit-appex.entitlements
 MSL_APP_GROUP_ID  ?= group.dev.msl.app
@@ -37,6 +41,17 @@ FSKIT_SIGN_IDENTITY     ?= Apple Development
 # Optional: path to embedded.provisionprofile authorizing fskit.fsmodule +
 # the app group. Required for the appex to actually load, not to build/sign.
 FSKIT_PROVISION_PROFILE ?=
+
+# The FSKit appex is hosted by its container app: ExtensionKit will not load an
+# extension whose container is ad-hoc signed while the extension is team signed
+# (fails with "file system named mslfs not found" / extensionKit error 2). So an
+# FSKit-enabled build (a profile is provided) team-signs the whole app; the
+# no-account build stays ad-hoc and simply has no working FSKit view.
+ifeq ($(FSKIT_PROVISION_PROFILE),)
+APP_SIGN_IDENTITY := -
+else
+APP_SIGN_IDENTITY := $(FSKIT_SIGN_IDENTITY)
+endif
 
 .DEFAULT_GOAL := help
 
@@ -116,29 +131,40 @@ app: host sign
 	cp "$(HOST_BIN)" "$(APP_DIR)/Contents/MacOS/msl"; \
 	cp "$(APP_PLIST)" "$(APP_DIR)/Contents/Info.plist"; \
 	plutil -lint "$(APP_DIR)/Contents/Info.plist"; \
-	$(MAKE) appex; \
-	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" \
-	  "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
-	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)"; \
+	if [ -n "$(FSKIT_PROVISION_PROFILE)" ]; then \
+	  $(MAKE) appex; \
+	else \
+	  echo "app: no FSKIT_PROVISION_PROFILE — skipping FSKit appex (no Finder view; needs xcodegen + a profile)"; \
+	fi; \
+	codesign --force --timestamp=none --sign "$(APP_SIGN_IDENTITY)" \
+	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl"; \
+	codesign --force --timestamp=none --sign "$(APP_SIGN_IDENTITY)" \
+	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
+	codesign --force --timestamp=none --sign "$(APP_SIGN_IDENTITY)" \
+	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)"; \
 	codesign --verify --strict "$(APP_DIR)"; \
-	echo "app: assembled $(APP_DIR)"
+	echo "app: assembled $(APP_DIR) (identity: $(APP_SIGN_IDENTITY))"
 
-# Assemble and sign the FSKit appex inside an already-created app bundle. The
-# app group is rendered into both the appex Info.plist and the entitlements so
-# no generated file is committed. The appex is the only real-cert product; the
-# app bundle seal (signed last, in `app`) covers the appex by cdhash.
+# Build the FSKit appex as a real Xcode extensionkit-extension, embed it in the
+# app bundle, and sign it. The app group is rendered into both the appex
+# Info.plist and the entitlements so no generated file is committed. The appex is
+# the only real-cert product; the app bundle seal (signed last, in `app`) covers
+# it by cdhash. Needs xcodegen (brew install xcodegen) and full Xcode.
 .PHONY: appex
 appex:
 	@set -eu; \
-	if [ ! -f "$(FSKIT_BIN)" ]; then \
-	  echo "appex: $(FSKIT_BIN) missing; run 'make host' first" >&2; exit 1; \
-	fi; \
+	command -v xcodegen >/dev/null 2>&1 || { \
+	  echo "appex: xcodegen not found (brew install xcodegen)" >&2; exit 1; }; \
 	if [ ! -d "$(APP_DIR)/Contents" ]; then \
 	  echo "appex: $(APP_DIR) not assembled; run 'make app'" >&2; exit 1; \
 	fi; \
-	mkdir -p "$(FSKIT_APPEX_DIR)/Contents/MacOS"; \
-	cp "$(FSKIT_BIN)" "$(FSKIT_APPEX_DIR)/Contents/MacOS/msl-fskit"; \
-	cp "$(FSKIT_PLIST_SRC)" "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
+	( cd "$(HOST_DIR)" && xcodegen generate --spec "$(FSKIT_XC_SPEC)" --quiet ); \
+	( cd "$(HOST_DIR)" && xcodebuild -project msl-fskit.xcodeproj -scheme msl-fskit \
+	  -configuration Release -derivedDataPath .xcbuild -destination 'generic/platform=macOS' \
+	  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO -quiet build ); \
+	rm -rf "$(FSKIT_APPEX_DIR)"; \
+	mkdir -p "$(APP_DIR)/Contents/Extensions"; \
+	cp -R "$(FSKIT_XC_APPEX)" "$(FSKIT_APPEX_DIR)"; \
 	/usr/libexec/PlistBuddy -c "Set :MSLAppGroup $(MSL_APP_GROUP_ID)" \
 	  "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
 	plutil -lint "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \

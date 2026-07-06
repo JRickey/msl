@@ -50,6 +50,10 @@ let package = Package(
             dependencies: ["MSLCore", "MSLMenuBarCore"],
             swiftSettings: swiftSettings
         ),
+        // Type-checks the appex sources in `swift build`; the SHIPPED appex is
+        // built by xcodebuild (host/fskit-appex.yml), because SwiftPM cannot emit
+        // a working ExtensionKit extension (AppExtension.main() returns instead of
+        // running the service loop). See the Makefile `appex` target.
         .executableTarget(
             name: "msl-fskit",
             dependencies: ["MSLFSWire"],
