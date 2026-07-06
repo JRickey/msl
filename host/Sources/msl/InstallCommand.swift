@@ -53,6 +53,9 @@ struct InstallCommand: ParsableCommand {
         Self.note("install: building image for \(plan.name)")
         let entry = try install(plan: plan, home: home)
         Self.note("install: registered \(entry.name)")
+        let launcher = try LauncherStore(home: home).create(
+            name: entry.name, mode: .shell, replace: true)
+        Self.note("launcher: created \(launcher.path)")
         try printInstall(entry, home: home)
     }
 

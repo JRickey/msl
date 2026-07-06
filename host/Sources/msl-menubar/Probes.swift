@@ -144,6 +144,11 @@ enum InstallRunner {
             let entry = try InstallDriver(home: home).install(
                 plan: prepared.plan, options: prepared.options)
             progress(.message("Registered \(entry.name)"))
+            if case .catalog = request {
+                _ = try LauncherStore(home: home).create(
+                    name: entry.name, mode: .shell, replace: true)
+                progress(.message("Created launcher for \(entry.name)"))
+            }
             return .installed(name: entry.name)
         } catch {
             return .failed(message: "\(error)")

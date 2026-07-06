@@ -78,7 +78,10 @@ final class StatusController: NSObject, NSMenuDelegate {
         for row in model.distros {  // bounded: registry list
             let mark = row.isDefault ? " (default)" : ""
             let detail = "\(row.state), \(row.sessions) sessions\(mark)"
-            menu.addItem(disabled(title: "\(row.name) — \(detail)"))
+            let item = disabled(title: "\(row.name) — \(detail)")
+            item.submenu = distroMenu(name: row.name)
+            item.isEnabled = true
+            menu.addItem(item)
         }
     }
 
@@ -167,6 +170,48 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
     }
 
+    @objc private func openDistro(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        do {
+            let store = LauncherStore(home: home)
+            if FileManager.default.fileExists(atPath: store.appURL(name: name).path) {
+                try store.open(name: name)
+            } else {
+                try LauncherRuntime.openShell(home: home, name: name)
+            }
+        } catch {
+            Notifier.postDaemon(title: "Open \(name) failed", message: "\(error)")
+        }
+    }
+
+    @objc private func openShell(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        do {
+            try LauncherRuntime.openShell(home: home, name: name)
+        } catch {
+            Notifier.postDaemon(title: "Open shell failed", message: "\(error)")
+        }
+    }
+
+    @objc private func createLauncher(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        do {
+            let url = try LauncherStore(home: home).create(name: name, mode: .shell, replace: true)
+            Notifier.postDaemon(title: "Launcher ready", message: url.path)
+        } catch {
+            Notifier.postDaemon(title: "Create launcher failed", message: "\(error)")
+        }
+    }
+
+    @objc private func showLauncher(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        do {
+            try LauncherStore(home: home).reveal(name: name)
+        } catch {
+            Notifier.postDaemon(title: "Show launcher failed", message: "\(error)")
+        }
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
     }
@@ -183,6 +228,27 @@ final class StatusController: NSObject, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
         item.target = self
         item.isEnabled = true
+        return item
+    }
+
+    private func distroMenu(name: String) -> NSMenu {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        submenu.addItem(distroAction("Open", #selector(openDistro(_:)), name: name))
+        submenu.addItem(distroAction("Open Shell", #selector(openShell(_:)), name: name))
+        let store = LauncherStore(home: home)
+        let title =
+            FileManager.default.fileExists(atPath: store.appURL(name: name).path)
+            ? "Show Launcher" : "Create Launcher"
+        let selector =
+            title == "Show Launcher" ? #selector(showLauncher(_:)) : #selector(createLauncher(_:))
+        submenu.addItem(distroAction(title, selector, name: name))
+        return submenu
+    }
+
+    private func distroAction(_ title: String, _ selector: Selector, name: String) -> NSMenuItem {
+        let item = action(title: title, selector: selector)
+        item.representedObject = name
         return item
     }
 }

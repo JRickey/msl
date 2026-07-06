@@ -11,5 +11,6 @@ struct MSL: ParsableCommand {
             ShellCommand.self, RunCommand.self, StatusCommand.self, StopCommand.self,
             ShutdownCommand.self, ExportCommand.self, GuiSpikeCommand.self,
             MountCommand.self, UnmountCommand.self, FSKitCommand.self, CatalogCommand.self,
+            LauncherCommand.self, DesktopCommand.self,
         ])
 }

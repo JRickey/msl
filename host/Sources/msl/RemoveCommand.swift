@@ -28,6 +28,7 @@ struct RemoveCommand: ParsableCommand {
         }
         try registry.remove(name: name)
         try registry.save(to: home.registryURL)
+        try? LauncherStore(home: home).remove(name: name)
         let note = registry.defaultDistro == nil ? " (set a new default with 'msl default')" : ""
         print("removed \(name)\(note)")
     }

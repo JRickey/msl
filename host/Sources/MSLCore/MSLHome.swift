@@ -35,6 +35,7 @@ public struct MSLHome: Sendable {
     }
     public var logsDirectory: URL { root.appendingPathComponent("logs") }
     public var registryURL: URL { root.appendingPathComponent("registry.json") }
+    public var launchersURL: URL { root.appendingPathComponent("launchers.json") }
 
     /// Filesystem path of a distro's backing image (`distros/<name>.img`).
     public func imageURL(name: String) -> URL {
