@@ -4,6 +4,16 @@
 
 use crate::proto::MemStatsData;
 
+const COMPACT_MEMORY_PATH: &str = "/proc/sys/vm/compact_memory";
+const DROP_CACHES_PATH: &str = "/proc/sys/vm/drop_caches";
+const DROP_PAGE_CACHE_ONLY: &str = "1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReclaimWrite {
+    path: &'static str,
+    value: &'static str,
+}
+
 pub fn mem_stats() -> Result<MemStatsData, String> {
     let meminfo =
         std::fs::read_to_string("/proc/meminfo").map_err(|e| format!("read meminfo: {e}"))?;
@@ -89,12 +99,27 @@ fn field_after(rest: &str, prefix: &str) -> Option<f64> {
     None
 }
 
+const fn reclaim_writes() -> [ReclaimWrite; 2] {
+    [
+        ReclaimWrite {
+            path: COMPACT_MEMORY_PATH,
+            value: "1",
+        },
+        ReclaimWrite {
+            path: DROP_CACHES_PATH,
+            value: DROP_PAGE_CACHE_ONLY,
+        },
+    ]
+}
+
 #[cfg(target_os = "linux")]
 #[allow(clippy::unnecessary_wraps)] // Result mirrors the fallible non-linux stub
 pub fn reclaim() -> Result<(), String> {
     sync_now();
-    best_effort_write("/proc/sys/vm/compact_memory", "1");
-    best_effort_write("/proc/sys/vm/drop_caches", "3");
+    // drop_caches=1 preserves dentries/inodes; virtiofs metadata is costly to refill.
+    for write in reclaim_writes() {
+        best_effort_write(write.path, write.value);
+    }
     Ok(())
 }
 
@@ -133,7 +158,10 @@ pub fn boot_tuning() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_meminfo, parse_psi};
+    use super::{
+        COMPACT_MEMORY_PATH, DROP_CACHES_PATH, DROP_PAGE_CACHE_ONLY, ReclaimWrite, parse_meminfo,
+        parse_psi, reclaim_writes,
+    };
 
     const MEMINFO: &str = "MemTotal:       16307840 kB\n\
 MemFree:         2043216 kB\n\
@@ -180,5 +208,21 @@ full avg10=0.25 avg60=0.05 avg300=0.00 total=7\n";
         let err =
             parse_psi("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n").expect_err("no full");
         assert!(err.contains("full"));
+    }
+
+    #[test]
+    fn reclaim_plan_preserves_metadata_cache() {
+        let writes = reclaim_writes();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(
+            writes[0],
+            ReclaimWrite {
+                path: COMPACT_MEMORY_PATH,
+                value: "1"
+            }
+        );
+        assert_eq!(writes[1].path, DROP_CACHES_PATH);
+        assert_eq!(writes[1].value, DROP_PAGE_CACHE_ONLY);
+        assert_ne!(writes[1].value, "3");
     }
 }
