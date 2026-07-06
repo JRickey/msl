@@ -149,6 +149,6 @@ struct UpCommand: ParsableCommand {
         let env = ProcessInfo.processInfo.environment
         return home.resolvePath(
             flag: initramfs, homeCandidate: home.initramfsPath, devEnv: env["MSL_INITRAMFS"],
-            devDefault: "initramfs.cpio.gz")
+            devDefault: "initramfs.cpio")
     }
 }

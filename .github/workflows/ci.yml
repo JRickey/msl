@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install toolchain helpers
+        run: |
+          brew install cargo-zigbuild cargo-deny swiftlint xcodegen zig
+          rustup target add aarch64-unknown-linux-musl
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/.build
+            host/.swiftpm
+          key: swift-${{ runner.os }}-${{ hashFiles('host/Package.resolved', 'host/Package.swift') }}
+          restore-keys: swift-${{ runner.os }}-
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            guest/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('guest/Cargo.lock', 'guest/**/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Cache build downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/cache
+            kernel/build
+            guest/target/xkb-build
+            guest/target/xkb-musl
+          key: assets-${{ runner.os }}-${{ hashFiles('kernel/Makefile', 'tools/mk-*.sh', 'guest/Cargo.lock') }}
+          restore-keys: assets-${{ runner.os }}-
+
+      - name: Swift build and tests
+        run: |
+          cd host
+          swift build -c release
+          swift test
+
+      - name: Swift lint
+        run: |
+          cd host
+          swift format lint --strict --recursive Sources Tests Package.swift
+          swiftlint --strict
+
+      - name: Rust checks
+        run: |
+          cd guest
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --target aarch64-unknown-linux-musl --workspace --all-targets -- -D warnings
+          cargo test --workspace
+          cargo deny check
+
+      - name: Guest and app structural build
+        run: |
+          make packaging-test
+          make guest
+          make initramfs
+          make app

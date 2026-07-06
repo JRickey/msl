@@ -12,6 +12,7 @@ OUT="$BUILD_DIR/initramfs.cpio"
 AGENT="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-agent"
 SHIM="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/mac"
 FSD="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-fsd"
+WAY="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-way"
 
 # Pinned busybox: Alpine v3.21 aarch64 static build. The multiarch busybox.net
 # binaries ship only 32-bit armv8l for ARM, which will not run on this kernel.
@@ -48,6 +49,12 @@ fi
 if [ ! -f "$SHIM" ]; then
 	echo "mk-initramfs: missing interop shim: $SHIM" >&2
 	echo "  build it first: (cd guest && cargo zigbuild --workspace --target aarch64-unknown-linux-musl --release)" >&2
+	exit 1
+fi
+
+if [ "${REQUIRE_MSL_WAY:-0}" = "1" ] && [ ! -f "$WAY" ]; then
+	echo "mk-initramfs: missing wayland compositor: $WAY" >&2
+	echo "  build it first: make msl-way" >&2
 	exit 1
 fi
 
@@ -99,6 +106,9 @@ install -m 0755 "$AGENT" "$stage/init"
 install -m 0755 "$BB" "$stage/bin/busybox"
 install -m 0755 "$SHIM" "$stage/tools/mac"
 install -m 0755 "$FSD" "$stage/tools/msl-fsd"
+if [ -f "$WAY" ]; then
+	install -m 0755 "$WAY" "$stage/tools/msl-way"
+fi
 ln -s mac "$stage/tools/mac-binfmt"
 
 n=0

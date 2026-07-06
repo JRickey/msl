@@ -133,6 +133,38 @@ SwiftPM does not re-sign products after rebuilds. Use `make host sign` or a
 Makefile target that depends on signing before running a Virtualization-backed
 binary.
 
+## Release Packaging
+
+Public releases are Developer ID `.pkg` installers. The pkg installs
+`/Applications/msl.app`, adds `/usr/local/bin/msl`, embeds the kernel and
+initramfs assets in the app bundle, and enables the FSKit module for the
+installing console user via `msl fskit enable --no-restart`.
+
+Local release builds read optional private values from `.env`:
+
+```sh
+APPLE_TEAM_ID=...
+FSKIT_PROVISION_PROFILE=/path/to/fskit.provisionprofile
+RELEASE_APP_SIGN_IDENTITY=Developer ID Application: ...
+RELEASE_INSTALLER_SIGN_IDENTITY=Developer ID Installer: ...
+NOTARYTOOL_ARGS=--apple-id you@example.com --password xxxx-xxxx-xxxx-xxxx --team-id TEAMID
+```
+
+Build and notarize:
+
+```sh
+make release-pkg VERSION=0.1.0
+make notarize VERSION=0.1.0
+```
+
+GitHub releases use the same targets on `macos-26` and require these secrets:
+`APPLE_TEAM_ID`, `DEVELOPER_ID_APPLICATION_CERT_P12_BASE64`,
+`DEVELOPER_ID_APPLICATION_CERT_PASSWORD`,
+`DEVELOPER_ID_INSTALLER_CERT_P12_BASE64`,
+`DEVELOPER_ID_INSTALLER_CERT_PASSWORD`,
+`FSKIT_DEVELOPER_ID_PROFILE_BASE64`, `APPLE_ID`, and
+`APPLE_APP_SPECIFIC_PASSWORD`.
+
 ## Quick Start
 
 Build the CLI:

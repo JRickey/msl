@@ -30,10 +30,6 @@ public enum FSProto {
     /// 4 MiB frame cap; the daemon relays raw bytes after the hello/reply.
     public static let frameMax = 4 * 1024 * 1024
 
-    /// Developer team (ADR 0009) whose leaf-cert OU the appex designated
-    /// requirement pins. Overridable by `MSL_FSKIT_TEAM_ID` for other accounts.
-    public static let defaultTeamID = "REDACTED_TEAM_ID"
-
     /// Appex-admission socket path inside the app-group container. The daemon
     /// resolves it from home; the sandboxed appex uses the group-container API.
     public static func appexSocketPath(home: String = NSHomeDirectory()) -> String {

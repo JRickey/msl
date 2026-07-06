@@ -12,11 +12,11 @@ struct PeerIdentity: Sendable {
 }
 
 enum PeerAuth {
-    /// Default pinned designated requirement for the real FSKit appex on the
-    /// author's registered team. An impostor (ad-hoc or other team) fails it.
-    static let defaultRequirement =
-        "identifier \"dev.msl.app.fsmodule\" and anchor apple generic "
-        + "and certificate leaf[subject.OU] = \"REDACTED_TEAM_ID\""
+    static func requirement(teamID: String) -> String {
+        precondition(!teamID.isEmpty, "team id must not be empty")
+        return "identifier \"dev.msl.app.fsmodule\" and anchor apple generic "
+            + "and certificate leaf[subject.OU] = \"\(teamID)\""
+    }
 
     /// Read `LOCAL_PEERCRED`, `LOCAL_PEEREPID`, and `LOCAL_PEERTOKEN` from the
     /// accepted socket. Returns nil if the kernel denies any credential read.

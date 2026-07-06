@@ -61,7 +61,7 @@ struct DaemonRunCommand: ParsableCommand {
                 devDefault: "kernel"),
             initramfsPath: home.resolvePath(
                 flag: initramfs, homeCandidate: home.initramfsPath, devEnv: env["MSL_INITRAMFS"],
-                devDefault: "initramfs.cpio.gz"),
+                devDefault: "initramfs.cpio"),
             cmdline: cmdline, cpus: cpus, memoryMiB: memoryMib,
             shareHomePath: shareHome ? NSHomeDirectory() : nil, bootTimeout: timeout,
             idleTimeoutS: idleTimeout, term: env["TERM"] ?? "xterm-256color",

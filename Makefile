@@ -5,6 +5,8 @@ GUEST_DIR    := guest
 HOST_DIR     := host
 KERNEL_DIR   := kernel
 BUILD_DIR    := build
+VERSION      ?= 0.1.0
+MSL_TEAM_ID  ?=
 
 GUEST_TARGET := aarch64-unknown-linux-musl
 GUEST_BIN    := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-agent
@@ -18,8 +20,22 @@ KERNEL_IMAGE := $(KERNEL_DIR)/build/Image
 INITRAMFS    := $(BUILD_DIR)/initramfs.cpio
 BUILDER_INITRAMFS := $(BUILD_DIR)/builder-initramfs.cpio
 ROOTFS_IMG   := $(BUILD_DIR)/ubuntu.img
+PKG_ROOT     := $(BUILD_DIR)/pkgroot
+PKG_COMPONENT := $(BUILD_DIR)/msl-component.pkg
+PKG_PRODUCT  := $(BUILD_DIR)/msl-$(VERSION).pkg
 CONSOLE_LOG  := $(BUILD_DIR)/console.log
-ENTITLEMENTS := entitlements/dev.entitlements
+ENTITLEMENTS ?= entitlements/dev.entitlements
+RELEASE_ENTITLEMENTS := entitlements/release.entitlements
+SIGN_OPTIONS ?= --timestamp=none
+RELEASE_APP_SIGN_IDENTITY ?= Developer ID Application
+RELEASE_INSTALLER_SIGN_IDENTITY ?= Developer ID Installer
+NOTARYTOOL_ARGS ?=
+
+-include .env
+
+ifeq ($(MSL_TEAM_ID),)
+MSL_TEAM_ID := $(APPLE_TEAM_ID)
+endif
 
 # FSKit appex (ADR 0009): the sole real-cert-signed product. The appex bundle
 # ID nests under the menu-bar app's dev.msl.app; the executable is msl-fskit.
@@ -64,6 +80,9 @@ help:
 	echo "  make host       - build the host msl VMM (release)"; \
 	echo "  make sign       - codesign msl with the virtualization entitlement"; \
 	echo "  make app        - assemble msl.app (menu-bar app + bundled CLI + FSKit appex)"; \
+	echo "  make packaging-test - run pkg script unit tests"; \
+	echo "  make release-pkg - build a signed Developer ID pkg at $(PKG_PRODUCT)"; \
+	echo "  make notarize   - submit, staple, and verify $(PKG_PRODUCT)"; \
 	echo "  make appex      - assemble+sign the FSKit appex into an existing msl.app"; \
 	echo "  make kernel     - fetch the pinned arm64 kernel Image"; \
 	echo "  make initramfs  - assemble $(INITRAMFS) (needs guest)"; \
@@ -126,21 +145,35 @@ app: host sign
 	  echo "app: $(HOST_BIN) missing; run 'make host' first" >&2; exit 1; \
 	fi; \
 	rm -rf "$(APP_DIR)"; \
-	mkdir -p "$(APP_DIR)/Contents/MacOS"; \
+	mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources"; \
 	cp "$(MENUBAR_BIN)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
 	cp "$(HOST_BIN)" "$(APP_DIR)/Contents/MacOS/msl"; \
 	cp "$(APP_PLIST)" "$(APP_DIR)/Contents/Info.plist"; \
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" \
+	  "$(APP_DIR)/Contents/Info.plist"; \
+	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(VERSION)" \
+	  "$(APP_DIR)/Contents/Info.plist"; \
+	if [ -n "$(MSL_TEAM_ID)" ]; then \
+	  /usr/libexec/PlistBuddy -c "Add :MSLTeamID string $(MSL_TEAM_ID)" \
+	    "$(APP_DIR)/Contents/Info.plist" 2>/dev/null || \
+	    /usr/libexec/PlistBuddy -c "Set :MSLTeamID $(MSL_TEAM_ID)" \
+	    "$(APP_DIR)/Contents/Info.plist"; \
+	fi; \
+	cp LICENSE NOTICE THIRD-PARTY-LICENSES "$(APP_DIR)/Contents/Resources/"; \
+	if [ -f "$(KERNEL_IMAGE)" ]; then cp "$(KERNEL_IMAGE)" "$(APP_DIR)/Contents/Resources/kernel"; fi; \
+	if [ -f "$(INITRAMFS)" ]; then cp "$(INITRAMFS)" "$(APP_DIR)/Contents/Resources/initramfs.cpio"; fi; \
+	if [ -f "$(BUILDER_INITRAMFS)" ]; then cp "$(BUILDER_INITRAMFS)" "$(APP_DIR)/Contents/Resources/builder-initramfs.cpio"; fi; \
 	plutil -lint "$(APP_DIR)/Contents/Info.plist"; \
 	if [ -n "$(FSKIT_PROVISION_PROFILE)" ]; then \
 	  $(MAKE) appex; \
 	else \
 	  echo "app: no FSKIT_PROVISION_PROFILE — skipping FSKit appex (no Finder view; needs xcodegen + a profile)"; \
 	fi; \
-	codesign --force --timestamp=none --sign "$(APP_SIGN_IDENTITY)" \
+	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
 	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl"; \
-	codesign --force --timestamp=none --sign "$(APP_SIGN_IDENTITY)" \
+	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
 	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
-	codesign --force --timestamp=none --sign "$(APP_SIGN_IDENTITY)" \
+	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
 	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)"; \
 	codesign --verify --strict "$(APP_DIR)"; \
 	echo "app: assembled $(APP_DIR) (identity: $(APP_SIGN_IDENTITY))"
@@ -167,6 +200,10 @@ appex:
 	cp -R "$(FSKIT_XC_APPEX)" "$(FSKIT_APPEX_DIR)"; \
 	/usr/libexec/PlistBuddy -c "Set :MSLAppGroup $(MSL_APP_GROUP_ID)" \
 	  "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" \
+	  "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
+	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(VERSION)" \
+	  "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
 	plutil -lint "$(FSKIT_APPEX_DIR)/Contents/Info.plist"; \
 	mkdir -p "$(BUILD_DIR)"; \
 	cp "$(FSKIT_ENT_SRC)" "$(FSKIT_ENT_RENDER)"; \
@@ -183,10 +220,86 @@ appex:
 	else \
 	  echo "appex: no FSKIT_PROVISION_PROFILE; appex will sign but AMFI blocks load until one is embedded" >&2; \
 	fi; \
-	codesign --force --timestamp=none --sign "$(FSKIT_SIGN_IDENTITY)" \
+	codesign --force $(SIGN_OPTIONS) --sign "$(FSKIT_SIGN_IDENTITY)" \
 	  --entitlements "$(FSKIT_ENT_RENDER)" "$(FSKIT_APPEX_DIR)"; \
 	codesign --verify --strict "$(FSKIT_APPEX_DIR)"; \
 	echo "appex: signed $(FSKIT_APPEX_DIR) (identity: $(FSKIT_SIGN_IDENTITY), group: $(MSL_APP_GROUP_ID))"
+
+.PHONY: release-runtime
+release-runtime: kernel guest msl-way
+	@set -eu; \
+	REQUIRE_MSL_WAY=1 tools/mk-initramfs.sh; \
+	tools/mk-builder-initramfs.sh
+
+.PHONY: packaging-test
+packaging-test:
+	@set -eu; \
+	packaging/tests/postinstall_test.sh
+
+.PHONY: release-app
+release-app:
+	@set -eu; \
+	if [ -z "$(FSKIT_PROVISION_PROFILE)" ]; then \
+	  echo "release-app: FSKIT_PROVISION_PROFILE is required" >&2; exit 1; \
+	fi; \
+	if [ ! -f "$(FSKIT_PROVISION_PROFILE)" ]; then \
+	  echo "release-app: FSKIT_PROVISION_PROFILE=$(FSKIT_PROVISION_PROFILE) not found" >&2; exit 1; \
+	fi; \
+	if [ -z "$(MSL_TEAM_ID)" ]; then \
+	  echo "release-app: MSL_TEAM_ID is required" >&2; exit 1; \
+	fi; \
+	$(MAKE) release-runtime; \
+	$(MAKE) app \
+	  ENTITLEMENTS="$(RELEASE_ENTITLEMENTS)" \
+	  SIGN_OPTIONS="--options runtime --timestamp" \
+	  APP_SIGN_IDENTITY="$(RELEASE_APP_SIGN_IDENTITY)" \
+	  FSKIT_SIGN_IDENTITY="$(RELEASE_APP_SIGN_IDENTITY)" \
+	  MSL_TEAM_ID="$(MSL_TEAM_ID)" \
+	  FSKIT_PROVISION_PROFILE="$(FSKIT_PROVISION_PROFILE)"; \
+	for f in \
+	  "$(APP_DIR)/Contents/MacOS/msl" \
+	  "$(APP_DIR)/Contents/MacOS/msl-menubar" \
+	  "$(FSKIT_APPEX_DIR)" \
+	  "$(APP_DIR)"; do \
+	  codesign --verify --strict "$$f"; \
+	done; \
+	test -f "$(APP_DIR)/Contents/Resources/kernel"; \
+	test -f "$(APP_DIR)/Contents/Resources/initramfs.cpio"; \
+	test -f "$(APP_DIR)/Contents/Resources/builder-initramfs.cpio"
+
+.PHONY: release-pkg
+release-pkg: release-app
+	@set -eu; \
+	rm -rf "$(PKG_ROOT)" "$(PKG_COMPONENT)" "$(PKG_PRODUCT)"; \
+	mkdir -p "$(PKG_ROOT)/Applications" "$(PKG_ROOT)/usr/local/bin"; \
+	/usr/bin/ditto "$(APP_DIR)" "$(PKG_ROOT)/Applications/msl.app"; \
+	{ \
+	  echo '#!/bin/sh'; \
+	  echo 'export MSL_FSKIT_TEAM_ID="$(MSL_TEAM_ID)"'; \
+	  echo 'exec /Applications/msl.app/Contents/MacOS/msl "$$@"'; \
+	} >"$(PKG_ROOT)/usr/local/bin/msl"; \
+	chmod 0755 "$(PKG_ROOT)/usr/local/bin/msl"; \
+	pkgbuild --root "$(PKG_ROOT)" --scripts packaging/scripts \
+	  --identifier dev.msl.pkg --version "$(VERSION)" --install-location / \
+	  "$(PKG_COMPONENT)"; \
+	productbuild --package "$(PKG_COMPONENT)" --sign "$(RELEASE_INSTALLER_SIGN_IDENTITY)" \
+	  "$(PKG_PRODUCT)"; \
+	pkgutil --check-signature "$(PKG_PRODUCT)"; \
+	shasum -a 256 "$(PKG_PRODUCT)" >"$(PKG_PRODUCT).sha256"; \
+	echo "release-pkg: wrote $(PKG_PRODUCT)"
+
+.PHONY: notarize
+notarize: release-pkg
+	@set -eu; \
+	if [ -z "$(NOTARYTOOL_ARGS)" ]; then \
+	  echo "notarize: set NOTARYTOOL_ARGS for xcrun notarytool submit" >&2; exit 1; \
+	fi; \
+	xcrun notarytool submit "$(PKG_PRODUCT)" $(NOTARYTOOL_ARGS) --wait; \
+	xcrun stapler staple "$(PKG_PRODUCT)"; \
+	xcrun stapler validate "$(PKG_PRODUCT)"; \
+	spctl --assess --type install "$(PKG_PRODUCT)"; \
+	shasum -a 256 "$(PKG_PRODUCT)" >"$(PKG_PRODUCT).sha256"; \
+	echo "notarize: stapled $(PKG_PRODUCT)"
 
 .PHONY: kernel
 kernel:

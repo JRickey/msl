@@ -20,6 +20,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Notifier.requestAuthorization()
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Task { @MainActor in
+            let enabled = await FSKitAction.status()
+            guard !enabled else { return }
+            switch await FSKitAction.enable() {
+            case .ready:
+                break
+            case .restartRequired:
+                Notifier.postDaemon(
+                    title: "Finder Integration enabled",
+                    message: "Restart your Mac before Finder mounts are available.")
+            case .failed(let error):
+                Notifier.postDaemon(title: "Finder Integration setup failed", message: error)
+            }
+        }
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let installer else { return }
         assert(!urls.isEmpty, "open delivered no urls")

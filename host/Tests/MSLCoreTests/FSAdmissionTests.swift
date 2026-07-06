@@ -12,10 +12,18 @@ final class FSAdmissionTests: XCTestCase {
     }
 
     func testRequirementPinsIdentifierAnchorAndTeam() {
-        let req = FSAdmission.requirement(bundleID: "dev.msl.app.fsmodule", teamID: "REDACTED_TEAM_ID")
+        let req = FSAdmission.requirement(bundleID: "dev.msl.app.fsmodule", teamID: "TEAM123456")
         XCTAssertTrue(req.contains("identifier \"dev.msl.app.fsmodule\""))
         XCTAssertTrue(req.contains("anchor apple generic"))
-        XCTAssertTrue(req.contains("certificate leaf[subject.OU] = \"REDACTED_TEAM_ID\""))
+        XCTAssertTrue(req.contains("certificate leaf[subject.OU] = \"TEAM123456\""))
+    }
+
+    func testTeamIDPrecedence() {
+        XCTAssertEqual(
+            FSAdmission.teamID(env: ["MSL_FSKIT_TEAM_ID": "TEAMENV"], bundleValue: "TEAMBUNDLE"),
+            "TEAMENV")
+        XCTAssertEqual(FSAdmission.teamID(env: [:], bundleValue: "TEAMBUNDLE"), "TEAMBUNDLE")
+        XCTAssertNil(FSAdmission.teamID(env: [:], bundleValue: nil))
     }
 
     func testReconcileReturnsOnlyUnknownMounts() {

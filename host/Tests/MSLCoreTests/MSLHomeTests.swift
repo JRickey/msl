@@ -57,6 +57,32 @@ final class MSLHomePrecedenceTests: XCTestCase {
         XCTAssertEqual(path, "/env/k")
     }
 
+    func testBundledResourceUsedBeforeDevDefault() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msl-app-\(UUID().uuidString)")
+        let dir = root.appendingPathComponent("msl.app/Contents/Resources")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let kernel = dir.appendingPathComponent("kernel")
+        try Data("k".utf8).write(to: kernel)
+        let exe = dir.deletingLastPathComponent().appendingPathComponent("MacOS/msl")
+        let path = MSLHome.bundledResourcePath(
+            named: "kernel", executablePath: exe.path, bundleResourceURL: nil)
+        XCTAssertEqual(path, kernel.path)
+    }
+
+    func testBundleResourceURLWinsWhenReadable() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msl-resources-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let initramfs = dir.appendingPathComponent("initramfs.cpio")
+        try Data("i".utf8).write(to: initramfs)
+        let path = MSLHome.bundledResourcePath(
+            named: "initramfs.cpio", executablePath: nil, bundleResourceURL: dir)
+        XCTAssertEqual(path, initramfs.path)
+    }
+
     func testDevDefaultIsLastResort() {
         let home = MSLHome(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
         let path = home.resolvePath(

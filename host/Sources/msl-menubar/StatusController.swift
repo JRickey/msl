@@ -34,21 +34,26 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         assert(menu === self.menu, "delegate serves only its own menu")
+        refreshMenu()
+    }
+
+    private func refreshMenu() {
         rebuild(with: nil)
         let home = self.home
         Task { @MainActor [weak self] in
             let probe = await StatusProbe.probeAsync(home: home)
-            self?.rebuild(with: MenuModel.make(probe: probe))
+            let finderEnabled = await FSKitAction.status()
+            self?.rebuild(with: MenuModel.make(probe: probe), finderEnabled: finderEnabled)
         }
     }
 
-    private func rebuild(with model: MenuModel?) {
+    private func rebuild(with model: MenuModel?, finderEnabled: Bool? = nil) {
         menu.removeAllItems()
         appendHeader(model)
         menu.addItem(.separator())
         appendDistros(model)
         menu.addItem(.separator())
-        appendActions(model)
+        appendActions(model, finderEnabled: finderEnabled)
         menu.addItem(.separator())
         menu.addItem(action(title: "Quit msl", selector: #selector(quit)))
     }
@@ -77,7 +82,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func appendActions(_ model: MenuModel?) {
+    private func appendActions(_ model: MenuModel?, finderEnabled: Bool?) {
         let start = action(title: "Start daemon", selector: #selector(startDaemon))
         start.isEnabled = model?.startEnabled ?? false
         menu.addItem(start)
@@ -85,6 +90,20 @@ final class StatusController: NSObject, NSMenuDelegate {
         stop.isEnabled = model?.shutDownEnabled ?? false
         menu.addItem(stop)
         menu.addItem(action(title: "Install distro…", selector: #selector(installDistro)))
+        appendFinderIntegration(enabled: finderEnabled)
+    }
+
+    private func appendFinderIntegration(enabled: Bool?) {
+        guard let enabled else {
+            menu.addItem(disabled(title: "Finder Integration: checking"))
+            return
+        }
+        let item = action(
+            title: enabled ? "Finder Integration: enabled" : "Enable Finder Integration",
+            selector: #selector(enableFinderIntegration))
+        item.state = enabled ? .on : .off
+        item.isEnabled = !enabled
+        menu.addItem(item)
     }
 
     @objc private func startDaemon() {
@@ -113,6 +132,25 @@ final class StatusController: NSObject, NSMenuDelegate {
         panel.prompt = "Install"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         installer.requestInstall(url: url)
+    }
+
+    @objc private func enableFinderIntegration() {
+        Task { @MainActor in
+            switch await FSKitAction.enable() {
+            case .ready:
+                Notifier.postDaemon(
+                    title: "Finder Integration enabled",
+                    message: "Finder mounts are ready.")
+                refreshMenu()
+            case .restartRequired:
+                Notifier.postDaemon(
+                    title: "Finder Integration enabled",
+                    message: "Restart your Mac before Finder mounts are available.")
+                refreshMenu()
+            case .failed(let error):
+                Notifier.postDaemon(title: "Finder Integration failed", message: error)
+            }
+        }
     }
 
     @objc private func quit() {

@@ -125,7 +125,10 @@ extension DaemonCore {
         mountInitLock.lock()
         defer { mountInitLock.unlock() }
         if withLock({ mountListener != nil }) { return }
-        let team = ProcessInfo.processInfo.environment["MSL_FSKIT_TEAM_ID"] ?? FSProto.defaultTeamID
+        guard let team = FSAdmission.teamID() else {
+            throw MSLError.configuration(
+                "FSKit team id missing; set MSL_FSKIT_TEAM_ID or build msl.app with MSLTeamID")
+        }
         let requirement = FSAdmission.requirement(bundleID: FSProto.appexBundleID, teamID: team)
         let listener = FSMountListener(
             socketPath: FSProto.appexSocketPath(),

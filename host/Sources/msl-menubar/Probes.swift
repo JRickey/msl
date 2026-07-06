@@ -60,6 +60,59 @@ enum DaemonAction {
     }
 }
 
+enum FSKitActionResult: Equatable {
+    case ready
+    case restartRequired
+    case failed(String)
+}
+
+enum FSKitAction {
+    private typealias EnableContinuation = CheckedContinuation<FSKitActionResult, Never>
+
+    private static let queue = DispatchQueue(label: "dev.msl.menubar.fskit")
+
+    static func status() async -> Bool {
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            queue.async { cont.resume(returning: (try? FSKitEnablement.isEnabled()) ?? false) }
+        }
+    }
+
+    static func enable() async -> FSKitActionResult {
+        return await withCheckedContinuation { (cont: EnableContinuation) in
+            queue.async {
+                do {
+                    _ = try FSKitEnablement.enable()
+                    cont.resume(returning: restartIfRunning() ? .ready : .restartRequired)
+                } catch {
+                    cont.resume(returning: .failed("\(error)"))
+                }
+            }
+        }
+    }
+
+    private static func restartIfRunning() -> Bool {
+        let probe = run("/usr/bin/pgrep", ["-x", "fskitd"])
+        guard probe == 0 else { return true }
+        return run("/usr/bin/killall", ["fskitd"]) == 0
+    }
+
+    private static func run(_ executable: String, _ arguments: [String]) -> Int32 {
+        assert(!executable.isEmpty, "executable path must not be empty")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return -1
+        }
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+}
+
 /// Runs one `.msl` install in-process on a private serial queue, mirroring the
 /// CLI's `install` command via `MenuBarInstall` + `InstallDriver`.
 enum InstallRunner {

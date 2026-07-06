@@ -20,6 +20,15 @@ public enum FSAdmission {
             + "and certificate leaf[subject.OU] = \"\(teamID)\""
     }
 
+    public static func teamID(
+        env: [String: String] = ProcessInfo.processInfo.environment,
+        bundleValue: String? = Bundle.main.object(forInfoDictionaryKey: "MSLTeamID") as? String
+    ) -> String? {
+        if let override = env["MSL_FSKIT_TEAM_ID"], !override.isEmpty { return override }
+        if let bundleValue, !bundleValue.isEmpty { return bundleValue }
+        return nil
+    }
+
     /// On daemon startup, decide which discovered `mslfs` mountpoints to
     /// force-unmount: any not in `known` (in-memory state the daemon can adopt).
     /// A fresh daemon has no known mounts, so every stale mount is reclaimed —

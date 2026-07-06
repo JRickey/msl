@@ -7,7 +7,7 @@ func parseArguments(_ argv: [String]) -> ProbeServer? {
     precondition(!argv.isEmpty, "argv always carries the program name")
     var socketPath = ""
     var once = true
-    var requirement = PeerAuth.defaultRequirement
+    var requirement = ""
     var index = 1
     while index < argv.count {  // bounded: index strictly increases
         let arg = argv[index]
@@ -29,6 +29,10 @@ func parseArguments(_ argv: [String]) -> ProbeServer? {
         default:
             return nil
         }
+    }
+    let env = ProcessInfo.processInfo.environment
+    if requirement.isEmpty, let team = env["MSL_FSKIT_TEAM_ID"], !team.isEmpty {
+        requirement = PeerAuth.requirement(teamID: team)
     }
     guard !socketPath.isEmpty, !requirement.isEmpty else { return nil }
     return ProbeServer(socketPath: socketPath, once: once, requirement: requirement)

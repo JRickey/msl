@@ -2,8 +2,7 @@ import Foundation
 
 /// The MSL state directory (`$MSL_HOME`, default `~/.msl`): kernel, initramfs
 /// images, the per-distro image store, and the registry. Path resolution keeps
-/// the precedence flag > MSL home file > repo-relative dev fallback so the same
-/// binary works both from an installed home and from a checkout.
+/// one binary usable from a checkout, an installed home, or the app bundle.
 public struct MSLHome: Sendable {
     public let root: URL
 
@@ -47,8 +46,7 @@ public struct MSLHome: Sendable {
         }
     }
 
-    /// Resolve a kernel/initramfs path with the standard precedence. `flag` wins;
-    /// then the MSL home candidate if it is readable; then the dev fallback.
+    /// Resolve a kernel/initramfs path with release and dev fallbacks.
     public func resolvePath(
         flag: String?, homeCandidate: String, devEnv: String?, devDefault: String
     ) -> String {
@@ -56,6 +54,31 @@ public struct MSLHome: Sendable {
         if let flag, !flag.isEmpty { return flag }
         if FileManager.default.isReadableFile(atPath: homeCandidate) { return homeCandidate }
         if let devEnv, !devEnv.isEmpty { return devEnv }
+        let resource = URL(fileURLWithPath: devDefault).lastPathComponent
+        if let bundled = Self.bundledResourcePath(named: resource) { return bundled }
         return devDefault
+    }
+
+    public static func bundledResourcePath(
+        named name: String,
+        executablePath: String? = Bundle.main.executablePath,
+        bundleResourceURL: URL? = Bundle.main.resourceURL,
+        fileManager: FileManager = .default
+    ) -> String? {
+        precondition(!name.isEmpty, "resource name must not be empty")
+        if let bundleResourceURL {
+            let candidate = bundleResourceURL.appendingPathComponent(name).path
+            if fileManager.isReadableFile(atPath: candidate) { return candidate }
+        }
+        guard let executablePath, !executablePath.isEmpty else { return nil }
+        let components = URL(fileURLWithPath: executablePath).pathComponents
+        guard let appIndex = components.firstIndex(where: { $0.hasSuffix(".app") }) else {
+            return nil
+        }
+        let appPath = NSString.path(withComponents: Array(components[0...appIndex]))
+        let candidate = URL(fileURLWithPath: appPath)
+            .appendingPathComponent("Contents/Resources")
+            .appendingPathComponent(name).path
+        return fileManager.isReadableFile(atPath: candidate) ? candidate : nil
     }
 }
