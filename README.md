@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/msl-hero.png" alt="msl running Ubuntu in a macOS Terminal window" width="100%">
+  <img src="assets/msl-hero.webp" alt="msl running Ubuntu in a macOS Terminal window" width="100%">
 </p>
 
 # msl
