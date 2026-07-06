@@ -29,4 +29,21 @@ enum Subprocess {
             status: process.terminationStatus,
             stderr: text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
+
+    static func runInteractive(_ executable: String, _ arguments: [String]) -> Result {
+        precondition(!executable.isEmpty, "executable path must not be empty")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardInput = FileHandle.standardInput
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        do {
+            try process.run()
+        } catch {
+            return Result(status: -1, stderr: "spawn \(executable) failed: \(error)")
+        }
+        process.waitUntilExit()
+        return Result(status: process.terminationStatus, stderr: "")
+    }
 }
