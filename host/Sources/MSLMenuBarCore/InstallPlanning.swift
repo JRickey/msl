@@ -44,6 +44,20 @@ public enum MenuBarInstall {
         return Prepared(plan: plan, options: resolveOptions(home: home, env: env))
     }
 
+    public static func prepare(
+        catalog resolved: CatalogResolved, installedName: String, sourceURL: URL, home: MSLHome,
+        env: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> Prepared {
+        precondition(!sourceURL.path.isEmpty, "catalog source path must not be empty")
+        let registry = try Registry.load(from: home.registryURL)
+        let source = InstallSource.tarball(sourceURL, resolved.artifact.compression)
+        let plan = try InstallPlan.make(
+            name: installedName, source: source, sizeGiB: resolved.version.imageSizeGiB,
+            existingNames: registry.distros.map { $0.name },
+            defaultUser: resolved.version.defaultUser)
+        return Prepared(plan: plan, options: resolveOptions(home: home, env: env))
+    }
+
     private static func resolveOptions(home: MSLHome, env: [String: String]) -> InstallOptions {
         assert(!home.kernelPath.isEmpty, "home resolves a kernel path")
         return InstallOptions(

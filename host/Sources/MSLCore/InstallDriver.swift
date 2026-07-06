@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 /// Compression of a root tarball; selects the GNU tar extract flag.
-public enum TarCompression: Sendable, Equatable {
+public enum TarCompression: String, Codable, Sendable, Equatable {
     case xz
     case gzip
     case none
@@ -56,6 +56,16 @@ public struct InstallPlan: Sendable, Equatable {
         name: String, fromPath: String, sizeGiB: Int, existingNames: [String],
         bundleCompression: TarCompression? = nil, defaultUser: String? = nil
     ) throws -> InstallPlan {
+        let source = try classify(fromPath, bundleCompression: bundleCompression)
+        return try make(
+            name: name, source: source, sizeGiB: sizeGiB, existingNames: existingNames,
+            defaultUser: defaultUser)
+    }
+
+    public static func make(
+        name: String, source: InstallSource, sizeGiB: Int, existingNames: [String],
+        defaultUser: String? = nil
+    ) throws -> InstallPlan {
         assert(minSizeGiB <= maxSizeGiB, "size bounds must be ordered")
         guard Registry.isValidName(name) else {
             throw MSLError.invalidArgument("invalid distro name (^[a-z][a-z0-9-]{0,31}$): \(name)")
@@ -67,16 +77,24 @@ public struct InstallPlan: Sendable, Equatable {
             throw MSLError.invalidArgument(
                 "size-gib must be \(minSizeGiB)...\(maxSizeGiB): \(sizeGiB)")
         }
-        guard FileManager.default.isReadableFile(atPath: fromPath) else {
-            throw MSLError.invalidArgument("--from not readable: \(fromPath)")
-        }
+        try validateReadable(source)
         if let user = defaultUser, !Registry.isValidUser(user) {
             throw MSLError.invalidArgument(
                 "invalid default-user (^[a-z_][a-z0-9_-]{0,31}$): \(user)")
         }
-        let source = try classify(fromPath, bundleCompression: bundleCompression)
         return InstallPlan(
             name: name, hostname: name, source: source, sizeGiB: sizeGiB, defaultUser: defaultUser)
+    }
+
+    private static func validateReadable(_ source: InstallSource) throws {
+        let path: String
+        switch source {
+        case .image(let url), .tarball(let url, _):
+            path = url.path
+        }
+        guard FileManager.default.isReadableFile(atPath: path) else {
+            throw MSLError.invalidArgument("--from not readable: \(path)")
+        }
     }
 
     private static func classify(

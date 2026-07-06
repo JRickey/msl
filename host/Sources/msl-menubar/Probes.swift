@@ -9,6 +9,13 @@ enum InstallOutcome: Sendable {
     case failed(message: String)
 }
 
+enum InstallProgress: Sendable {
+    case message(String)
+    case catalog(CatalogDownloadProgress)
+}
+
+typealias InstallProgressHandler = @Sendable (InstallProgress) -> Void
+
 /// Off-main daemon probe. The synchronous `LocalClient` round-trip runs on a
 /// private serial queue and resolves a continuation, so the main thread never
 /// blocks on the socket.
@@ -118,21 +125,56 @@ enum FSKitAction {
 enum InstallRunner {
     private static let queue = DispatchQueue(label: "dev.msl.menubar.install.work")
 
-    static func run(home: MSLHome, bundlePath: String) async -> InstallOutcome {
+    static func run(
+        home: MSLHome, request: InstallRequest, progress: @escaping InstallProgressHandler
+    ) async -> InstallOutcome {
         await withCheckedContinuation { (cont: CheckedContinuation<InstallOutcome, Never>) in
-            queue.async { cont.resume(returning: perform(home: home, bundlePath: bundlePath)) }
+            queue.async {
+                cont.resume(returning: perform(home: home, request: request, progress: progress))
+            }
         }
     }
 
-    private static func perform(home: MSLHome, bundlePath: String) -> InstallOutcome {
-        assert(!bundlePath.isEmpty, "install bundle path must not be empty")
+    private static func perform(
+        home: MSLHome, request: InstallRequest, progress: @escaping InstallProgressHandler
+    ) -> InstallOutcome {
         do {
-            let prepared = try MenuBarInstall.prepare(bundlePath: bundlePath, home: home)
+            let prepared = try prepare(home: home, request: request, progress: progress)
+            progress(.message("Building image for \(prepared.plan.name)…"))
             let entry = try InstallDriver(home: home).install(
                 plan: prepared.plan, options: prepared.options)
+            progress(.message("Registered \(entry.name)"))
             return .installed(name: entry.name)
         } catch {
             return .failed(message: "\(error)")
+        }
+    }
+
+    private static func prepare(
+        home: MSLHome, request: InstallRequest, progress: @escaping InstallProgressHandler
+    ) throws -> MenuBarInstall.Prepared {
+        switch request {
+        case .bundle(let url):
+            progress(.message("Reading \(url.lastPathComponent)…"))
+            return try MenuBarInstall.prepare(bundlePath: url.path, home: home)
+        case .catalog(let resolved, let installedName):
+            progress(.message("Checking registry for \(installedName)…"))
+            try validateCatalogName(installedName, home: home)
+            let source = try CatalogDownloader(home: home).fetch(resolved) { event in
+                progress(.catalog(event))
+            }
+            progress(.message("Preparing \(resolved.selector)…"))
+            return try MenuBarInstall.prepare(
+                catalog: resolved, installedName: installedName, sourceURL: source, home: home)
+        }
+    }
+
+    private static func validateCatalogName(_ name: String, home: MSLHome) throws {
+        guard Registry.isValidName(name) else {
+            throw MSLError.invalidArgument("invalid distro name (^[a-z][a-z0-9-]{0,31}$): \(name)")
+        }
+        guard try Registry.load(from: home.registryURL).entry(name: name) == nil else {
+            throw MSLError.configuration("distro already registered: \(name)")
         }
     }
 }

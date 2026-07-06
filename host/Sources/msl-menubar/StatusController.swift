@@ -89,7 +89,9 @@ final class StatusController: NSObject, NSMenuDelegate {
         let stop = action(title: "Shut down", selector: #selector(shutDown))
         stop.isEnabled = model?.shutDownEnabled ?? false
         menu.addItem(stop)
-        menu.addItem(action(title: "Install distro…", selector: #selector(installDistro)))
+        menu.addItem(
+            action(title: "Install from Catalog...", selector: #selector(installFromCatalog)))
+        menu.addItem(action(title: "Install from File...", selector: #selector(installFromFile)))
         appendFinderIntegration(enabled: finderEnabled)
     }
 
@@ -124,7 +126,19 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func installDistro() {
+    @objc private func installFromCatalog() {
+        do {
+            let catalog = try Catalog.loadEmbedded()
+            if let choice = CatalogInstallPanel.choose(catalog: catalog) {
+                installer.requestCatalogInstall(
+                    resolved: choice.resolved, installedName: choice.installedName)
+            }
+        } catch {
+            Notifier.postDaemon(title: "Catalog failed", message: "\(error)")
+        }
+    }
+
+    @objc private func installFromFile() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false

@@ -29,6 +29,10 @@ public struct MSLHome: Sendable {
         root.appendingPathComponent("builder-initramfs.cpio").path
     }
     public var distrosDirectory: URL { root.appendingPathComponent("distros") }
+    public var cacheDirectory: URL { root.appendingPathComponent("cache") }
+    public var catalogCacheDirectory: URL {
+        cacheDirectory.appendingPathComponent("catalog")
+    }
     public var logsDirectory: URL { root.appendingPathComponent("logs") }
     public var registryURL: URL { root.appendingPathComponent("registry.json") }
 

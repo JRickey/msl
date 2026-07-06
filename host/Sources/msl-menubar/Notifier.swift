@@ -10,12 +10,12 @@ enum Notifier {
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    static func postInstall(result: InstallOutcome, url: URL) {
+    static func postInstall(result: InstallOutcome, displayName: String) {
         switch result {
         case .installed(let name):
-            post(title: "Installed \(name)", body: "\(url.lastPathComponent) is ready.")
+            post(title: "Installed \(name)", body: "\(displayName) is ready.")
         case .failed(let message):
-            post(title: "Install failed", body: "\(url.lastPathComponent): \(message)")
+            post(title: "Install failed", body: "\(displayName): \(message)")
         }
     }
 
