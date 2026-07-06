@@ -10,6 +10,8 @@
     <string>dev.msl.app</string>
     <key>CFBundleExecutable</key>
     <string>msl-menubar</string>
+    <key>CFBundleIconFile</key>
+    <string>msl.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>

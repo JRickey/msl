@@ -2,11 +2,20 @@
 
 This file reproduces the full license texts of third-party software statically
 linked into msl's distributed binaries — the Swift host binary (`msl`) and the
-Rust guest binaries (`msl-agent`, `mac`/msl-shim, `msl-way`). It is a
-belt-and-suspenders companion to NOTICE, which gives the short-form summary;
-this file exists so full license text is present even where NOTICE only
-names a component. See NOTICE and docs/decisions/0007-licensing.md for the
-project's overall licensing posture (msl itself is Apache-2.0).
+Rust guest binaries (`msl-agent`, `mac`/msl-shim, `msl-way`). It also records
+license metadata for third-party assets distributed with msl. It is a
+belt-and-suspenders companion to NOTICE, which gives the short-form summary.
+See NOTICE and docs/decisions/0007-licensing.md for the project's overall
+licensing posture (msl itself is Apache-2.0).
+
+The app icon includes a transformed copy of Tux:
+
+- Source: https://commons.wikimedia.org/w/index.php?curid=753970
+- Attribution: By Larry Ewing, Simon Budig, Garrett LeSage -
+  https://isc.tamu.edu/~lewing/linux/,
+  http://www.home.unix-ag.org/simon/penguin/, garrett/Tux on GitHub
+- License: CC0 1.0 Universal Public Domain Dedication
+  (https://creativecommons.org/publicdomain/zero/1.0/)
 
 Regeneration command (guest workspace's Rust dependency section only — the
 libxkbcommon and swift-argument-parser sections below are reproduced from
@@ -18,6 +27,7 @@ cargo about generate -m Cargo.toml -c about.toml --workspace \
   --target aarch64-unknown-linux-musl --locked --fail \
   ../tools/third-party-licenses.hbs -o /tmp/third-party-rust.md
 ```
+
 
 The output of that command is appended verbatim below (see "Rust
 dependencies" section). See docs/reports/notice-inventory.md for the exact
@@ -3865,4 +3875,3 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 ```
-

@@ -16,6 +16,7 @@ HOST_BIN     := $(HOST_DIR)/.build/release/msl
 MENUBAR_BIN  := $(HOST_DIR)/.build/release/msl-menubar
 APP_DIR      := $(BUILD_DIR)/msl.app
 APP_PLIST    := $(HOST_DIR)/Resources/msl-menubar/Info.plist
+APP_ICON     := $(HOST_DIR)/Resources/msl-menubar/msl.icns
 KERNEL_IMAGE := $(KERNEL_DIR)/build/Image
 INITRAMFS    := $(BUILD_DIR)/initramfs.cpio
 BUILDER_INITRAMFS := $(BUILD_DIR)/builder-initramfs.cpio
@@ -152,6 +153,7 @@ app: host sign
 	cp "$(MENUBAR_BIN)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
 	cp "$(HOST_BIN)" "$(APP_DIR)/Contents/MacOS/msl"; \
 	cp "$(APP_PLIST)" "$(APP_DIR)/Contents/Info.plist"; \
+	cp "$(APP_ICON)" "$(APP_DIR)/Contents/Resources/msl.icns"; \
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" \
 	  "$(APP_DIR)/Contents/Info.plist"; \
 	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(VERSION)" \

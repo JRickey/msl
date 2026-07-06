@@ -4,7 +4,18 @@ Copyright 2026 Jack Rickey
 Licensed under the Apache License, Version 2.0 (the "License"); see LICENSE.
 
 This product includes third-party software statically linked into its
-distributed binaries, as follows.
+distributed binaries, as follows. It also includes the bundled app artwork
+listed below.
+
+================================================================================
+Tux app icon artwork (CC0 1.0 Universal Public Domain Dedication)
+================================================================================
+
+Source: https://commons.wikimedia.org/w/index.php?curid=753970
+
+Attribution: By Larry Ewing, Simon Budig, Garrett LeSage -
+https://isc.tamu.edu/~lewing/linux/,
+http://www.home.unix-ag.org/simon/penguin/, garrett/Tux on GitHub
 
 ================================================================================
 libxkbcommon 1.7.0 (MIT/X11) — statically linked into msl-way
