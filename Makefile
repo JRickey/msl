@@ -23,6 +23,7 @@ ROOTFS_IMG   := $(BUILD_DIR)/ubuntu.img
 PKG_ROOT     := $(BUILD_DIR)/pkgroot
 PKG_COMPONENT := $(BUILD_DIR)/msl-component.pkg
 PKG_PRODUCT  := $(BUILD_DIR)/msl-$(VERSION).pkg
+PKG_COMPONENT_PLIST := packaging/component.plist
 SKILL_ARCHIVE := $(BUILD_DIR)/msl-agent-skill-$(VERSION).tar.gz
 CONSOLE_LOG  := $(BUILD_DIR)/console.log
 ENTITLEMENTS ?= entitlements/dev.entitlements
@@ -290,7 +291,8 @@ release-pkg: release-app skill-archive
 	  echo 'exec /Applications/msl.app/Contents/MacOS/msl "$$@"'; \
 	} >"$(PKG_ROOT)/usr/local/bin/msl"; \
 	chmod 0755 "$(PKG_ROOT)/usr/local/bin/msl"; \
-	pkgbuild --root "$(PKG_ROOT)" --scripts packaging/scripts \
+	pkgbuild --root "$(PKG_ROOT)" --component-plist "$(PKG_COMPONENT_PLIST)" \
+	  --scripts packaging/scripts \
 	  --identifier dev.msl.pkg --version "$(VERSION)" --install-location / \
 	  "$(PKG_COMPONENT)"; \
 	productbuild --package "$(PKG_COMPONENT)" --sign "$(RELEASE_INSTALLER_SIGN_IDENTITY)" \

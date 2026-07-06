@@ -28,7 +28,10 @@ out=$(
 	APP="$tmp/app" MSL_TEST_DRY_RUN=1 MSL_TEST_PROCESS_REPORT= \
 	MSL_TEST_MOUNT_REPORT= msl_preinstall_main
 )
-printf '%s\n' "$out" | grep -q "remove-app $tmp/app"
+[ -z "$out" ] || {
+	echo "expected no preinstall actions when msl is idle, got: $out" >&2
+	exit 1
+}
 
 if APP="$tmp/app" MSL_TEST_DRY_RUN=1 \
 	MSL_TEST_PROCESS_REPORT='123 /Applications/msl.app/Contents/MacOS/msl daemon run' \

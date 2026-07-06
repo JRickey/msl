@@ -72,16 +72,6 @@ msl_mount_report() {
 	/sbin/mount | /usr/bin/awk '/mslfs/ { print }'
 }
 
-remove_existing_app() {
-	if [ "${MSL_TEST_DRY_RUN:-0}" = "1" ]; then
-		printf 'remove-app %s\n' "$APP"
-		return 0
-	fi
-	if [ -d "$APP" ]; then
-		/bin/rm -rf "$APP"
-	fi
-}
-
 msl_preinstall_main() {
 	processes=$(msl_process_report)
 	mounts=$(msl_mount_report)
@@ -107,7 +97,6 @@ msl_preinstall_main() {
 		} >&2
 		return 1
 	fi
-	remove_existing_app
 	return 0
 }
 
