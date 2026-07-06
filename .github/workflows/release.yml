@@ -63,6 +63,7 @@ jobs:
           APP_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
           INSTALLER_CERT: ${{ secrets.DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
           INSTALLER_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}
+          APP_PROFILE: ${{ secrets.APP_DEVELOPER_ID_PROFILE_BASE64 }}
           FSKIT_PROFILE: ${{ secrets.FSKIT_DEVELOPER_ID_PROFILE_BASE64 }}
         run: |
           security create-keychain -p "$RUNNER_TEMP" release.keychain-db
@@ -83,10 +84,12 @@ jobs:
           fi
           echo "RELEASE_APP_SIGN_IDENTITY=$app_identity" >> "$GITHUB_ENV"
           echo "RELEASE_INSTALLER_SIGN_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
+          echo "$APP_PROFILE" | base64 --decode > "$RUNNER_TEMP/app.provisionprofile"
           echo "$FSKIT_PROFILE" | base64 --decode > "$RUNNER_TEMP/fskit.provisionprofile"
 
       - name: Build signed pkg
         env:
+          APP_PROVISION_PROFILE: ${{ runner.temp }}/app.provisionprofile
           FSKIT_PROVISION_PROFILE: ${{ runner.temp }}/fskit.provisionprofile
         run: |
           make release-pkg VERSION="${{ steps.version.outputs.version }}" MSL_TEAM_ID="${{ secrets.APPLE_TEAM_ID }}"

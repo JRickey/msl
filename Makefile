@@ -28,7 +28,10 @@ PKG_COMPONENT_PLIST := packaging/component.plist
 SKILL_ARCHIVE := $(BUILD_DIR)/msl-agent-skill-$(VERSION).tar.gz
 CONSOLE_LOG  := $(BUILD_DIR)/console.log
 ENTITLEMENTS ?= entitlements/dev.entitlements
+APP_ENTITLEMENTS ?= $(ENTITLEMENTS)
 RELEASE_ENTITLEMENTS := entitlements/release.entitlements
+RELEASE_APP_ENTITLEMENTS := entitlements/release-app.entitlements
+RELEASE_APP_ENT_RENDER := $(BUILD_DIR)/release-app.entitlements
 SIGN_OPTIONS ?= --timestamp=none
 RELEASE_APP_SIGN_IDENTITY ?= Developer ID Application
 RELEASE_INSTALLER_SIGN_IDENTITY ?= Developer ID Installer
@@ -60,6 +63,7 @@ FSKIT_SIGN_IDENTITY     ?= Apple Development
 # Optional: path to embedded.provisionprofile authorizing fskit.fsmodule +
 # the app group. Required for the appex to actually load, not to build/sign.
 FSKIT_PROVISION_PROFILE ?=
+APP_PROVISION_PROFILE ?=
 
 # The FSKit appex is hosted by its container app: ExtensionKit will not load an
 # extension whose container is ad-hoc signed while the extension is team signed
@@ -164,6 +168,12 @@ app: host sign
 	    /usr/libexec/PlistBuddy -c "Set :MSLTeamID $(MSL_TEAM_ID)" \
 	    "$(APP_DIR)/Contents/Info.plist"; \
 	fi; \
+	if [ -n "$(APP_PROVISION_PROFILE)" ]; then \
+	  if [ ! -f "$(APP_PROVISION_PROFILE)" ]; then \
+	    echo "app: APP_PROVISION_PROFILE=$(APP_PROVISION_PROFILE) not found" >&2; exit 1; \
+	  fi; \
+	  cp "$(APP_PROVISION_PROFILE)" "$(APP_DIR)/Contents/embedded.provisionprofile"; \
+	fi; \
 	cp LICENSE NOTICE THIRD-PARTY-LICENSES "$(APP_DIR)/Contents/Resources/"; \
 	if [ -f "$(KERNEL_IMAGE)" ]; then cp "$(KERNEL_IMAGE)" "$(APP_DIR)/Contents/Resources/kernel"; fi; \
 	if [ -f "$(INITRAMFS)" ]; then cp "$(INITRAMFS)" "$(APP_DIR)/Contents/Resources/initramfs.cpio"; fi; \
@@ -177,9 +187,9 @@ app: host sign
 	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
 	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl"; \
 	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
-	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
+	  --entitlements "$(APP_ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
 	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
-	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)"; \
+	  --entitlements "$(APP_ENTITLEMENTS)" "$(APP_DIR)"; \
 	codesign --verify --strict "$(APP_DIR)"; \
 	echo "app: assembled $(APP_DIR) (identity: $(APP_SIGN_IDENTITY))"
 
@@ -281,16 +291,50 @@ release-app:
 	if [ ! -f "$(FSKIT_PROVISION_PROFILE)" ]; then \
 	  echo "release-app: FSKIT_PROVISION_PROFILE=$(FSKIT_PROVISION_PROFILE) not found" >&2; exit 1; \
 	fi; \
+	if [ -z "$(APP_PROVISION_PROFILE)" ]; then \
+	  echo "release-app: APP_PROVISION_PROFILE is required" >&2; exit 1; \
+	fi; \
+	if [ ! -f "$(APP_PROVISION_PROFILE)" ]; then \
+	  echo "release-app: APP_PROVISION_PROFILE=$(APP_PROVISION_PROFILE) not found" >&2; exit 1; \
+	fi; \
 	if [ -z "$(MSL_TEAM_ID)" ]; then \
 	  echo "release-app: MSL_TEAM_ID is required" >&2; exit 1; \
 	fi; \
 	$(MAKE) release-runtime; \
+	mkdir -p "$(BUILD_DIR)"; \
+	cp "$(RELEASE_APP_ENTITLEMENTS)" "$(RELEASE_APP_ENT_RENDER)"; \
+	/usr/libexec/PlistBuddy -c \
+	  "Set :com.apple.security.application-groups:0 $(MSL_APP_GROUP_ID)" \
+	  "$(RELEASE_APP_ENT_RENDER)"; \
+	/usr/libexec/PlistBuddy -c \
+	  "Add :com.apple.application-identifier string $(MSL_TEAM_ID).dev.msl.app" \
+	  "$(RELEASE_APP_ENT_RENDER)" 2>/dev/null || \
+	  /usr/libexec/PlistBuddy -c \
+	  "Set :com.apple.application-identifier $(MSL_TEAM_ID).dev.msl.app" \
+	  "$(RELEASE_APP_ENT_RENDER)"; \
+	/usr/libexec/PlistBuddy -c \
+	  "Add :com.apple.developer.team-identifier string $(MSL_TEAM_ID)" \
+	  "$(RELEASE_APP_ENT_RENDER)" 2>/dev/null || \
+	  /usr/libexec/PlistBuddy -c \
+	  "Set :com.apple.developer.team-identifier $(MSL_TEAM_ID)" \
+	  "$(RELEASE_APP_ENT_RENDER)"; \
+	/usr/libexec/PlistBuddy -c \
+	  "Add :com.apple.security.application-groups:1 string $(MSL_TEAM_ID).*" \
+	  "$(RELEASE_APP_ENT_RENDER)" 2>/dev/null || true; \
+	/usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" \
+	  "$(RELEASE_APP_ENT_RENDER)" 2>/dev/null || true; \
+	/usr/libexec/PlistBuddy -c \
+	  "Add :keychain-access-groups:0 string $(MSL_TEAM_ID).*" \
+	  "$(RELEASE_APP_ENT_RENDER)" 2>/dev/null || true; \
+	plutil -lint "$(RELEASE_APP_ENT_RENDER)"; \
 	$(MAKE) app \
 	  ENTITLEMENTS="$(RELEASE_ENTITLEMENTS)" \
+	  APP_ENTITLEMENTS="$(RELEASE_APP_ENT_RENDER)" \
 	  SIGN_OPTIONS="--options runtime --timestamp" \
 	  APP_SIGN_IDENTITY="$(RELEASE_APP_SIGN_IDENTITY)" \
 	  FSKIT_SIGN_IDENTITY="$(RELEASE_APP_SIGN_IDENTITY)" \
 	  MSL_TEAM_ID="$(MSL_TEAM_ID)" \
+	  APP_PROVISION_PROFILE="$(APP_PROVISION_PROFILE)" \
 	  FSKIT_PROVISION_PROFILE="$(FSKIT_PROVISION_PROFILE)"; \
 	for f in \
 	  "$(APP_DIR)/Contents/MacOS/msl" \
