@@ -21,7 +21,7 @@ final class FSHelloTests: XCTestCase {
     }
 
     func testHelloRejectsWrongOp() {
-        let bytes = Data(#"{"v":1,"op":"route","distro":"u","mount_id":"a","nonce":"b"}"#.utf8)
+        let bytes = Data(#"{"v":2,"op":"route","distro":"u","mount_id":"a","nonce":"b"}"#.utf8)
         XCTAssertThrowsError(try FSHello.decode(bytes))
     }
 
@@ -31,7 +31,7 @@ final class FSHelloTests: XCTestCase {
     }
 
     func testHelloRejectsMissingFields() {
-        let bytes = Data(#"{"v":1,"op":"hello","distro":"","mount_id":"a","nonce":"b"}"#.utf8)
+        let bytes = Data(#"{"v":2,"op":"hello","distro":"","mount_id":"a","nonce":"b"}"#.utf8)
         XCTAssertThrowsError(try FSHello.decode(bytes))
     }
 
@@ -49,6 +49,7 @@ final class FSHelloTests: XCTestCase {
         XCTAssertTrue(json.contains("\"op\":\"fs_open\""), json)
         XCTAssertTrue(json.contains("\"v\":\(FSProto.version)"), json)
         XCTAssertTrue(json.contains("\"distro\":\"ubuntu\""), json)
+        XCTAssertTrue(json.contains("\"readonly\":true"), json)
         let decoded = try JSONDecoder().decode(FSGuestOpen.self, from: data)
         XCTAssertEqual(decoded, FSGuestOpen(distro: "ubuntu"))
     }

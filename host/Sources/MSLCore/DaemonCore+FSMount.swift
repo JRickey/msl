@@ -160,7 +160,7 @@ extension DaemonCore {
         assert(fd >= 0, "connectRaw returns a valid fd or throws")
         let framed = try VsockClient(fileDescriptor: fd)
         try framed.setReceiveTimeout(seconds: timeout)
-        try framed.send(try FSGuestOpen(distro: hello.distro).encoded())
+        try framed.send(try FSGuestOpen(distro: hello.distro, readonly: hello.readonly).encoded())
         let reply = try DataHandshakeReply.decode(try framed.receive())
         guard reply.ok else {
             framed.close()

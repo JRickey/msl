@@ -113,6 +113,12 @@ pub struct FsOpenHello {
     pub v: u32,
     pub op: String,
     pub distro: String,
+    #[serde(default = "default_true")]
+    pub readonly: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -229,11 +235,12 @@ mod tests {
     #[test]
     fn fs_open_hello_parses_daemon_frame() {
         let hello: FsOpenHello =
-            serde_json::from_slice(br#"{"v":1,"op":"fs_open","distro":"ubuntu"}"#)
+            serde_json::from_slice(br#"{"v":2,"op":"fs_open","distro":"ubuntu","readonly":true}"#)
                 .expect("valid fs_open frame");
-        assert_eq!(hello.v, 1);
+        assert_eq!(hello.v, 2);
         assert_eq!(hello.op, "fs_open");
         assert_eq!(hello.distro, "ubuntu");
+        assert!(hello.readonly);
     }
 
     #[test]
@@ -243,11 +250,12 @@ mod tests {
         let hello: FsOpenHello =
             serde_json::from_slice(br#"{"op":"fs_open","distro":"ubuntu"}"#).expect("parses");
         assert_eq!(hello.v, 0);
+        assert!(hello.readonly);
     }
 
     #[test]
     fn fs_open_hello_requires_distro() {
-        let err = serde_json::from_slice::<FsOpenHello>(br#"{"v":1,"op":"fs_open"}"#);
+        let err = serde_json::from_slice::<FsOpenHello>(br#"{"v":2,"op":"fs_open"}"#);
         assert!(err.is_err(), "missing distro must fail to parse");
     }
 }

@@ -13,17 +13,27 @@ public struct FSGuestOpen: Codable, Equatable, Sendable {
     public let version: Int
     public let op: String
     public let distro: String
+    public let readonly: Bool
 
     enum CodingKeys: String, CodingKey {
-        case op, distro
+        case op, distro, readonly
         case version = "v"
     }
 
-    public init(distro: String) {
+    public init(distro: String, readonly: Bool = true) {
         precondition(!distro.isEmpty, "fs_open distro must not be empty")
         self.version = FSProto.version
         self.op = "fs_open"
         self.distro = distro
+        self.readonly = readonly
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decode(Int.self, forKey: .version)
+        self.op = try container.decode(String.self, forKey: .op)
+        self.distro = try container.decode(String.self, forKey: .distro)
+        self.readonly = try container.decodeIfPresent(Bool.self, forKey: .readonly) ?? true
     }
 
     public func encoded() throws -> Data {

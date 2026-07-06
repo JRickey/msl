@@ -26,6 +26,16 @@ public struct FSHello: Codable, Equatable, Sendable {
         self.readonly = readonly
     }
 
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decode(Int.self, forKey: .version)
+        self.op = try container.decode(String.self, forKey: .op)
+        self.distro = try container.decode(String.self, forKey: .distro)
+        self.mountID = try container.decode(String.self, forKey: .mountID)
+        self.nonce = try container.decode(String.self, forKey: .nonce)
+        self.readonly = try container.decodeIfPresent(Bool.self, forKey: .readonly) ?? true
+    }
+
     /// Encode to a framed JSON payload, enforcing the shared frame bound.
     public func encoded() throws -> Data {
         let data = try JSONEncoder().encode(self)

@@ -1,17 +1,19 @@
-//! `FSKit` file-service protocol v1: the compact binary request/reply codec.
+//! `FSKit` file-service protocol v2: the compact binary request/reply codec.
 //!
 //! Shared by the host appex (Swift `MSLCore/FSProto.swift`) and the guest
 //! `msl-fsd` worker. All integers are little-endian; strings are `u16`-length-
-//! prefixed UTF-8; read data is a `u32`-length-prefixed blob. See
+//! prefixed UTF-8; data blobs are `u32`-length-prefixed. See
 //! `docs/specs/fskit-file-protocol.md`. Golden vectors keep both sides
 //! identical.
 
 use std::string::FromUtf8Error;
 
 /// Wire version negotiated once in the guest hello, not per message.
-pub const FS_PROTOCOL_VERSION: u32 = 1;
-/// Single `read` reply data cap in v1 (the frame cap stays 4 MiB).
+pub const FS_PROTOCOL_VERSION: u32 = 2;
+/// Single `read` reply data cap (the frame cap stays 4 MiB).
 pub const MAX_READ_REPLY: usize = 1 << 20;
+/// Single `write` request data cap.
+pub const MAX_WRITE_REQUEST: usize = 1 << 20;
 /// Maximum encodable string byte length (u16 prefix).
 pub const MAX_STRING: usize = u16::MAX as usize;
 
@@ -83,6 +85,13 @@ impl Writer {
         self.buf.extend_from_slice(value);
         Ok(())
     }
+    fn bounded_blob(&mut self, value: &[u8], max: usize) -> Result<(), EncodeError> {
+        let len = value.len();
+        if len > max {
+            return Err(EncodeError::BlobTooLong(len));
+        }
+        self.blob(value)
+    }
 }
 
 /// Little-endian byte reader with bounds checks and a final trailing-byte check.
@@ -147,9 +156,9 @@ impl<'a> Reader<'a> {
         let bytes = self.take(len)?;
         Ok(String::from_utf8(bytes.to_vec())?)
     }
-    fn blob(&mut self) -> Result<Vec<u8>, DecodeError> {
+    fn blob(&mut self, max: usize) -> Result<Vec<u8>, DecodeError> {
         let len = self.u32()? as usize;
-        if len > MAX_READ_REPLY {
+        if len > max {
             return Err(DecodeError::OversizeBlob(len));
         }
         Ok(self.take(len)?.to_vec())
@@ -324,6 +333,60 @@ impl Statfs {
     }
 }
 
+pub const SETATTR_MODE: u32 = 0x0001;
+pub const SETATTR_UID: u32 = 0x0002;
+pub const SETATTR_GID: u32 = 0x0004;
+pub const SETATTR_SIZE: u32 = 0x0008;
+pub const SETATTR_ATIME: u32 = 0x0010;
+pub const SETATTR_MTIME: u32 = 0x0020;
+pub const SETATTR_FLAGS: u32 = 0x0040;
+
+/// Attribute update mask and values for setattr/truncate requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SetAttr {
+    pub mask: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub atime: Timespec,
+    pub mtime: Timespec,
+    pub flags: u32,
+}
+
+impl SetAttr {
+    fn write(&self, writer: &mut Writer) {
+        writer.u32(self.mask);
+        writer.u32(self.mode);
+        writer.u32(self.uid);
+        writer.u32(self.gid);
+        writer.u64(self.size);
+        writer.i64(self.atime.sec);
+        writer.u32(self.atime.nsec);
+        writer.i64(self.mtime.sec);
+        writer.u32(self.mtime.nsec);
+        writer.u32(self.flags);
+    }
+    fn read(reader: &mut Reader) -> Result<Self, DecodeError> {
+        Ok(Self {
+            mask: reader.u32()?,
+            mode: reader.u32()?,
+            uid: reader.u32()?,
+            gid: reader.u32()?,
+            size: reader.u64()?,
+            atime: Timespec {
+                sec: reader.i64()?,
+                nsec: reader.u32()?,
+            },
+            mtime: Timespec {
+                sec: reader.i64()?,
+                nsec: reader.u32()?,
+            },
+            flags: reader.u32()?,
+        })
+    }
+}
+
 /// One readdirplus entry: name plus full attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
@@ -369,6 +432,48 @@ pub enum Request {
     },
     Sync,
     Close,
+    Write {
+        node: u64,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Setattr {
+        node: u64,
+        setattr: SetAttr,
+    },
+    Create {
+        parent: u64,
+        name: String,
+        item_type: ItemType,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    },
+    Symlink {
+        parent: u64,
+        name: String,
+        target: String,
+        uid: u32,
+        gid: u32,
+    },
+    Link {
+        node: u64,
+        new_parent: u64,
+        new_name: String,
+    },
+    Remove {
+        parent: u64,
+        name: String,
+        item_type: ItemType,
+    },
+    Rename {
+        node: u64,
+        src_parent: u64,
+        src_name: String,
+        dst_parent: u64,
+        dst_name: String,
+        flags: u8,
+    },
 }
 
 impl Request {
@@ -386,6 +491,13 @@ impl Request {
             Self::Reclaim { .. } => 9,
             Self::Sync => 10,
             Self::Close => 11,
+            Self::Write { .. } => 12,
+            Self::Setattr { .. } => 13,
+            Self::Create { .. } => 14,
+            Self::Symlink { .. } => 15,
+            Self::Link { .. } => 16,
+            Self::Remove { .. } => 17,
+            Self::Rename { .. } => 18,
         }
     }
 }
@@ -443,7 +555,170 @@ impl RequestFrame {
             }
             Request::CloseFile { handle } => writer.u64(*handle),
             Request::Readlink { node } | Request::Reclaim { node } => writer.u64(*node),
+            _ => Self::write_mutation_args(writer, &self.request)?,
         }
+        Ok(())
+    }
+
+    fn write_mutation_args(writer: &mut Writer, request: &Request) -> Result<(), EncodeError> {
+        match request {
+            Request::Write { node, offset, data } => {
+                Self::write_write_args(writer, *node, *offset, data)?;
+            }
+            Request::Setattr { node, setattr } => {
+                Self::write_setattr_args(writer, *node, *setattr);
+            }
+            Request::Create {
+                parent,
+                name,
+                item_type,
+                mode,
+                uid,
+                gid,
+            } => {
+                Self::write_create_args(writer, *parent, name, *item_type, *mode, *uid, *gid)?;
+            }
+            _ => Self::write_name_mutation_args(writer, request)?,
+        }
+        Ok(())
+    }
+
+    fn write_name_mutation_args(writer: &mut Writer, request: &Request) -> Result<(), EncodeError> {
+        match request {
+            Request::Symlink {
+                parent,
+                name,
+                target,
+                uid,
+                gid,
+            } => {
+                Self::write_symlink_args(writer, *parent, name, target, *uid, *gid)?;
+            }
+            Request::Link {
+                node,
+                new_parent,
+                new_name,
+            } => {
+                Self::write_link_args(writer, *node, *new_parent, new_name)?;
+            }
+            Request::Remove {
+                parent,
+                name,
+                item_type,
+            } => {
+                Self::write_remove_args(writer, *parent, name, *item_type)?;
+            }
+            Request::Rename {
+                node,
+                src_parent,
+                src_name,
+                dst_parent,
+                dst_name,
+                flags,
+            } => {
+                Self::write_rename_args(
+                    writer,
+                    *node,
+                    *src_parent,
+                    src_name,
+                    *dst_parent,
+                    dst_name,
+                    *flags,
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn write_write_args(
+        writer: &mut Writer,
+        node: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), EncodeError> {
+        writer.u64(node);
+        writer.u64(offset);
+        writer.bounded_blob(data, MAX_WRITE_REQUEST)
+    }
+
+    fn write_setattr_args(writer: &mut Writer, node: u64, setattr: SetAttr) {
+        writer.u64(node);
+        setattr.write(writer);
+    }
+
+    fn write_create_args(
+        writer: &mut Writer,
+        parent: u64,
+        name: &str,
+        item_type: ItemType,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), EncodeError> {
+        writer.u64(parent);
+        writer.string(name)?;
+        writer.u8(item_type.to_u8());
+        writer.u32(mode);
+        writer.u32(uid);
+        writer.u32(gid);
+        Ok(())
+    }
+
+    fn write_symlink_args(
+        writer: &mut Writer,
+        parent: u64,
+        name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), EncodeError> {
+        writer.u64(parent);
+        writer.string(name)?;
+        writer.string(target)?;
+        writer.u32(uid);
+        writer.u32(gid);
+        Ok(())
+    }
+
+    fn write_link_args(
+        writer: &mut Writer,
+        node: u64,
+        new_parent: u64,
+        new_name: &str,
+    ) -> Result<(), EncodeError> {
+        writer.u64(node);
+        writer.u64(new_parent);
+        writer.string(new_name)
+    }
+
+    fn write_remove_args(
+        writer: &mut Writer,
+        parent: u64,
+        name: &str,
+        item_type: ItemType,
+    ) -> Result<(), EncodeError> {
+        writer.u64(parent);
+        writer.string(name)?;
+        writer.u8(item_type.to_u8());
+        Ok(())
+    }
+
+    fn write_rename_args(
+        writer: &mut Writer,
+        node: u64,
+        src_parent: u64,
+        src_name: &str,
+        dst_parent: u64,
+        dst_name: &str,
+        flags: u8,
+    ) -> Result<(), EncodeError> {
+        writer.u64(node);
+        writer.u64(src_parent);
+        writer.string(src_name)?;
+        writer.u64(dst_parent);
+        writer.string(dst_name)?;
+        writer.u8(flags);
         Ok(())
     }
 
@@ -457,6 +732,14 @@ impl RequestFrame {
     }
 
     fn read_request(op: u8, reader: &mut Reader) -> Result<Request, DecodeError> {
+        match op {
+            1..=11 => Self::read_legacy_request(op, reader),
+            12..=18 => Self::read_mutation_request(op, reader),
+            other => Err(DecodeError::BadOp(other)),
+        }
+    }
+
+    fn read_legacy_request(op: u8, reader: &mut Reader) -> Result<Request, DecodeError> {
         match op {
             1 => Ok(Request::Statfs),
             2 => Ok(Request::Lookup {
@@ -496,6 +779,54 @@ impl RequestFrame {
             other => Err(DecodeError::BadOp(other)),
         }
     }
+
+    fn read_mutation_request(op: u8, reader: &mut Reader) -> Result<Request, DecodeError> {
+        match op {
+            12 => Ok(Request::Write {
+                node: reader.u64()?,
+                offset: reader.u64()?,
+                data: reader.blob(MAX_WRITE_REQUEST)?,
+            }),
+            13 => Ok(Request::Setattr {
+                node: reader.u64()?,
+                setattr: SetAttr::read(reader)?,
+            }),
+            14 => Ok(Request::Create {
+                parent: reader.u64()?,
+                name: reader.string()?,
+                item_type: ItemType::from_u8(reader.u8()?)?,
+                mode: reader.u32()?,
+                uid: reader.u32()?,
+                gid: reader.u32()?,
+            }),
+            15 => Ok(Request::Symlink {
+                parent: reader.u64()?,
+                name: reader.string()?,
+                target: reader.string()?,
+                uid: reader.u32()?,
+                gid: reader.u32()?,
+            }),
+            16 => Ok(Request::Link {
+                node: reader.u64()?,
+                new_parent: reader.u64()?,
+                new_name: reader.string()?,
+            }),
+            17 => Ok(Request::Remove {
+                parent: reader.u64()?,
+                name: reader.string()?,
+                item_type: ItemType::from_u8(reader.u8()?)?,
+            }),
+            18 => Ok(Request::Rename {
+                node: reader.u64()?,
+                src_parent: reader.u64()?,
+                src_name: reader.string()?,
+                dst_parent: reader.u64()?,
+                dst_name: reader.string()?,
+                flags: reader.u8()?,
+            }),
+            other => Err(DecodeError::BadOp(other)),
+        }
+    }
 }
 
 /// A successful reply body, tagged by the request op it answers.
@@ -517,6 +848,10 @@ pub enum ReplyBody {
     },
     Readlink {
         target: String,
+    },
+    Write {
+        count: u32,
+        attr: Attr,
     },
     Empty,
 }
@@ -594,6 +929,10 @@ impl ReplyFrame {
                 writer.u8(u8::from(*eof));
             }
             ReplyBody::Readlink { target } => writer.string(target)?,
+            ReplyBody::Write { count, attr } => {
+                writer.u32(*count);
+                attr.write(writer);
+            }
             ReplyBody::Empty => {}
         }
         Ok(())
@@ -619,19 +958,23 @@ impl ReplyFrame {
     fn read_body(op: u8, reader: &mut Reader) -> Result<ReplyBody, DecodeError> {
         match op {
             1 => Ok(ReplyBody::Statfs(Statfs::read(reader)?)),
-            2 | 3 => Ok(ReplyBody::Attr(Attr::read(reader)?)),
+            2 | 3 | 13 | 14 | 15 | 16 | 18 => Ok(ReplyBody::Attr(Attr::read(reader)?)),
             4 => Self::read_readdirplus(reader),
             5 => Ok(ReplyBody::Open {
                 handle: reader.u64()?,
             }),
             6 => Ok(ReplyBody::Read {
-                data: reader.blob()?,
+                data: reader.blob(MAX_READ_REPLY)?,
                 eof: reader.u8()? != 0,
             }),
             8 => Ok(ReplyBody::Readlink {
                 target: reader.string()?,
             }),
-            7 | 9 | 10 | 11 => Ok(ReplyBody::Empty),
+            12 => Ok(ReplyBody::Write {
+                count: reader.u32()?,
+                attr: Attr::read(reader)?,
+            }),
+            7 | 9 | 10 | 11 | 17 => Ok(ReplyBody::Empty),
             other => Err(DecodeError::BadOp(other)),
         }
     }
@@ -689,9 +1032,42 @@ mod tests {
         }
     }
 
+    fn sample_setattr() -> SetAttr {
+        SetAttr {
+            mask: SETATTR_MODE | SETATTR_SIZE | SETATTR_MTIME,
+            mode: 0o100_600,
+            size: 99,
+            mtime: Timespec {
+                sec: 1_700_000_100,
+                nsec: 444,
+            },
+            ..SetAttr::default()
+        }
+    }
+
     #[test]
-    fn request_round_trip_all_ops() {
-        let requests = [
+    fn request_round_trip_read_ops() {
+        assert_request_round_trips(read_requests());
+    }
+
+    #[test]
+    fn request_round_trip_mutation_ops() {
+        assert_request_round_trips(mutation_requests());
+    }
+
+    fn assert_request_round_trips(requests: Vec<Request>) {
+        for (index, request) in requests.into_iter().enumerate() {
+            let frame = RequestFrame {
+                id: index as u64 + 1,
+                request,
+            };
+            let bytes = frame.encode().expect("encode");
+            assert_eq!(RequestFrame::decode(&bytes).expect("decode"), frame);
+        }
+    }
+
+    fn read_requests() -> Vec<Request> {
+        vec![
             Request::Statfs,
             Request::Lookup {
                 parent: 1,
@@ -715,20 +1091,76 @@ mod tests {
             Request::Reclaim { node: 5 },
             Request::Sync,
             Request::Close,
-        ];
-        for (index, request) in requests.into_iter().enumerate() {
-            let frame = RequestFrame {
-                id: index as u64 + 1,
-                request,
-            };
-            let bytes = frame.encode().expect("encode");
-            assert_eq!(RequestFrame::decode(&bytes).expect("decode"), frame);
-        }
+        ]
+    }
+
+    fn mutation_requests() -> Vec<Request> {
+        vec![
+            Request::Write {
+                node: 5,
+                offset: 4096,
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+            },
+            Request::Setattr {
+                node: 5,
+                setattr: sample_setattr(),
+            },
+            Request::Create {
+                parent: 1,
+                name: "created".into(),
+                item_type: ItemType::File,
+                mode: 0o100_644,
+                uid: 1000,
+                gid: 1000,
+            },
+            Request::Symlink {
+                parent: 1,
+                name: "link".into(),
+                target: "target".into(),
+                uid: 1000,
+                gid: 1000,
+            },
+            Request::Link {
+                node: 5,
+                new_parent: 1,
+                new_name: "hard".into(),
+            },
+            Request::Remove {
+                parent: 1,
+                name: "created".into(),
+                item_type: ItemType::File,
+            },
+            Request::Rename {
+                node: 5,
+                src_parent: 1,
+                src_name: "old".into(),
+                dst_parent: 2,
+                dst_name: "new".into(),
+                flags: 1,
+            },
+        ]
     }
 
     #[test]
-    fn reply_round_trip_bodies() {
-        let bodies = [
+    fn reply_round_trip_read_bodies() {
+        assert_reply_round_trips(read_reply_bodies());
+    }
+
+    #[test]
+    fn reply_round_trip_mutation_bodies() {
+        assert_reply_round_trips(mutation_reply_bodies());
+    }
+
+    fn assert_reply_round_trips(bodies: Vec<(u8, ReplyBody)>) {
+        for (op, body) in bodies {
+            let frame = ReplyFrame::ok(7, op, body);
+            let bytes = frame.encode().expect("encode");
+            assert_eq!(ReplyFrame::decode(&bytes).expect("decode"), frame);
+        }
+    }
+
+    fn read_reply_bodies() -> Vec<(u8, ReplyBody)> {
+        vec![
             (
                 1u8,
                 ReplyBody::Statfs(Statfs {
@@ -768,12 +1200,25 @@ mod tests {
                 },
             ),
             (7u8, ReplyBody::Empty),
-        ];
-        for (op, body) in bodies {
-            let frame = ReplyFrame::ok(7, op, body);
-            let bytes = frame.encode().expect("encode");
-            assert_eq!(ReplyFrame::decode(&bytes).expect("decode"), frame);
-        }
+        ]
+    }
+
+    fn mutation_reply_bodies() -> Vec<(u8, ReplyBody)> {
+        vec![
+            (
+                12u8,
+                ReplyBody::Write {
+                    count: 4,
+                    attr: sample_attr(),
+                },
+            ),
+            (13u8, ReplyBody::Attr(sample_attr())),
+            (14u8, ReplyBody::Attr(sample_attr())),
+            (15u8, ReplyBody::Attr(sample_attr())),
+            (16u8, ReplyBody::Attr(sample_attr())),
+            (17u8, ReplyBody::Empty),
+            (18u8, ReplyBody::Attr(sample_attr())),
+        ]
     }
 
     #[test]
@@ -839,22 +1284,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn write_blob_rejects_oversize() {
+        let mut writer = Writer::new();
+        writer.u8(12);
+        writer.u64(1);
+        writer.u64(5);
+        writer.u64(0);
+        writer.u32(u32::try_from(MAX_WRITE_REQUEST + 1).unwrap());
+        assert_eq!(
+            RequestFrame::decode(&writer.buf),
+            Err(DecodeError::OversizeBlob(MAX_WRITE_REQUEST + 1))
+        );
+    }
+
     // Golden vector shared byte-for-byte with the Swift FSProtoTests suite. A
     // getattr reply (id 7, op 3, errno 0) carrying `sample_attr()`.
     #[test]
     fn getattr_reply_golden_vector() {
-        use std::fmt::Write as _;
         let frame = ReplyFrame::ok(7, 3, ReplyBody::Attr(sample_attr()));
         let bytes = frame.encode().expect("encode");
-        let mut hex = String::new();
-        for byte in &bytes {
-            write!(hex, "{byte:02x}").expect("write hex");
+        assert_eq!(hex(&bytes), GETATTR_GOLDEN_HEX);
+    }
+
+    #[test]
+    fn write_request_golden_vector() {
+        let frame = RequestFrame {
+            id: 42,
+            request: Request::Write {
+                node: 5,
+                offset: 4096,
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+            },
+        };
+        let bytes = frame.encode().expect("encode");
+        assert_eq!(hex(&bytes), WRITE_REQUEST_GOLDEN_HEX);
+    }
+
+    #[test]
+    fn write_reply_golden_vector() {
+        let frame = ReplyFrame::ok(
+            42,
+            12,
+            ReplyBody::Write {
+                count: 4,
+                attr: sample_attr(),
+            },
+        );
+        let bytes = frame.encode().expect("encode");
+        assert_eq!(hex(&bytes), WRITE_REPLY_GOLDEN_HEX);
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut value = String::new();
+        for byte in bytes {
+            write!(value, "{byte:02x}").expect("write hex");
         }
-        assert_eq!(hex, GETATTR_GOLDEN_HEX);
+        value
     }
 
     const GETATTR_GOLDEN_HEX: &str = concat!(
         "0700000000000000030000000005000000000000009210000000000000",
+        "010000000000000001a4810000e8030000e803000001000000393000000",
+        "0000000004000000000000000f15365000000006f00000001f153650000",
+        "0000de00000002f15365000000004d01000000000000",
+    );
+    const WRITE_REQUEST_GOLDEN_HEX: &str =
+        "0c2a000000000000000500000000000000001000000000000004000000deadbeef";
+    const WRITE_REPLY_GOLDEN_HEX: &str = concat!(
+        "2a000000000000000c000000000400000005000000000000009210000000000000",
         "010000000000000001a4810000e8030000e803000001000000393000000",
         "0000000004000000000000000f15365000000006f00000001f153650000",
         "0000de00000002f15365000000004d01000000000000",

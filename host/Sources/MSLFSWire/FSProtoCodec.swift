@@ -20,9 +20,12 @@ struct FSWriter {
         bytes.append(contentsOf: utf8)
     }
 
-    mutating func blob(_ value: [UInt8]) throws {
+    mutating func blob(_ value: [UInt8], max: Int? = nil) throws {
         guard value.count <= Int(UInt32.max) else {
             throw FSProto.WireError.oversizeBlob(value.count)
+        }
+        if let max {
+            guard value.count <= max else { throw FSProto.WireError.oversizeBlob(value.count) }
         }
         u32(UInt32(value.count))
         bytes.append(contentsOf: value)
@@ -84,14 +87,38 @@ struct FSReader {
         return value
     }
 
-    mutating func blob() throws -> [UInt8] {
+    mutating func blob(max: Int) throws -> [UInt8] {
         let count = Int(try u32())
-        guard count <= FSProto.readReplyMax else { throw FSProto.WireError.oversizeBlob(count) }
+        guard count <= max else { throw FSProto.WireError.oversizeBlob(count) }
         return Array(try take(count))
     }
 
     func finish() throws {
         guard pos == bytes.count else { throw FSProto.WireError.trailingBytes }
+    }
+}
+
+extension FSProto.SetAttr {
+    func write(into writer: inout FSWriter) {
+        writer.u32(mask)
+        writer.u32(mode)
+        writer.u32(uid)
+        writer.u32(gid)
+        writer.u64(size)
+        writer.i64(atime.sec)
+        writer.u32(atime.nsec)
+        writer.i64(mtime.sec)
+        writer.u32(mtime.nsec)
+        writer.u32(flags)
+    }
+
+    static func read(from reader: inout FSReader) throws -> FSProto.SetAttr {
+        FSProto.SetAttr(
+            mask: try reader.u32(), mode: try reader.u32(), uid: try reader.u32(),
+            gid: try reader.u32(), size: try reader.u64(),
+            atime: FSProto.Timespec(sec: try reader.i64(), nsec: try reader.u32()),
+            mtime: FSProto.Timespec(sec: try reader.i64(), nsec: try reader.u32()),
+            flags: try reader.u32())
     }
 }
 

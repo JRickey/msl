@@ -6,7 +6,7 @@ import Foundation
 /// Virtualization dependency so the appex can link it without pulling in the VMM.
 public enum FSProto {
     /// File-service protocol version, independent of the guest control protocol.
-    public static let version = 1
+    public static let version = 2
 
     /// Daemon <-> guest file-service vsock port, one connection per volume.
     public static let vsockPort: UInt32 = 5030
@@ -20,8 +20,11 @@ public enum FSProto {
     public static let shortName = "mslfs"
     public static let scheme = "msl"
 
-    /// Single `read` reply cap in v1.
+    /// Single `read` reply cap.
     public static let readReplyCap = 1 * 1024 * 1024
+
+    /// Single `write` request data cap.
+    public static let writeRequestCap = 1 * 1024 * 1024
 
     /// JSON control-frame (hello/reply) ceiling, matching the byte splice's
     /// 4 MiB frame cap; the daemon relays raw bytes after the hello/reply.

@@ -62,6 +62,13 @@ impl<B: Backend> Server<B> {
             Request::Readlink { node } => self.readlink(*node),
             Request::Reclaim { node } => Ok(self.reclaim(*node)),
             Request::Sync | Request::Close => Ok(ReplyBody::Empty),
+            Request::Write { .. }
+            | Request::Setattr { .. }
+            | Request::Create { .. }
+            | Request::Symlink { .. }
+            | Request::Link { .. }
+            | Request::Remove { .. }
+            | Request::Rename { .. } => Err(libc::EROFS),
         }
     }
 
@@ -160,7 +167,7 @@ mod tests {
     use super::Server;
     use crate::backend::{Backend, DirItem, Handle};
     use crate::stat::Stat;
-    use msl_wire::fs::{ReplyBody, Request, RequestFrame, Statfs};
+    use msl_wire::fs::{ItemType, ReplyBody, Request, RequestFrame, SetAttr, Statfs};
 
     enum Kind {
         Dir(Vec<usize>),
@@ -585,6 +592,58 @@ mod tests {
             ),
             libc::ESTALE
         );
+    }
+
+    #[test]
+    fn mutation_ops_return_erofs() {
+        let mut srv = server(sample());
+        let requests = vec![
+            Request::Write {
+                node: 2,
+                offset: 0,
+                data: b"x".to_vec(),
+            },
+            Request::Setattr {
+                node: 2,
+                setattr: SetAttr::default(),
+            },
+            Request::Create {
+                parent: 1,
+                name: "new".into(),
+                item_type: ItemType::File,
+                mode: 0o100_644,
+                uid: 0,
+                gid: 0,
+            },
+            Request::Symlink {
+                parent: 1,
+                name: "sym".into(),
+                target: "os".into(),
+                uid: 0,
+                gid: 0,
+            },
+            Request::Link {
+                node: 2,
+                new_parent: 1,
+                new_name: "hard".into(),
+            },
+            Request::Remove {
+                parent: 1,
+                name: "os".into(),
+                item_type: ItemType::File,
+            },
+            Request::Rename {
+                node: 2,
+                src_parent: 1,
+                src_name: "os".into(),
+                dst_parent: 1,
+                dst_name: "renamed".into(),
+                flags: 0,
+            },
+        ];
+        for request in requests {
+            assert_eq!(call_err(&mut srv, request), libc::EROFS);
+        }
     }
 
     // Root holds `count` sibling files, exceeding the fd cache so a full browse

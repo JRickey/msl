@@ -30,7 +30,7 @@ const MAX_FS_CONNS: usize = 32;
 const HELLO_TIMEOUT_SECS: u32 = 10;
 // fs-service protocol version (FSProto.version on the host), independent of the
 // control PROTOCOL_VERSION.
-const FS_PROTOCOL_VERSION: u32 = 1;
+const FS_PROTOCOL_VERSION: u32 = 2;
 // msl-fsd inside a distro: the initramfs /tools bind mount (same as mac-binfmt).
 const FSD_GUEST_PATH: &str = "/run/msl/tools/msl-fsd";
 const IDLE_POLL: Duration = Duration::from_millis(100);
@@ -351,7 +351,11 @@ fn spawn_fs_worker(
         leader
     };
     assert!(leader > 0, "fsd leader pid must be positive");
-    log::info(&format!("fs worker up for '{}' pid {leader}", hello.distro));
+    let mode = if hello.readonly { "ro" } else { "rw" };
+    log::info(&format!(
+        "fs worker up for '{}' pid {leader} mode {mode}",
+        hello.distro
+    ));
     Ok(())
 }
 

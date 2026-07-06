@@ -60,6 +60,49 @@ extension FSProto {
                 writer.u32(length)
             case .closeFile(let handle): writer.u64(handle)
             case .readlink(let node), .reclaim(let node): writer.u64(node)
+            default: try writeMutationArgs(into: &writer)
+            }
+        }
+
+        private func writeMutationArgs(into writer: inout FSWriter) throws {
+            switch request {
+            case .write(let node, let offset, let data):
+                writer.u64(node)
+                writer.u64(offset)
+                try writer.blob(data, max: FSProto.writeRequestMax)
+            case .setattr(let node, let setattr):
+                writer.u64(node)
+                setattr.write(into: &writer)
+            case .create(let parent, let name, let itemType, let mode, let uid, let gid):
+                writer.u64(parent)
+                try writer.string(name)
+                writer.u8(itemType.rawValue)
+                writer.u32(mode)
+                writer.u32(uid)
+                writer.u32(gid)
+            case .symlink(let parent, let name, let target, let uid, let gid):
+                writer.u64(parent)
+                try writer.string(name)
+                try writer.string(target)
+                writer.u32(uid)
+                writer.u32(gid)
+            case .link(let node, let newParent, let newName):
+                writer.u64(node)
+                writer.u64(newParent)
+                try writer.string(newName)
+            case .remove(let parent, let name, let itemType):
+                writer.u64(parent)
+                try writer.string(name)
+                writer.u8(itemType.rawValue)
+            case .rename(
+                let node, let srcParent, let srcName, let dstParent, let dstName, let flags):
+                writer.u64(node)
+                writer.u64(srcParent)
+                try writer.string(srcName)
+                writer.u64(dstParent)
+                try writer.string(dstName)
+                writer.u8(flags)
+            default: break
             }
         }
 
@@ -98,6 +141,43 @@ extension FSProto {
             case 9: return .reclaim(node: try reader.u64())
             case 10: return .sync
             case 11: return .close
+            default: return try readMutationRequest(op: op, from: &reader)
+            }
+        }
+
+        private static func readMutationRequest(
+            op: UInt8, from reader: inout FSReader
+        ) throws -> Request {
+            switch op {
+            case 12:
+                return .write(
+                    node: try reader.u64(), offset: try reader.u64(),
+                    data: try reader.blob(max: FSProto.writeRequestMax))
+            case 13:
+                return .setattr(
+                    node: try reader.u64(), setattr: try SetAttr.read(from: &reader))
+            case 14:
+                return .create(
+                    parent: try reader.u64(), name: try reader.string(),
+                    itemType: try ItemType.decode(try reader.u8()), mode: try reader.u32(),
+                    uid: try reader.u32(), gid: try reader.u32())
+            case 15:
+                return .symlink(
+                    parent: try reader.u64(), name: try reader.string(),
+                    target: try reader.string(), uid: try reader.u32(), gid: try reader.u32())
+            case 16:
+                return .link(
+                    node: try reader.u64(), newParent: try reader.u64(),
+                    newName: try reader.string())
+            case 17:
+                return .remove(
+                    parent: try reader.u64(), name: try reader.string(),
+                    itemType: try ItemType.decode(try reader.u8()))
+            case 18:
+                return .rename(
+                    node: try reader.u64(), srcParent: try reader.u64(),
+                    srcName: try reader.string(), dstParent: try reader.u64(),
+                    dstName: try reader.string(), flags: try reader.u8())
             default: throw WireError.badOp(op)
             }
         }
@@ -152,6 +232,9 @@ extension FSProto {
                 try writer.blob(data)
                 writer.u8(eof ? 1 : 0)
             case .readlink(let target): try writer.string(target)
+            case .write(let count, let attr):
+                writer.u32(count)
+                attr.write(into: &writer)
             case .empty: break
             }
         }
@@ -189,9 +272,14 @@ extension FSProto {
             case 2, 3: return .attr(try Attr.read(from: &reader))
             case 4: return try readReaddirplus(from: &reader)
             case 5: return .open(handle: try reader.u64())
-            case 6: return .read(data: try reader.blob(), eof: try reader.u8() != 0)
+            case 6:
+                return .read(
+                    data: try reader.blob(max: FSProto.readReplyMax), eof: try reader.u8() != 0)
             case 8: return .readlink(target: try reader.string())
-            case 7, 9, 10, 11: return .empty
+            case 12:
+                return .write(count: try reader.u32(), attr: try Attr.read(from: &reader))
+            case 13, 14, 15, 16, 18: return .attr(try Attr.read(from: &reader))
+            case 7, 9, 10, 11, 17: return .empty
             default: throw WireError.badOp(op)
             }
         }

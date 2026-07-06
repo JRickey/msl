@@ -1,14 +1,16 @@
 import Foundation
 
-/// FSKit file-service protocol v1: the compact binary request/reply codec,
+/// FSKit file-service protocol v2: the compact binary request/reply codec,
 /// byte-identical to the guest `msl-wire::fs` implementation (kept in lockstep
 /// by a shared golden vector in the tests). All integers are little-endian;
-/// strings are u16-length-prefixed UTF-8; read data is a u32-length blob. See
+/// strings are u16-length-prefixed UTF-8; data blobs are u32-length-prefixed. See
 /// docs/specs/fskit-file-protocol.md. These types nest under `FSProto`, which
 /// also carries the transport constants (FSProto.swift).
 extension FSProto {
-    /// Single `read` reply data cap in v1 (frame cap is `FSProto.frameMax`).
+    /// Single `read` reply data cap (frame cap is `FSProto.frameMax`).
     public static let readReplyMax = 1 << 20
+    /// Single `write` request data cap.
+    public static let writeRequestMax = 1 << 20
     /// Maximum encodable string byte length (u16 prefix).
     public static let stringMax = Int(UInt16.max)
 
@@ -96,6 +98,41 @@ extension FSProto {
         }
     }
 
+    /// Attribute update mask and values for setattr/truncate requests.
+    public struct SetAttr: Sendable, Equatable {
+        public static let modeMask: UInt32 = 0x0001
+        public static let uidMask: UInt32 = 0x0002
+        public static let gidMask: UInt32 = 0x0004
+        public static let sizeMask: UInt32 = 0x0008
+        public static let atimeMask: UInt32 = 0x0010
+        public static let mtimeMask: UInt32 = 0x0020
+        public static let flagsMask: UInt32 = 0x0040
+
+        public let mask: UInt32
+        public let mode: UInt32
+        public let uid: UInt32
+        public let gid: UInt32
+        public let size: UInt64
+        public let atime: Timespec
+        public let mtime: Timespec
+        public let flags: UInt32
+
+        public init(
+            mask: UInt32, mode: UInt32 = 0, uid: UInt32 = 0, gid: UInt32 = 0,
+            size: UInt64 = 0, atime: Timespec = Timespec(sec: 0, nsec: 0),
+            mtime: Timespec = Timespec(sec: 0, nsec: 0), flags: UInt32 = 0
+        ) {
+            self.mask = mask
+            self.mode = mode
+            self.uid = uid
+            self.gid = gid
+            self.size = size
+            self.atime = atime
+            self.mtime = mtime
+            self.flags = flags
+        }
+    }
+
     /// One readdirplus entry: name plus full attributes.
     public struct DirEntry: Sendable, Equatable {
         public let name: String
@@ -119,6 +156,18 @@ extension FSProto {
         case reclaim(node: UInt64)
         case sync
         case close
+        case write(node: UInt64, offset: UInt64, data: [UInt8])
+        case setattr(node: UInt64, setattr: SetAttr)
+        case create(
+            parent: UInt64, name: String, itemType: ItemType, mode: UInt32, uid: UInt32, gid: UInt32
+        )
+        case symlink(parent: UInt64, name: String, target: String, uid: UInt32, gid: UInt32)
+        case link(node: UInt64, newParent: UInt64, newName: String)
+        case remove(parent: UInt64, name: String, itemType: ItemType)
+        case rename(
+            node: UInt64, srcParent: UInt64, srcName: String, dstParent: UInt64, dstName: String,
+            flags: UInt8
+        )
 
         public var op: UInt8 {
             switch self {
@@ -133,6 +182,13 @@ extension FSProto {
             case .reclaim: return 9
             case .sync: return 10
             case .close: return 11
+            case .write: return 12
+            case .setattr: return 13
+            case .create: return 14
+            case .symlink: return 15
+            case .link: return 16
+            case .remove: return 17
+            case .rename: return 18
             }
         }
     }
@@ -145,6 +201,7 @@ extension FSProto {
         case open(handle: UInt64)
         case read(data: [UInt8], eof: Bool)
         case readlink(target: String)
+        case write(count: UInt32, attr: Attr)
         case empty
     }
 

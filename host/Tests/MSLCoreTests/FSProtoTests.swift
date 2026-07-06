@@ -14,6 +14,13 @@ final class FSProtoTests: XCTestCase {
             ctime: FSProto.Timespec(sec: 1_700_000_002, nsec: 333), flags: 0)
     }
 
+    private func sampleSetAttr() -> FSProto.SetAttr {
+        FSProto.SetAttr(
+            mask: FSProto.SetAttr.modeMask | FSProto.SetAttr.sizeMask | FSProto.SetAttr.mtimeMask,
+            mode: 0o100_600, size: 99,
+            mtime: FSProto.Timespec(sec: 1_700_000_100, nsec: 444))
+    }
+
     func testRequestRoundTripAllOps() throws {
         let requests: [FSProto.Request] = [
             .statfs,
@@ -27,6 +34,16 @@ final class FSProtoTests: XCTestCase {
             .reclaim(node: 5),
             .sync,
             .close,
+            .write(node: 5, offset: 4096, data: [0xde, 0xad, 0xbe, 0xef]),
+            .setattr(node: 5, setattr: sampleSetAttr()),
+            .create(
+                parent: 1, name: "created", itemType: .file, mode: 0o100_644, uid: 1000, gid: 1000),
+            .symlink(parent: 1, name: "link", target: "target", uid: 1000, gid: 1000),
+            .link(node: 5, newParent: 1, newName: "hard"),
+            .remove(parent: 1, name: "created", itemType: .file),
+            .rename(
+                node: 5, srcParent: 1, srcName: "old", dstParent: 2, dstName: "new",
+                flags: 1),
         ]
         for (index, request) in requests.enumerated() {
             let frame = FSProto.RequestFrame(id: UInt64(index) + 1, request: request)
@@ -55,6 +72,13 @@ final class FSProtoTests: XCTestCase {
             (6, .read(data: [1, 2, 3, 4], eof: false)),
             (8, .readlink(target: "/usr/lib")),
             (7, .empty),
+            (12, .write(count: 4, attr: sampleAttr())),
+            (13, .attr(sampleAttr())),
+            (14, .attr(sampleAttr())),
+            (15, .attr(sampleAttr())),
+            (16, .attr(sampleAttr())),
+            (17, .empty),
+            (18, .attr(sampleAttr())),
         ]
         for (op, body) in bodies {
             let frame = FSProto.ReplyFrame.ok(id: 7, op: op, body: body)
@@ -99,18 +123,64 @@ final class FSProtoTests: XCTestCase {
         }
     }
 
+    func testDecodeRejectsOversizeWriteBlob() {
+        var bytes: [UInt8] = [12]
+        bytes += Self.le64(1)
+        bytes += Self.le64(5)
+        bytes += Self.le64(0)
+        bytes += Self.le32(UInt32(FSProto.writeRequestMax + 1))
+        XCTAssertThrowsError(try FSProto.RequestFrame.decode(bytes)) { error in
+            XCTAssertEqual(
+                error as? FSProto.WireError, .oversizeBlob(FSProto.writeRequestMax + 1))
+        }
+    }
+
     /// Byte-for-byte identical to the guest `msl-wire::fs` golden vector: a
     /// getattr reply (id 7, op 3, errno 0) carrying `sampleAttr()`. If either
     /// side's encoding drifts, this and its Rust twin fail together.
     func testGetattrReplyGoldenVector() throws {
         let frame = FSProto.ReplyFrame.ok(id: 7, op: 3, body: .attr(sampleAttr()))
         let hex = try frame.encode().map { String(format: "%02x", $0) }.joined()
-        XCTAssertEqual(hex, Self.goldenHex)
+        XCTAssertEqual(hex, Self.getattrGoldenHex)
     }
 
-    private static let goldenHex =
-        "0700000000000000030000000005000000000000009210000000000000"
-        + "010000000000000001a4810000e8030000e8030000010000003930000000"
-        + "000000004000000000000000f15365000000006f00000001f15365000000"
-        + "00de00000002f15365000000004d01000000000000"
+    /// Shared with the guest `msl-wire::fs` tests: write request id 42,
+    /// node 5, offset 4096, data `deadbeef`.
+    func testWriteRequestGoldenVector() throws {
+        let frame = FSProto.RequestFrame(
+            id: 42, request: .write(node: 5, offset: 4096, data: [0xde, 0xad, 0xbe, 0xef]))
+        let hex = try frame.encode().map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(hex, Self.writeRequestGoldenHex)
+    }
+
+    /// Shared with the guest `msl-wire::fs` tests: write reply id 42,
+    /// op 12, count 4, carrying `sampleAttr()`.
+    func testWriteReplyGoldenVector() throws {
+        let frame = FSProto.ReplyFrame.ok(
+            id: 42, op: 12, body: .write(count: 4, attr: sampleAttr()))
+        let hex = try frame.encode().map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(hex, Self.writeReplyGoldenHex)
+    }
+
+    private static let getattrGoldenHex =
+        "07000000000000000300000000" + attrGoldenHex
+
+    private static let writeRequestGoldenHex =
+        "0c2a000000000000000500000000000000001000000000000004000000deadbeef"
+
+    private static let writeReplyGoldenHex =
+        "2a000000000000000c0000000004000000" + attrGoldenHex
+
+    private static let attrGoldenHex =
+        "05000000000000009210000000000000010000000000000001a4810000e8030000e8030000"
+        + "010000003930000000000000004000000000000000f15365000000006f000000"
+        + "01f1536500000000de00000002f15365000000004d01000000000000"
+
+    private static func le32(_ value: UInt32) -> [UInt8] {
+        withUnsafeBytes(of: value.littleEndian) { Array($0) }
+    }
+
+    private static func le64(_ value: UInt64) -> [UInt8] {
+        withUnsafeBytes(of: value.littleEndian) { Array($0) }
+    }
 }

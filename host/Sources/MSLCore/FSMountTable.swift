@@ -63,13 +63,18 @@ public final class FSMountTable: @unchecked Sendable {
     /// Validate and consume the single-use nonce for an appex route. Succeeds
     /// only when a prepared record matches the distro, mount id, and nonce and
     /// the nonce is unused; marks it consumed so a replay cannot re-route.
-    public func consumeNonce(distro: String, mountID: String, nonce: String) -> Bool {
+    public func consumeNonce(
+        distro: String, mountID: String, nonce: String, readonly: Bool? = nil
+    ) -> Bool {
         guard !distro.isEmpty, !mountID.isEmpty, !nonce.isEmpty else { return false }
         lock.lock()
         defer { lock.unlock() }
         guard var record = records[distro], !record.nonceConsumed else { return false }
         guard Token.matches(record.mountID, mountID), Token.matches(record.nonce, nonce) else {
             return false
+        }
+        if let readonly {
+            guard record.readonly == readonly else { return false }
         }
         record.nonceConsumed = true
         records[distro] = record

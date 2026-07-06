@@ -33,6 +33,17 @@ final class FSMountTableTests: XCTestCase {
         XCTAssertFalse(table.consumeNonce(distro: "other", mountID: rec.mountID, nonce: rec.nonce))
     }
 
+    func testConsumeNonceRejectsReadonlyMismatchWithoutConsuming() {
+        let table = FSMountTable()
+        let rec = table.prepare(name: "ubuntu", mountpoint: "/u/msl/ubuntu", readonly: true)
+        XCTAssertFalse(
+            table.consumeNonce(
+                distro: "ubuntu", mountID: rec.mountID, nonce: rec.nonce, readonly: false))
+        XCTAssertTrue(
+            table.consumeNonce(
+                distro: "ubuntu", mountID: rec.mountID, nonce: rec.nonce, readonly: true))
+    }
+
     func testCommitRequiresMatchingMountpoint() throws {
         let table = FSMountTable()
         _ = table.prepare(name: "ubuntu", mountpoint: "/u/msl/ubuntu", readonly: true)

@@ -89,7 +89,10 @@ public final class FSMountListener: @unchecked Sendable {
             framed.close()
             return
         }
-        guard table.consumeNonce(distro: hello.distro, mountID: hello.mountID, nonce: hello.nonce)
+        guard
+            table.consumeNonce(
+                distro: hello.distro, mountID: hello.mountID, nonce: hello.nonce,
+                readonly: hello.readonly)
         else {
             logger("fs: route denied for '\(hello.distro)' (mount id/nonce mismatch or replay)")
             _ = try? framed.send(replyFrame(ok: false, error: "unknown or consumed mount"))
