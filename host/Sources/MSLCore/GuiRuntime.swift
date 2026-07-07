@@ -31,6 +31,13 @@ public enum GuiRuntime {
         return Dictionary(uniqueKeysWithValues: env)
     }
 
+    public static func environment(runtimeDir: String) -> [String: String] {
+        precondition(!runtimeDir.isEmpty, "GUI runtime directory must not be empty")
+        var values = environment
+        values["XDG_RUNTIME_DIR"] = runtimeDir
+        return values
+    }
+
     public static func probeScript() -> String {
         return """
             uid="$(id -u)"

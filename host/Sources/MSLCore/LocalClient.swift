@@ -44,6 +44,26 @@ public final class LocalClient: @unchecked Sendable {
         return try roundTrip(.capture(req))
     }
 
+    public func guiProbe(_ req: GuiRuntimeReq) throws -> GuiProbeData {
+        return try roundTrip(.guiProbe(req))
+    }
+
+    public func guiStart(_ req: GuiRuntimeReq) throws -> GuiRuntimeData {
+        return try roundTrip(.guiStart(req))
+    }
+
+    public func guiStatus(_ req: GuiRuntimeReq) throws -> GuiRuntimeData {
+        return try roundTrip(.guiStatus(req))
+    }
+
+    public func guiStop(_ req: GuiRuntimeReq) throws -> GuiRuntimeData {
+        return try roundTrip(.guiStop(req))
+    }
+
+    public func guiLaunch(_ req: GuiLaunchReq) throws -> ExecData {
+        return try roundTrip(.guiLaunch(req))
+    }
+
     public func shutdown() throws {
         let _: LocalEmpty = try roundTrip(.shutdown)
     }

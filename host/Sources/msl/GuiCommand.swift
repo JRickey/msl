@@ -21,7 +21,9 @@ struct GuiProbeCommand: ParsableCommand {
     var name: String
 
     func run() throws {
-        try GuiLaunchSupport.printCapture(name: name, script: GuiRuntime.probeScript())
+        let home = MSLHome.resolve()
+        let probe = try DaemonClient.guiProbe(home: home, name: name)
+        GuiLaunchSupport.printProbe(probe)
     }
 }
 
@@ -54,7 +56,8 @@ struct GuiStatusCommand: ParsableCommand {
     func run() throws {
         let home = MSLHome.resolve()
         let distro = try GuiLaunchSupport.resolvedDistroName(home: home, name: name)
-        try GuiLaunchSupport.printCapture(name: distro, script: GuiRuntime.statusScript())
+        let status = try DaemonClient.guiStatus(home: home, name: distro)
+        GuiLaunchSupport.printRuntime(status)
     }
 }
 
@@ -66,7 +69,9 @@ struct GuiStopCommand: ParsableCommand {
     var name: String
 
     func run() throws {
-        try GuiLaunchSupport.printCapture(name: name, script: GuiRuntime.stopScript())
+        let home = MSLHome.resolve()
+        let status = try DaemonClient.guiStop(home: home, name: name)
+        GuiLaunchSupport.printRuntime(status)
     }
 }
 
@@ -95,7 +100,7 @@ enum GuiLaunchSupport {
         }
         let home = MSLHome.resolve()
         let distro = try resolvedDistroName(home: home, name: name)
-        try startRuntime(home: home, name: distro)
+        _ = try startRuntime(home: home, name: distro)
         try launchApp(home: home, name: distro, command: command)
         let fd = try openSurfacePlane(home: home, name: distro)
         let channel = try GuiChannel(fd: fd)
@@ -108,6 +113,27 @@ enum GuiLaunchSupport {
         return try Registry.load(from: home.registryURL).resolveDefault(requested: name).name
     }
 
+    static func printProbe(_ probe: GuiProbeData) {
+        printRuntime(probe.runtime)
+        for capability in probe.capabilities {
+            let state = capability.present ? "present" : "missing"
+            print("\(capability.name)=\(state)")
+        }
+    }
+
+    static func printRuntime(_ runtime: GuiRuntimeData) {
+        print("state=\(runtime.state)")
+        print("runtime_dir=\(runtime.runtimeDir)")
+        print("wayland=\(runtime.waylandDisplay)")
+        print("socket=\(runtime.socketPresent ? "present" : "missing")")
+        if let pid = runtime.pid {
+            print("pid=\(pid)")
+        }
+        if !runtime.logTail.isEmpty {
+            print(runtime.logTail)
+        }
+    }
+
     static func printCapture(name: String, script: String) throws {
         let home = MSLHome.resolve()
         let data = try capture(home: home, name: name, script: script)
@@ -118,21 +144,26 @@ enum GuiLaunchSupport {
         guard data.exitCode == 0 else { throw ExitCode(data.exitCode) }
     }
 
-    static func startRuntime(home: MSLHome, name: String) throws {
-        let data = try capture(home: home, name: name, script: GuiRuntime.startScript(distro: name))
+    static func startRuntime(home: MSLHome, name: String) throws -> GuiRuntimeData {
+        return try DaemonClient.guiStart(home: home, name: name)
+    }
+
+    private static func launchApp(home: MSLHome, name: String, command: [String]) throws {
+        let data = try DaemonClient.guiLaunch(
+            home: home,
+            req: GuiLaunchReq(distro: name, argv: launchArgv(command: command), cwd: "/"))
         guard data.exitCode == 0 else {
             writeError(data)
             throw ExitCode(data.exitCode)
         }
     }
 
-    private static func launchApp(home: MSLHome, name: String, command: [String]) throws {
-        let script = GuiRuntime.launchBackgroundScript(command: command)
-        let data = try capture(home: home, name: name, script: script)
-        guard data.exitCode == 0 else {
-            writeError(data)
-            throw ExitCode(data.exitCode)
-        }
+    private static func launchArgv(command: [String]) -> [String] {
+        precondition(!command.isEmpty, "GUI launch command must not be empty")
+        let script =
+            "uid=\"$(id -u)\"; export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/tmp/msl-gui-$uid}\"; "
+            + "nohup \"$@\" > /dev/null 2>&1 < /dev/null & echo launched"
+        return ["/bin/sh", "-lc", script, "msl-gui-launch"] + command
     }
 
     private static func capture(home: MSLHome, name: String, script: String) throws -> ExecData {

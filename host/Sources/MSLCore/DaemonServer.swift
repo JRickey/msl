@@ -73,6 +73,8 @@ public final class DaemonServer: @unchecked Sendable {
                 return okFrame(LocalEmpty())
             case .shell, .capture, .resize, .signal, .wait:
                 return try sessionReply(request)
+            case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch:
+                return try guiReply(request)
             case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
                 return try mountReply(request)
             default: return errorFrame("unsupported request")
@@ -108,6 +110,17 @@ public final class DaemonServer: @unchecked Sendable {
             try core.unmount(name: name, force: force)
             return okFrame(LocalEmpty())
         case .mountStatus: return okFrame(core.mountStatus())
+        default: return errorFrame("unsupported request")
+        }
+    }
+
+    private func guiReply(_ request: LocalRequest) throws -> Data {
+        switch request {
+        case .guiProbe(let req): return okFrame(try core.guiProbe(req))
+        case .guiStart(let req): return okFrame(try core.guiStart(req))
+        case .guiStatus(let req): return okFrame(try core.guiStatus(req))
+        case .guiStop(let req): return okFrame(try core.guiStop(req))
+        case .guiLaunch(let req): return okFrame(try core.guiLaunch(req))
         default: return errorFrame("unsupported request")
         }
     }

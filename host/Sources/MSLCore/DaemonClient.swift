@@ -63,6 +63,36 @@ public enum DaemonClient {
         return try control.capture(buildRequest(name: name, argv: argv, term: term))
     }
 
+    public static func guiProbe(home: MSLHome, name: String) throws -> GuiProbeData {
+        let control = try guiControl(home)
+        defer { control.close() }
+        return try control.guiProbe(GuiRuntimeReq(distro: name))
+    }
+
+    public static func guiStart(home: MSLHome, name: String) throws -> GuiRuntimeData {
+        let control = try guiControl(home)
+        defer { control.close() }
+        return try control.guiStart(GuiRuntimeReq(distro: name))
+    }
+
+    public static func guiStatus(home: MSLHome, name: String) throws -> GuiRuntimeData {
+        let control = try guiControl(home)
+        defer { control.close() }
+        return try control.guiStatus(GuiRuntimeReq(distro: name))
+    }
+
+    public static func guiStop(home: MSLHome, name: String) throws -> GuiRuntimeData {
+        let control = try guiControl(home)
+        defer { control.close() }
+        return try control.guiStop(GuiRuntimeReq(distro: name))
+    }
+
+    public static func guiLaunch(home: MSLHome, req: GuiLaunchReq) throws -> ExecData {
+        let control = try guiControl(home)
+        defer { control.close() }
+        return try control.guiLaunch(req)
+    }
+
     public static func status(_ home: MSLHome) throws -> StatusData {
         let control = try connect(home)
         defer { control.close() }
@@ -120,5 +150,10 @@ public enum DaemonClient {
         return ShellRequest(
             name: name, argv: argv.isEmpty ? nil : argv, env: env,
             rows: size?.rows ?? 40, cols: size?.cols ?? 120, cwd: cwd)
+    }
+
+    private static func guiControl(_ home: MSLHome) throws -> LocalClient {
+        try ensureRunning(home)
+        return try connect(home)
     }
 }

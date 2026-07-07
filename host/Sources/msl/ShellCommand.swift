@@ -20,16 +20,18 @@ struct ShellCommand: ParsableCommand {
         let home = MSLHome.resolve()
         let term = ProcessInfo.processInfo.environment["TERM"] ?? "xterm-256color"
         let distro: String?
+        let extraEnv: [String: String]
         if gui {
             let resolved = try GuiLaunchSupport.resolvedDistroName(home: home, name: name)
-            try GuiLaunchSupport.startRuntime(home: home, name: resolved)
+            let runtime = try GuiLaunchSupport.startRuntime(home: home, name: resolved)
             distro = resolved
+            extraEnv = GuiRuntime.environment(runtimeDir: runtime.runtimeDir)
         } else {
             distro = name
+            extraEnv = [:]
         }
         let outcome = try DaemonClient.runSession(
-            home: home, name: distro, argv: command, term: term,
-            extraEnv: gui ? GuiRuntime.environment : [:])
+            home: home, name: distro, argv: command, term: term, extraEnv: extraEnv)
         let code = sessionExitCode(outcome)
         guard code == 0 else { throw ExitCode(code) }
     }

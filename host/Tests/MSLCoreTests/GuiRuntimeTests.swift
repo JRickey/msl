@@ -33,4 +33,11 @@ final class GuiRuntimeScriptTests: XCTestCase {
         XCTAssertTrue(script.contains("xkb_data=present"), script)
         XCTAssertFalse(script.contains("apt-get"), script)
     }
+
+    func testSessionEnvironmentCarriesRuntimeDirectory() {
+        let env = GuiRuntime.environment(runtimeDir: "/tmp/msl-gui-0")
+        XCTAssertEqual(env["WAYLAND_DISPLAY"], "msl-way-0")
+        XCTAssertEqual(env["XDG_RUNTIME_DIR"], "/tmp/msl-gui-0")
+        XCTAssertNil(env["DISPLAY"])
+    }
 }

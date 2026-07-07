@@ -27,6 +27,11 @@ public enum LocalRequest: Sendable, Equatable {
     case capture(ShellRequest)
     case attach(sessionID: UInt64, token: String)
     case guiConnect(name: String?)
+    case guiProbe(GuiRuntimeReq)
+    case guiStart(GuiRuntimeReq)
+    case guiStatus(GuiRuntimeReq)
+    case guiStop(GuiRuntimeReq)
+    case guiLaunch(GuiLaunchReq)
     case resize(sessionID: UInt64, rows: UInt16, cols: UInt16)
     case signal(sessionID: UInt64, signal: Int32)
     case wait(sessionID: UInt64)
@@ -80,6 +85,7 @@ public struct ShellRequest: Sendable, Equatable, Codable {
 extension LocalRequest: Codable {
     private enum CodingKeys: String, CodingKey {
         case op, name, all, argv, env, rows, cols, cwd, token, signal, mountpoint, force, readonly
+        case distro, user
         case timeoutMs = "timeout_ms"
         case sessionID = "session_id"
     }
@@ -101,11 +107,42 @@ extension LocalRequest: Codable {
         case .guiConnect(let name):
             try container.encode("gui_connect", forKey: .op)
             try container.encodeIfPresent(name, forKey: .name)
+        case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch:
+            try encodeGui(into: &container)
         case .shutdown: try container.encode("shutdown", forKey: .op)
         case .attach, .resize, .signal, .wait: try encodeSession(into: &container)
         case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
             try encodeMount(into: &container)
         }
+    }
+
+    private func encodeGui(into container: inout KeyedEncodingContainer<CodingKeys>) throws {
+        switch self {
+        case .guiProbe(let req):
+            try encodeGuiRuntime(req, into: &container, op: "gui_probe")
+        case .guiStart(let req):
+            try encodeGuiRuntime(req, into: &container, op: "gui_start")
+        case .guiStatus(let req):
+            try encodeGuiRuntime(req, into: &container, op: "gui_status")
+        case .guiStop(let req):
+            try encodeGuiRuntime(req, into: &container, op: "gui_stop")
+        case .guiLaunch(let req):
+            try container.encode("gui_launch", forKey: .op)
+            try container.encode(req.distro, forKey: .distro)
+            try container.encodeIfPresent(req.user, forKey: .user)
+            try container.encode(req.argv, forKey: .argv)
+            try container.encode(req.env, forKey: .env)
+            try container.encodeIfPresent(req.cwd, forKey: .cwd)
+        default: break
+        }
+    }
+
+    private func encodeGuiRuntime(
+        _ req: GuiRuntimeReq, into container: inout KeyedEncodingContainer<CodingKeys>, op: String
+    ) throws {
+        try container.encode(op, forKey: .op)
+        try container.encode(req.distro, forKey: .distro)
+        try container.encodeIfPresent(req.user, forKey: .user)
     }
 
     private func encodeSession(into container: inout KeyedEncodingContainer<CodingKeys>) throws {
@@ -183,6 +220,19 @@ extension LocalRequest: Codable {
         case "gui_connect":
             return .guiConnect(name: try container.decodeIfPresent(String.self, forKey: .name))
         case "shutdown": return .shutdown
+        default: return try decodeGuiOp(op, from: container)
+        }
+    }
+
+    private static func decodeGuiOp(
+        _ op: String, from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> LocalRequest {
+        switch op {
+        case "gui_probe": return .guiProbe(try decodeGuiRuntime(from: container))
+        case "gui_start": return .guiStart(try decodeGuiRuntime(from: container))
+        case "gui_status": return .guiStatus(try decodeGuiRuntime(from: container))
+        case "gui_stop": return .guiStop(try decodeGuiRuntime(from: container))
+        case "gui_launch": return .guiLaunch(try decodeGuiLaunch(from: container))
         default: return try decodeMountOp(op, from: container)
         }
     }
@@ -241,157 +291,23 @@ extension LocalRequest: Codable {
             cols: try container.decodeIfPresent(UInt16.self, forKey: .cols) ?? 120,
             cwd: try container.decodeIfPresent(String.self, forKey: .cwd))
     }
-}
 
-/// One distro's line in the `status` reply: name, lifecycle state, live sessions.
-public struct DistroStatus: Sendable, Equatable, Codable {
-    public let name: String
-    public let state: String
-    public let sessions: Int
-
-    public init(name: String, state: String, sessions: Int) {
-        self.name = name
-        self.state = state
-        self.sessions = sessions
-    }
-}
-
-/// Balloon memory summary in the `status` reply (nil when the VM is stopped).
-public struct MemoryStatus: Sendable, Equatable, Codable {
-    public let targetMiB: UInt64
-    public let maxMiB: UInt64
-    public let availableMiB: UInt64
-
-    enum CodingKeys: String, CodingKey {
-        case targetMiB = "target_mib"
-        case maxMiB = "max_mib"
-        case availableMiB = "available_mib"
+    private static func decodeGuiRuntime(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> GuiRuntimeReq {
+        return GuiRuntimeReq(
+            distro: try container.decode(String.self, forKey: .distro),
+            user: try container.decodeIfPresent(String.self, forKey: .user))
     }
 
-    public init(targetMiB: UInt64, maxMiB: UInt64, availableMiB: UInt64) {
-        self.targetMiB = targetMiB
-        self.maxMiB = maxMiB
-        self.availableMiB = availableMiB
-    }
-}
-
-/// Payload of the `status` reply. `memory` and `forwardedPorts` are optional so
-/// a v1.2 client decodes a v1.3 reply (and vice versa).
-public struct StatusData: Sendable, Equatable, Codable {
-    public let vm: String
-    public let distros: [DistroStatus]
-    public let idleTimeoutS: Int
-    public let memory: MemoryStatus?
-    public let forwardedPorts: [UInt16]?
-
-    enum CodingKeys: String, CodingKey {
-        case vm, distros, memory
-        case idleTimeoutS = "idle_timeout_s"
-        case forwardedPorts = "forwarded_ports"
-    }
-
-    public init(
-        vm: String, distros: [DistroStatus], idleTimeoutS: Int,
-        memory: MemoryStatus? = nil, forwardedPorts: [UInt16]? = nil
-    ) {
-        self.vm = vm
-        self.distros = distros
-        self.idleTimeoutS = idleTimeoutS
-        self.memory = memory
-        self.forwardedPorts = forwardedPorts
-    }
-}
-
-/// Payload of the `shell`/`run` reply: the guest session id and the single-use
-/// local attach token.
-public struct ShellData: Sendable, Equatable, Codable {
-    public let sessionID: UInt64
-    public let token: String
-
-    enum CodingKeys: String, CodingKey {
-        case token
-        case sessionID = "session_id"
-    }
-
-    public init(sessionID: UInt64, token: String) {
-        precondition(!token.isEmpty, "session token must not be empty")
-        self.sessionID = sessionID
-        self.token = token
-    }
-}
-
-/// Payload of the `wait` reply (mirrors the guest `session_wait`: non-blocking).
-public struct LocalWaitData: Sendable, Equatable, Codable {
-    public let done: Bool
-    public let exitCode: Int32?
-
-    enum CodingKeys: String, CodingKey {
-        case done
-        case exitCode = "exit_code"
-    }
-
-    public init(done: Bool, exitCode: Int32?) {
-        self.done = done
-        self.exitCode = exitCode
-    }
-}
-
-/// Empty `{}` reply payload for ops whose success carries no data.
-public struct LocalEmpty: Sendable, Equatable, Codable {
-    public init() {}
-}
-
-/// Decoded reply envelope on the client side. `data` is present when `ok`.
-public struct LocalResponse<Payload: Decodable & Sendable>: Decodable, Sendable {
-    public let ok: Bool
-    public let data: Payload?
-    public let error: String?
-
-    /// Decode a reply, validating the ok/data and error invariants.
-    public static func decode(_ bytes: Data) throws -> LocalResponse<Payload> {
-        guard !bytes.isEmpty else { throw MSLError.protocolMismatch("empty local reply") }
-        let value = try JSONDecoder().decode(LocalResponse<Payload>.self, from: bytes)
-        if value.ok {
-            guard value.data != nil else {
-                throw MSLError.protocolMismatch("ok reply missing data")
-            }
-        } else {
-            guard let message = value.error, !message.isEmpty else {
-                throw MSLError.protocolMismatch("error reply missing error text")
-            }
-        }
-        return value
-    }
-}
-
-/// Builds reply frames on the daemon side (encode side of `LocalResponse`).
-public enum LocalReply {
-    /// Encode `{"ok":true,"data":<payload>}`.
-    public static func ok<Payload: Encodable>(_ payload: Payload) throws -> Data {
-        let data = try JSONEncoder().encode(OkEnvelope(data: payload))
-        guard data.count <= Proto.maxPayload else {
-            throw MSLError.framing("local reply \(data.count) exceeds \(Proto.maxPayload)")
-        }
-        return data
-    }
-
-    /// Encode `{"ok":false,"error":<message>}`.
-    public static func error(_ message: String) throws -> Data {
-        precondition(!message.isEmpty, "error message must not be empty")
-        let data = try JSONEncoder().encode(ErrorEnvelope(error: message))
-        guard data.count <= Proto.maxPayload else {
-            throw MSLError.framing("local reply \(data.count) exceeds \(Proto.maxPayload)")
-        }
-        return data
-    }
-
-    private struct OkEnvelope<Payload: Encodable>: Encodable {
-        let ok = true
-        let data: Payload
-    }
-
-    private struct ErrorEnvelope: Encodable {
-        let ok = false
-        let error: String
+    private static func decodeGuiLaunch(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> GuiLaunchReq {
+        return GuiLaunchReq(
+            distro: try container.decode(String.self, forKey: .distro),
+            user: try container.decodeIfPresent(String.self, forKey: .user),
+            argv: try container.decode([String].self, forKey: .argv),
+            env: try container.decodeIfPresent([String: String].self, forKey: .env) ?? [:],
+            cwd: try container.decodeIfPresent(String.self, forKey: .cwd))
     }
 }
