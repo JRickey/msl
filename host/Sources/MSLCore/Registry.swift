@@ -13,10 +13,13 @@ public struct DistroEntry: Codable, Sendable, Equatable {
     public let macShare: Bool?
     /// x86-64 Rosetta translation opt-in (nil = off). Synthesized Codable omits it when nil.
     public let rosetta: Bool?
+    /// Catalog selector that produced this distro, when installed from the catalog.
+    public let catalogSelector: String?
 
     public init(
         name: String, image: String, hostname: String, createdAt: String,
-        defaultUser: String? = nil, macShare: Bool? = nil, rosetta: Bool? = nil
+        defaultUser: String? = nil, macShare: Bool? = nil, rosetta: Bool? = nil,
+        catalogSelector: String? = nil
     ) {
         self.name = name
         self.image = image
@@ -25,6 +28,7 @@ public struct DistroEntry: Codable, Sendable, Equatable {
         self.defaultUser = defaultUser
         self.macShare = macShare
         self.rosetta = rosetta
+        self.catalogSelector = catalogSelector
     }
 }
 
@@ -143,7 +147,8 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser,
-                macShare: current.macShare, rosetta: current.rosetta)
+                macShare: current.macShare, rosetta: current.rosetta,
+                catalogSelector: current.catalogSelector)
         }
     }
 
@@ -157,8 +162,9 @@ public struct Registry: Codable, Sendable, Equatable {
         try mutateEntry(name: name) { current in
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
-                createdAt: current.createdAt, defaultUser: user, macShare: current.macShare,
-                rosetta: current.rosetta)
+                createdAt: current.createdAt, defaultUser: user,
+                macShare: current.macShare, rosetta: current.rosetta,
+                catalogSelector: current.catalogSelector)
         }
     }
 
@@ -168,7 +174,7 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser, macShare: share,
-                rosetta: current.rosetta)
+                rosetta: current.rosetta, catalogSelector: current.catalogSelector)
         }
     }
 
@@ -178,7 +184,23 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser,
-                macShare: current.macShare, rosetta: on)
+                macShare: current.macShare, rosetta: on,
+                catalogSelector: current.catalogSelector)
+        }
+    }
+
+    public mutating func setCatalogSelector(name: String, selector: String?) throws {
+        if let selector {
+            guard Catalog.isValidSelectorSyntax(selector) else {
+                throw MSLError.invalidArgument("invalid catalog selector: \(selector)")
+            }
+        }
+        try mutateEntry(name: name) { current in
+            DistroEntry(
+                name: current.name, image: current.image, hostname: current.hostname,
+                createdAt: current.createdAt, defaultUser: current.defaultUser,
+                macShare: current.macShare, rosetta: current.rosetta,
+                catalogSelector: selector)
         }
     }
 
@@ -246,6 +268,10 @@ public struct Registry: Codable, Sendable, Equatable {
             guard entry.image == "\(entry.name).img" else {
                 throw MSLError.configuration(
                     "image for '\(entry.name)' must be '\(entry.name).img' in \(source)")
+            }
+            if let selector = entry.catalogSelector, !Catalog.isValidSelectorSyntax(selector) {
+                throw MSLError.configuration(
+                    "catalog selector for '\(entry.name)' is invalid in \(source)")
             }
         }
         if let name = defaultDistro, self.entry(name: name) == nil {

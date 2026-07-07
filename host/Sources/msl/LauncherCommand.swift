@@ -47,8 +47,10 @@ struct LauncherCreateCommand: ParsableCommand {
     var replace = false
 
     func run() throws {
-        let url = try LauncherStore(home: MSLHome.resolve()).create(
-            name: name, mode: mode, replace: replace)
+        let home = MSLHome.resolve()
+        let icon = try LauncherIconResolver(home: home).icon(for: name)
+        let url = try LauncherStore(home: home).create(
+            name: name, mode: mode, replace: replace, icon: icon)
         print("created \(url.path)")
     }
 }
@@ -63,8 +65,10 @@ struct LauncherRefreshCommand: ParsableCommand {
     var mode: LauncherMode = .shell
 
     func run() throws {
-        let url = try LauncherStore(home: MSLHome.resolve()).create(
-            name: name, mode: mode, replace: true)
+        let home = MSLHome.resolve()
+        let icon = try LauncherIconResolver(home: home).icon(for: name)
+        let url = try LauncherStore(home: home).create(
+            name: name, mode: mode, replace: true, icon: icon)
         print("refreshed \(url.path)")
     }
 }
@@ -115,3 +119,82 @@ struct LauncherRunBundleCommand: ParsableCommand {
 }
 
 extension LauncherMode: ExpressibleByArgument {}
+
+private struct LauncherIconResolver {
+    private let home: MSLHome
+
+    init(home: MSLHome) {
+        self.home = home
+    }
+
+    func icon(for name: String) throws -> URL? {
+        let registry = try Registry.load(from: home.registryURL)
+        guard let entry = registry.entry(name: name) else { return nil }
+        let catalog = try? Catalog.loadEmbedded()
+        if let selector = entry.catalogSelector {
+            if let icon = try icon(for: selector, catalog: catalog) {
+                return icon
+            }
+        }
+        if let icon = try icon(for: entry.name, catalog: catalog) {
+            return icon
+        }
+        guard let known = DistroIconCatalog.icon(for: entry.name) else {
+            note("launcher: no catalog icon; generating fallback icon")
+            return nil
+        }
+        note("launcher: preparing \(entry.name) icon")
+        return try CatalogIconStore(home: home).icon(known, label: entry.name) { progress in
+            Self.emit(progress)
+        }
+    }
+
+    private func icon(for selector: String, catalog: Catalog?) throws -> URL? {
+        guard let resolved = try? catalog?.resolve(selector: selector) else { return nil }
+        return try icon(for: resolved)
+    }
+
+    private func icon(for resolved: CatalogResolved) throws -> URL? {
+        guard resolved.version.icon != nil else { return nil }
+        note("launcher: preparing \(resolved.family.name) icon")
+        return try CatalogIconStore(home: home).icon(for: resolved) { progress in
+            Self.emit(progress)
+        }
+    }
+
+    private func note(_ message: String) {
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+    }
+
+    private static func emit(_ progress: CatalogDownloadProgress) {
+        switch progress {
+        case .checkingCache(let path):
+            note("launcher: checking icon cache \(path)")
+        case .cacheHit(let path):
+            note("launcher: icon cache hit; SHA256 already verified at \(path)")
+        case .startingDownload(let url, let bytes):
+            note("launcher: downloading icon \(url) (\(humanBytes(bytes)))")
+        case .downloading:
+            return
+        case .verifying(_, let sha256):
+            note("launcher: verifying icon SHA256 \(sha256)")
+        case .ready(let path):
+            note("launcher: icon ready at \(path)")
+        }
+    }
+
+    private static func note(_ message: String) {
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+    }
+
+    private static func humanBytes(_ bytes: UInt64) -> String {
+        let units = ["B", "K", "M", "G"]
+        var value = Double(bytes)
+        var unit = 0
+        while value >= 1024 && unit < units.count - 1 {
+            value /= 1024
+            unit += 1
+        }
+        return String(format: unit == 0 ? "%.0f%@" : "%.1f%@", value, units[unit])
+    }
+}

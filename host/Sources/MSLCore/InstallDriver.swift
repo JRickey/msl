@@ -44,6 +44,8 @@ public struct InstallPlan: Sendable, Equatable {
     public let sizeGiB: Int
     /// Login user to seed on the registry entry (nil = root); from a bundle conf.
     public let defaultUser: String?
+    /// Catalog selector that produced this install, when applicable.
+    public let catalogSelector: String?
 
     public static let minSizeGiB = 1
     public static let maxSizeGiB = 512
@@ -54,17 +56,18 @@ public struct InstallPlan: Sendable, Equatable {
     /// compression via `bundleCompression` (the CLI sniffs before calling).
     public static func make(
         name: String, fromPath: String, sizeGiB: Int, existingNames: [String],
-        bundleCompression: TarCompression? = nil, defaultUser: String? = nil
+        bundleCompression: TarCompression? = nil, defaultUser: String? = nil,
+        catalogSelector: String? = nil
     ) throws -> InstallPlan {
         let source = try classify(fromPath, bundleCompression: bundleCompression)
         return try make(
             name: name, source: source, sizeGiB: sizeGiB, existingNames: existingNames,
-            defaultUser: defaultUser)
+            defaultUser: defaultUser, catalogSelector: catalogSelector)
     }
 
     public static func make(
         name: String, source: InstallSource, sizeGiB: Int, existingNames: [String],
-        defaultUser: String? = nil
+        defaultUser: String? = nil, catalogSelector: String? = nil
     ) throws -> InstallPlan {
         assert(minSizeGiB <= maxSizeGiB, "size bounds must be ordered")
         guard Registry.isValidName(name) else {
@@ -82,8 +85,12 @@ public struct InstallPlan: Sendable, Equatable {
             throw MSLError.invalidArgument(
                 "invalid default-user (^[a-z_][a-z0-9_-]{0,31}$): \(user)")
         }
+        if let catalogSelector, !Catalog.isValidSelectorSyntax(catalogSelector) {
+            throw MSLError.invalidArgument("invalid catalog selector: \(catalogSelector)")
+        }
         return InstallPlan(
-            name: name, hostname: name, source: source, sizeGiB: sizeGiB, defaultUser: defaultUser)
+            name: name, hostname: name, source: source, sizeGiB: sizeGiB,
+            defaultUser: defaultUser, catalogSelector: catalogSelector)
     }
 
     private static func validateReadable(_ source: InstallSource) throws {
@@ -179,7 +186,8 @@ public final class InstallDriver {
         }
         let entry = DistroEntry(
             name: plan.name, image: imageURL.lastPathComponent, hostname: plan.hostname,
-            createdAt: Self.timestamp(), defaultUser: plan.defaultUser)
+            createdAt: Self.timestamp(), defaultUser: plan.defaultUser,
+            catalogSelector: plan.catalogSelector)
         var registry = try Registry.load(from: home.registryURL)
         try registry.add(entry)
         try registry.save(to: home.registryURL)

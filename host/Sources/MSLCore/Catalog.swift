@@ -33,6 +33,7 @@ public struct CatalogArtifact: Codable, Equatable, Sendable {
 public enum CatalogIconKind: String, Codable, Sendable {
     case icns
     case png
+    case svg
 }
 
 public struct CatalogIcon: Codable, Equatable, Sendable {
@@ -165,6 +166,10 @@ public struct Catalog: Codable, Equatable, Sendable {
             "unknown catalog distro '\(parts.family)'; use 'msl catalog list'")
     }
 
+    public static func isValidSelectorSyntax(_ selector: String) -> Bool {
+        return (try? SelectorParts.parse(selector)) != nil
+    }
+
     private func resolveVersion(_ key: String?, in family: CatalogFamily) throws -> CatalogVersion {
         let wanted = key ?? family.defaultVersion
         for version in family.versions where version.matches(wanted) {  // bounded: family versions
@@ -182,6 +187,9 @@ private struct SelectorParts {
     static func parse(_ selector: String) throws -> SelectorParts {
         let trimmed = selector.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw MSLError.invalidArgument("empty catalog selector") }
+        guard trimmed.count <= 96, trimmed.allSatisfy(Self.isSelectorScalar) else {
+            throw MSLError.invalidArgument("invalid catalog selector: \(selector)")
+        }
         let pieces = trimmed.split(separator: "@", omittingEmptySubsequences: false)
         guard pieces.count <= 2, let first = pieces.first, !first.isEmpty else {
             throw MSLError.invalidArgument("invalid catalog selector: \(selector)")
@@ -191,6 +199,12 @@ private struct SelectorParts {
             throw MSLError.invalidArgument("invalid catalog selector: \(selector)")
         }
         return SelectorParts(family: String(first), version: version)
+    }
+
+    private static func isSelectorScalar(_ scalar: Character) -> Bool {
+        return scalar.isASCII
+            && (scalar.isLetter || scalar.isNumber || scalar == "-"
+                || scalar == "." || scalar == "@")
     }
 }
 
@@ -281,6 +295,8 @@ extension Catalog {
         "https://cloud-images.ubuntu.com/releases/noble/release-20260615/"
         + "ubuntu-24.04-server-cloudimg-arm64-root.tar.xz"
 
+    private static let ubuntuIcon = "https://cdn.simpleicons.org/ubuntu"
+
     private static let embeddedJSON = """
         {
           "schema": 1,
@@ -304,6 +320,12 @@ extension Catalog {
                     "sha256": "15188696da114a3ffd3d3554f5858a0c3ac257933656e85feb4e0e83ad542b4a",
                     "sizeBytes": 214867024
                   },
+                  "icon": {
+                    "kind": "svg",
+                    "url": "\(ubuntuIcon)",
+                    "sha256": "05908333dce000b0775603cdc3d14b4a7d315d3625c9fa0b374804d6753643c3",
+                    "sizeBytes": 963
+                  },
                   "defaultUser": null,
                   "imageSizeGiB": 8,
                   "notes": "Ubuntu 24.04 LTS arm64 cloud rootfs."
@@ -313,4 +335,39 @@ extension Catalog {
           ]
         }
         """
+}
+
+public struct DistroIconRecord: Equatable, Sendable {
+    public let name: String
+    public let aliases: [String]
+    public let icon: CatalogIcon
+}
+
+public enum DistroIconCatalog {
+    public static func icon(for name: String) -> CatalogIcon? {
+        return records.first { record in
+            record.name == name || record.aliases.contains(name)
+        }?.icon
+    }
+
+    public static let records: [DistroIconRecord] = [
+        DistroIconRecord(
+            name: "ubuntu", aliases: [],
+            icon: CatalogIcon(
+                kind: .svg, url: "https://cdn.simpleicons.org/ubuntu",
+                sha256: "05908333dce000b0775603cdc3d14b4a7d315d3625c9fa0b374804d6753643c3",
+                sizeBytes: 963)),
+        DistroIconRecord(
+            name: "arch", aliases: ["archlinux"],
+            icon: CatalogIcon(
+                kind: .svg, url: "https://cdn.simpleicons.org/archlinux",
+                sha256: "1d45fa365b8308aa408565a649e6646232d43e4ccbc02b106021b8b2dcd65a4d",
+                sizeBytes: 780)),
+        DistroIconRecord(
+            name: "fedora", aliases: [],
+            icon: CatalogIcon(
+                kind: .svg, url: "https://cdn.simpleicons.org/fedora",
+                sha256: "dafd9d19355dc0c89e8a14aac3740b224e2eb0e2fb42db050ba3832acaa7b106",
+                sizeBytes: 911)),
+    ]
 }

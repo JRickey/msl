@@ -10,6 +10,8 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(resolved.version.version, "24.04")
         XCTAssertEqual(resolved.artifact.compression, .xz)
         XCTAssertTrue(resolved.artifact.url.hasPrefix("https://"))
+        XCTAssertEqual(resolved.version.icon?.kind, .svg)
+        XCTAssertEqual(resolved.version.icon?.url, "https://cdn.simpleicons.org/ubuntu")
     }
 
     func testEmbeddedCatalogResolvesCaseAndVersionAlias() throws {
@@ -25,11 +27,27 @@ final class CatalogTests: XCTestCase {
         }
     }
 
+    func testSelectorSyntaxRejectsUnsafeCharacters() {
+        XCTAssertTrue(Catalog.isValidSelectorSyntax("ubuntu@24.04"))
+        XCTAssertFalse(Catalog.isValidSelectorSyntax("../ubuntu"))
+        XCTAssertFalse(Catalog.isValidSelectorSyntax("ubuntu noble"))
+    }
+
     func testListRowsHideExperimentalByDefault() throws {
         let catalog = try Catalog.loadEmbedded()
         let rows = catalog.listRows(includeExperimental: false)
         XCTAssertEqual(rows.map(\.name), ["ubuntu"])
         XCTAssertEqual(rows.first?.status, .recommended)
+    }
+
+    func testKnownDistroIconsResolveByAliases() throws {
+        XCTAssertEqual(DistroIconCatalog.icon(for: "ubuntu")?.kind, .svg)
+        XCTAssertEqual(
+            DistroIconCatalog.icon(for: "arch")?.url, "https://cdn.simpleicons.org/archlinux")
+        XCTAssertEqual(
+            DistroIconCatalog.icon(for: "archlinux")?.url, "https://cdn.simpleicons.org/archlinux")
+        XCTAssertEqual(DistroIconCatalog.icon(for: "fedora")?.kind, .svg)
+        XCTAssertNil(DistroIconCatalog.icon(for: "custom"))
     }
 
     func testCatalogIconRequiresHTTPS() throws {

@@ -84,7 +84,8 @@ struct InstallCommand: ParsableCommand {
         let plan = try InstallPlan.make(
             name: installName, source: source, sizeGiB: resolved.version.imageSizeGiB,
             existingNames: registry.distros.map { $0.name },
-            defaultUser: resolved.version.defaultUser)
+            defaultUser: resolved.version.defaultUser,
+            catalogSelector: resolved.selector)
         Self.note("install: building image for \(installName)")
         let entry = try install(plan: plan, home: home)
         Self.note("install: registered \(entry.name)")

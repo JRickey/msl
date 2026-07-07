@@ -128,6 +128,21 @@ final class RegistryConfigPersistenceTests: XCTestCase {
         XCTAssertEqual(loaded.entry(name: "ubuntu")?.rosetta, true)
     }
 
+    func testCatalogSelectorRoundTripAndSetterPreservation() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var reg = Registry()
+        try reg.add(
+            DistroEntry(
+                name: "work", image: "work.img", hostname: "work", createdAt: "t",
+                catalogSelector: "ubuntu@24.04"))
+        try reg.setHostname(name: "work", hostname: "dev")
+        try reg.save(to: url)
+        let loaded = try Registry.load(from: url)
+        XCTAssertEqual(loaded.entry(name: "work")?.catalogSelector, "ubuntu@24.04")
+        XCTAssertEqual(loaded.entry(name: "work")?.hostname, "dev")
+    }
+
     func testUnsetFieldsOmittedFromJSON() throws {
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -139,6 +154,8 @@ final class RegistryConfigPersistenceTests: XCTestCase {
         XCTAssertFalse(text.contains("defaultUser"), "unset user must be an absent key: \(text)")
         XCTAssertFalse(text.contains("macShare"), "unset share must be an absent key: \(text)")
         XCTAssertFalse(text.contains("rosetta"), "unset rosetta must be an absent key: \(text)")
+        XCTAssertFalse(
+            text.contains("catalogSelector"), "unset catalog selector must be absent: \(text)")
     }
 
     func testOldRegistryWithoutNewKeysLoads() throws {
@@ -152,5 +169,6 @@ final class RegistryConfigPersistenceTests: XCTestCase {
         XCTAssertNil(loaded.entry(name: "ubuntu")?.defaultUser)
         XCTAssertNil(loaded.entry(name: "ubuntu")?.macShare)
         XCTAssertNil(loaded.entry(name: "ubuntu")?.rosetta)
+        XCTAssertNil(loaded.entry(name: "ubuntu")?.catalogSelector)
     }
 }

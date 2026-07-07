@@ -35,6 +35,33 @@ final class CatalogIconStoreTests: XCTestCase {
         XCTAssertTrue(recorder.events().contains(.cacheHit(path: cached.path)))
     }
 
+    func testCachedSVGIconIsVerifiedAndConvertedToICNS() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msl-svg-icon-store-tests-\(UUID().uuidString)")
+        let home = MSLHome(root: root.appendingPathComponent("home"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let svgText =
+            ##"<svg fill="#E95420" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">"##
+            + #"<path d="M12 2 22 22H2z"/></svg>"#
+        let svg = Data(svgText.utf8)
+        let sha = SHA256.hash(data: svg).map { String(format: "%02x", $0) }.joined()
+        let cached = home.catalogIconCacheDirectory
+            .appendingPathComponent(sha)
+            .appendingPathComponent("ubuntu.svg")
+        try FileManager.default.createDirectory(
+            at: cached.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try svg.write(to: cached)
+        let icon = CatalogIcon(
+            kind: .svg, url: "https://example.invalid/ubuntu", sha256: sha,
+            sizeBytes: UInt64(svg.count))
+
+        let converted = try CatalogIconStore(home: home).icon(icon, label: "ubuntu")
+
+        XCTAssertEqual(converted.pathExtension, "icns")
+        let data = try Data(contentsOf: converted)
+        XCTAssertEqual(String(data: Data(data.prefix(4)), encoding: .ascii), "icns")
+    }
+
     private func makeResolved(iconSHA: String, sizeBytes: UInt64) -> CatalogResolved {
         let artifact = CatalogArtifact(
             arch: "arm64", kind: .rootfsTar, compression: .xz,

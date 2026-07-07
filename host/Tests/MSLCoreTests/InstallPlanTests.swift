@@ -106,6 +106,15 @@ final class InstallPlanTests: XCTestCase {
         XCTAssertEqual(plan.defaultUser, "jack")
     }
 
+    func testCatalogSelectorThreadsToPlan() throws {
+        let path = try tempFile(suffix: ".tar.xz")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let plan = try InstallPlan.make(
+            name: "work", fromPath: path, sizeGiB: 8, existingNames: [],
+            catalogSelector: "ubuntu@24.04")
+        XCTAssertEqual(plan.catalogSelector, "ubuntu@24.04")
+    }
+
     func testInvalidDefaultUserRejected() throws {
         let path = try tempFile(suffix: ".msl")
         defer { try? FileManager.default.removeItem(atPath: path) }

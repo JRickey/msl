@@ -117,6 +117,12 @@ public struct CatalogIconStore: Sendable {
         for resolved: CatalogResolved, progress: CatalogDownloadProgressHandler? = nil
     ) throws -> URL? {
         guard let icon = resolved.version.icon else { return nil }
+        return try self.icon(icon, label: resolved.selector, progress: progress)
+    }
+
+    public func icon(
+        _ icon: CatalogIcon, label: String, progress: CatalogDownloadProgressHandler? = nil
+    ) throws -> URL {
         try home.ensureDirectories()
         let original = try originalURL(for: icon)
         progress?(.checkingCache(path: original.path))
@@ -131,7 +137,7 @@ public struct CatalogIconStore: Sendable {
             progress?(.verifying(path: partial.path, sha256: icon.sha256))
             guard try sha256Hex(partial) == icon.sha256 else {
                 try? FileManager.default.removeItem(at: partial)
-                throw MSLError.configuration("icon SHA256 mismatch for \(resolved.selector)")
+                throw MSLError.configuration("icon SHA256 mismatch for \(label)")
             }
             try replace(partial, original)
         } else {
@@ -143,7 +149,10 @@ public struct CatalogIconStore: Sendable {
     }
 
     private func originalURL(for icon: CatalogIcon) throws -> URL {
-        let basename = URL(string: icon.url)?.lastPathComponent ?? ""
+        var basename = URL(string: icon.url)?.lastPathComponent ?? ""
+        if icon.kind == .svg, !basename.hasSuffix(".svg") {
+            basename += ".svg"
+        }
         guard !basename.isEmpty, basename != ".", basename != "..", !basename.contains("/") else {
             throw MSLError.configuration("catalog icon basename invalid")
         }
@@ -165,6 +174,40 @@ public struct CatalogIconStore: Sendable {
             let png = try Data(contentsOf: original)
             try LauncherIcon.writeICNS(pngData: png, to: target)
             return target
+        case .svg:
+            let target = original.deletingPathExtension().appendingPathExtension("icns")
+            if isValidICNS(target) {
+                return target
+            }
+            let png = try rasterizeSVG(original)
+            try LauncherIcon.writeICNS(pngData: png, to: target)
+            return target
+        }
+    }
+
+    private func rasterizeSVG(_ original: URL) throws -> Data {
+        try validateSVG(original)
+        let png = original.appendingPathExtension("png")
+        try? FileManager.default.removeItem(at: png)
+        try runProcess(
+            "/usr/bin/qlmanage",
+            ["-t", "-s", "1024", "-o", original.deletingLastPathComponent().path, original.path])
+        guard FileManager.default.isReadableFile(atPath: png.path) else {
+            throw MSLError.io("Quick Look did not render \(original.path)")
+        }
+        defer { try? FileManager.default.removeItem(at: png) }
+        return try Data(contentsOf: png)
+    }
+
+    private func validateSVG(_ url: URL) throws {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard data.count <= 5_000_000 else {
+            throw MSLError.configuration("icon SVG is too large: \(url.path)")
+        }
+        guard let text = String(data: data.prefix(4096), encoding: .utf8),
+            text.range(of: #"<svg\b"#, options: .regularExpression) != nil
+        else {
+            throw MSLError.configuration("icon is not an SVG file: \(url.path)")
         }
     }
 
@@ -203,6 +246,19 @@ public struct CatalogIconStore: Sendable {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.moveItem(at: source, to: destination)
+    }
+
+    private func runProcess(_ executable: String, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw MSLError.io("\(executable) failed with status \(process.terminationStatus)")
+        }
     }
 
     private func sha256Hex(_ url: URL) throws -> String {

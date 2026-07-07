@@ -54,7 +54,8 @@ public enum MenuBarInstall {
         let plan = try InstallPlan.make(
             name: installedName, source: source, sizeGiB: resolved.version.imageSizeGiB,
             existingNames: registry.distros.map { $0.name },
-            defaultUser: resolved.version.defaultUser)
+            defaultUser: resolved.version.defaultUser,
+            catalogSelector: resolved.selector)
         return Prepared(plan: plan, options: resolveOptions(home: home, env: env))
     }
 
