@@ -64,6 +64,10 @@ struct InstallCommand: ParsableCommand {
             throw MSLError.invalidArgument(
                 "missing selector; use 'msl catalog list' or pass --from")
         }
+        if FileManager.default.fileExists(atPath: selector) {
+            throw MSLError.invalidArgument(
+                "'\(selector)' is a local path; install it with 'msl install --from \(selector)'")
+        }
         Self.note("catalog: resolving \(selector)")
         let catalog = try Catalog.loadEmbedded()
         let resolved = try catalog.resolve(selector: selector)

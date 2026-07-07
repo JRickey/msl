@@ -23,13 +23,23 @@ struct CatalogListCommand: ParsableCommand {
             print("no catalog distros available")
             return
         }
-        print("NAME       VERSION   STATUS        DESCRIPTION")
+        let nameWidth = maxWidth(header: "NAME", rows.map(\.name)) + 2
+        let versionWidth = maxWidth(header: "VERSION", rows.map(\.version)) + 2
+        let statusWidth = maxWidth(header: "STATUS", rows.map { $0.status.rawValue }) + 2
+        print(
+            pad("NAME", nameWidth) + pad("VERSION", versionWidth) + pad("STATUS", statusWidth)
+                + "DESCRIPTION")
         for row in rows {  // bounded: embedded catalog
             let line =
-                pad(row.name, 11) + pad(row.version, 10)
-                + pad(row.status.rawValue, 14) + row.description
+                pad(row.name, nameWidth) + pad(row.version, versionWidth)
+                + pad(row.status.rawValue, statusWidth) + row.description
             print(line)
         }
+    }
+
+    private func maxWidth(header: String, _ values: [String]) -> Int {
+        let valueWidth = values.map(\.count).max() ?? 0
+        return max(header.count, valueWidth)
     }
 
     private func pad(_ text: String, _ width: Int) -> String {
