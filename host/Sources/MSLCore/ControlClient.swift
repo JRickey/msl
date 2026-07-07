@@ -64,6 +64,26 @@ public final class ControlClient: @unchecked Sendable {
         return try roundTrip(makeOp("net_listeners", Optional<EmptyReq>.none))
     }
 
+    public func guiProbe(_ req: GuiRuntimeReq) throws -> GuiProbeData {
+        return try roundTrip(makeOp("gui_probe", req))
+    }
+
+    public func guiStart(_ req: GuiRuntimeReq) throws -> GuiRuntimeData {
+        return try roundTrip(makeOp("gui_start", req))
+    }
+
+    public func guiStatus(_ req: GuiRuntimeReq) throws -> GuiRuntimeData {
+        return try roundTrip(makeOp("gui_status", req))
+    }
+
+    public func guiStop(_ req: GuiRuntimeReq) throws -> GuiRuntimeData {
+        return try roundTrip(makeOp("gui_stop", req))
+    }
+
+    public func guiLaunch(_ req: GuiLaunchReq) throws -> ExecData {
+        return try roundTrip(receiveTimeout: 5, makeOp("gui_launch", req))
+    }
+
     /// Buffered command execution. `distro` names the distro to run inside
     /// (nil = the agent's own context, used by the install builder VM). The
     /// receive timeout is widened for long builds via `receiveTimeout`.

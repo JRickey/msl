@@ -22,8 +22,8 @@ public enum Proto {
     /// Reverse interop exec (mac_exec v1): the guest shim dials CID_HOST here.
     public static let interopPort: UInt32 = 5010
 
-    /// Wire protocol version advertised by a v1.4 agent in the `ping` reply.
-    public static let version = 4
+    /// Wire protocol version advertised by a v1.5 agent in the `ping` reply.
+    public static let version = 5
 }
 
 /// Request sent host -> agent. `argv`, `env`, and `timeoutMs` apply to exec;
