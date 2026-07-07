@@ -140,18 +140,43 @@ final class BundleMetaRenderTests: XCTestCase {
     }
 }
 
+final class BundleMetaWSLTests: XCTestCase {
+    func testDefaultNameFoldsToMSLGrammar() throws {
+        let meta = try BundleMeta.parseWSL(
+            conf: "[oobe]\ndefaultName = Debian\ndefaultUid = 1000\n")
+        XCTAssertEqual(meta.name, "debian")
+        XCTAssertNil(meta.defaultUser)
+    }
+
+    func testInvalidDefaultNameReadsAsAbsent() throws {
+        let meta = try BundleMeta.parseWSL(conf: "[oobe]\ndefaultName = Not A Name!\n")
+        XCTAssertNil(meta.name)
+    }
+
+    func testDefaultNameOutsideOobeIgnored() throws {
+        let meta = try BundleMeta.parseWSL(conf: "[shortcut]\ndefaultName = debian\n")
+        XCTAssertNil(meta.name)
+    }
+
+    func testOverLineCapThrows() {
+        let conf = String(repeating: "\n", count: 4097)
+        XCTAssertThrowsError(try BundleMeta.parseWSL(conf: conf))
+    }
+}
+
 final class BundleReaderTests: XCTestCase {
     private func makeArchive(
-        confBody: String?, confMemberDir: String, gzip: Bool, in dir: URL
+        confBody: String?, confMemberDir: String, gzip: Bool, in dir: URL,
+        confFilename: String = "msl-distribution.conf", suffix: String = "msl"
     ) throws -> URL {
         let root = dir.appendingPathComponent("root")
         let etc = root.appendingPathComponent("etc")
         try FileManager.default.createDirectory(at: etc, withIntermediateDirectories: true)
         try Data("hello".utf8).write(to: root.appendingPathComponent("marker"))
         if let body = confBody {
-            try Data(body.utf8).write(to: etc.appendingPathComponent("msl-distribution.conf"))
+            try Data(body.utf8).write(to: etc.appendingPathComponent(confFilename))
         }
-        let out = dir.appendingPathComponent(gzip ? "bundle.msl" : "bundle-plain.msl")
+        let out = dir.appendingPathComponent(gzip ? "bundle.\(suffix)" : "bundle-plain.\(suffix)")
         var args = [gzip ? "-czf" : "-cf", out.path, "-C", root.path]
         args.append(confMemberDir)
         args.append("marker")
@@ -210,6 +235,35 @@ final class BundleReaderTests: XCTestCase {
         XCTAssertEqual(info.compression, TarCompression.none)
         XCTAssertNil(info.meta.name)
         XCTAssertNil(info.meta.defaultUser)
+    }
+
+    func testWslArchiveReadsOobeDefaultName() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let archive = try makeArchive(
+            confBody: "[oobe]\ndefaultName = Debian\n",
+            confMemberDir: "etc", gzip: true, in: dir,
+            confFilename: "wsl-distribution.conf", suffix: "wsl")
+        let info = try BundleReader.read(path: archive.path)
+        XCTAssertEqual(info.compression, .gzip)
+        XCTAssertEqual(info.meta.name, "debian")
+        XCTAssertNil(info.meta.defaultUser)
+    }
+
+    func testMslConfWinsOverWslConf() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let root = dir.appendingPathComponent("root")
+        let etc = root.appendingPathComponent("etc")
+        try FileManager.default.createDirectory(at: etc, withIntermediateDirectories: true)
+        try Data("[distro]\nname = mslwins\n".utf8)
+            .write(to: etc.appendingPathComponent("msl-distribution.conf"))
+        try Data("[oobe]\ndefaultName = wslname\n".utf8)
+            .write(to: etc.appendingPathComponent("wsl-distribution.conf"))
+        let out = dir.appendingPathComponent("both.wsl")
+        try runTar(["-czf", out.path, "-C", root.path, "etc"])
+        let info = try BundleReader.read(path: out.path)
+        XCTAssertEqual(info.meta.name, "mslwins")
     }
 
     func testNonTarGarbageRejected() throws {

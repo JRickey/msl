@@ -113,6 +113,12 @@ public enum MacExec {
         posix_spawn_file_actions_addopen(&actions, 0, secondaryPath, O_RDWR, 0)
         posix_spawn_file_actions_adddup2(&actions, 0, 1)
         posix_spawn_file_actions_adddup2(&actions, 0, 2)
+        // The child must not inherit either pty end beyond its stdio: a
+        // grandchild daemon holding the master (or a stray slave fd) would keep
+        // the host side from ever seeing EOF on this pty. The > 2 guards keep
+        // the closes off the freshly wired stdio fds.
+        if primary > 2 { posix_spawn_file_actions_addclose(&actions, primary) }
+        if secondary > 2 { posix_spawn_file_actions_addclose(&actions, secondary) }
         posix_spawn_file_actions_addchdir(&actions, cwd)
         var attr = try makeSIDAttr()
         defer { posix_spawnattr_destroy(&attr) }

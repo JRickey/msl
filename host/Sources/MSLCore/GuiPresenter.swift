@@ -226,10 +226,19 @@ public final class GuiPresenter: NSObject, GuiHost {
     }
 
     /// When no windows remain, finalize like a graceful exit so the CSV lands.
+    /// Deferred one grace period: apps that destroy a window before mapping the
+    /// next (splash screens, single-window relaunch) must not kill the session.
     private func closeIfLastWindow() {
         guard windows.isEmpty else { return }
-        beginShutdown()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.lastWindowGrace) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.windows.isEmpty else { return }
+                self.beginShutdown()
+            }
+        }
     }
+
+    private static let lastWindowGrace = 1.0
 
     // MARK: - Shutdown & reporting
 

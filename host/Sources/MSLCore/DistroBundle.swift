@@ -83,6 +83,34 @@ public struct BundleMeta: Sendable, Equatable {
         return value
     }
 
+    /// Parse a WSL `wsl-distribution.conf`: only `[oobe]`'s `defaultName` is
+    /// read, folded to the msl name grammar. Foreign metadata is advisory, so a
+    /// name that fails the grammar reads as absent rather than throwing.
+    public static func parseWSL(conf: String) throws -> BundleMeta {
+        let lines = conf.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count <= maxLines else {
+            throw MSLError.invalidArgument("bundle conf exceeds \(maxLines) lines")
+        }
+        var section = ""
+        var name: String?
+        for raw in lines {  // bounded: ≤ maxLines
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") || line.hasPrefix(";") { continue }
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                section = String(line.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+                continue
+            }
+            guard section == "oobe", let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if key == "defaultName" {
+                let folded = value.lowercased()
+                name = Registry.isValidName(folded) ? folded : nil
+            }
+        }
+        return BundleMeta(name: name, defaultUser: nil)
+    }
+
     /// Render a conf for export: `[distro]` with `name`, then `default-user`
     /// when non-nil. Trailing newline; `parse` round-trips the result.
     public static func render(name: String, defaultUser: String?) -> String {
@@ -111,6 +139,9 @@ public struct BundleInfo: Sendable, Equatable {
 /// conf member with `/usr/bin/tar` (bsdtar decompresses transparently).
 public enum BundleReader {
     private static let confMembers = ["./etc/msl-distribution.conf", "etc/msl-distribution.conf"]
+    private static let wslConfMembers = [
+        "./etc/wsl-distribution.conf", "etc/wsl-distribution.conf",
+    ]
     private static let stdoutCap = 1024 * 1024
     private static let deadlineSeconds = 300.0
     private static let maxReadIterations = 1 << 20
@@ -133,6 +164,14 @@ public enum BundleReader {
                 throw MSLError.invalidArgument("bundle conf is not valid UTF-8: \(path)")
             }
             let meta = try BundleMeta.parse(conf: conf)
+            return BundleInfo(compression: compression, meta: meta)
+        }
+        for member in wslConfMembers {  // bounded: two candidate paths
+            guard let data = try extractMember(path: path, member: member) else { continue }
+            guard let conf = String(data: data, encoding: .utf8) else {
+                throw MSLError.invalidArgument("bundle conf is not valid UTF-8: \(path)")
+            }
+            let meta = try BundleMeta.parseWSL(conf: conf)
             return BundleInfo(compression: compression, meta: meta)
         }
         return BundleInfo(compression: compression, meta: BundleMeta(name: nil, defaultUser: nil))

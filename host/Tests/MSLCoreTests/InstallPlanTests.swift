@@ -97,6 +97,22 @@ final class InstallPlanTests: XCTestCase {
             try InstallPlan.make(name: "u", fromPath: path, sizeGiB: 8, existingNames: []))
     }
 
+    func testWslWithSniffedCompressionClassified() throws {
+        let path = try tempFile(suffix: ".wsl")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let plan = try InstallPlan.make(
+            name: "u", fromPath: path, sizeGiB: 8, existingNames: [], bundleCompression: .xz)
+        guard case .tarball(_, let comp) = plan.source else { return XCTFail("expected tarball") }
+        XCTAssertEqual(comp, .xz)
+    }
+
+    func testWslWithoutSniffedCompressionRejected() throws {
+        let path = try tempFile(suffix: ".wsl")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        XCTAssertThrowsError(
+            try InstallPlan.make(name: "u", fromPath: path, sizeGiB: 8, existingNames: []))
+    }
+
     func testDefaultUserThreadsToPlan() throws {
         let path = try tempFile(suffix: ".msl")
         defer { try? FileManager.default.removeItem(atPath: path) }

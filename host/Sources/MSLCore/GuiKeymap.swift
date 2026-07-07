@@ -1,17 +1,22 @@
 import Foundation
 
-/// Static macOS virtual-keycode → Linux evdev-keycode table for the spike
-/// (ASCII, arrows, modifiers). `evdev(for:)` is total: an unmapped virtual key
+/// Static macOS virtual-keycode → Linux evdev-keycode table covering the full
+/// ANSI board: alphanumerics, punctuation, modifiers, function keys, the nav
+/// cluster, and the keypad. `evdev(for:)` is total: an unmapped virtual key
 /// returns `keyReserved` (0), which the caller drops rather than forwarding.
 public enum GuiKeymap {
     public static let keyReserved: UInt32 = 0
 
+    /// macOS virtual keycode for CapsLock; its `flagsChanged` fires once per
+    /// toggle, so the view synthesizes a press+release pair for it.
+    public static let virtualCapsLock: UInt16 = 0x39
+
     /// Translate one macOS virtual keycode to an evdev keycode, or `keyReserved`
-    /// when the spike table has no entry (total function, no partiality).
+    /// when the table has no entry (total function, no partiality).
     public static func evdev(for virtualCode: UInt16) -> UInt32 {
         assert(!GuiKeymap.table.isEmpty, "keymap table must be populated")
         let mapped = GuiKeymap.table[virtualCode] ?? keyReserved
-        assert(mapped <= 255, "spike evdev codes stay within one byte")
+        assert(mapped <= 255, "evdev codes stay within one byte")
         return mapped
     }
 
@@ -71,6 +76,55 @@ public enum GuiKeymap {
         0x3D: 100,  // Right Option → KEY_RIGHTALT
         0x37: 125,  // Command → KEY_LEFTMETA
         0x36: 126,  // Right Command → KEY_RIGHTMETA
+        0x39: 58,  // Caps Lock → KEY_CAPSLOCK
+        0x1B: 12,  // - → KEY_MINUS
+        0x18: 13,  // = → KEY_EQUAL
+        0x21: 26,  // [ → KEY_LEFTBRACE
+        0x1E: 27,  // ] → KEY_RIGHTBRACE
+        0x2A: 43,  // backslash → KEY_BACKSLASH
+        0x29: 39,  // ; → KEY_SEMICOLON
+        0x27: 40,  // ' → KEY_APOSTROPHE
+        0x32: 41,  // ` → KEY_GRAVE
+        0x2B: 51,  // , → KEY_COMMA
+        0x2F: 52,  // . → KEY_DOT
+        0x2C: 53,  // / → KEY_SLASH
+        0x0A: 86,  // ISO Section → KEY_102ND
+        0x7A: 59,  // F1 → KEY_F1
+        0x78: 60,  // F2 → KEY_F2
+        0x63: 61,  // F3 → KEY_F3
+        0x76: 62,  // F4 → KEY_F4
+        0x60: 63,  // F5 → KEY_F5
+        0x61: 64,  // F6 → KEY_F6
+        0x62: 65,  // F7 → KEY_F7
+        0x64: 66,  // F8 → KEY_F8
+        0x65: 67,  // F9 → KEY_F9
+        0x6D: 68,  // F10 → KEY_F10
+        0x67: 87,  // F11 → KEY_F11
+        0x6F: 88,  // F12 → KEY_F12
+        0x73: 102,  // Home → KEY_HOME
+        0x77: 107,  // End → KEY_END
+        0x74: 104,  // Page Up → KEY_PAGEUP
+        0x79: 109,  // Page Down → KEY_PAGEDOWN
+        0x75: 111,  // Forward Delete → KEY_DELETE
+        0x72: 110,  // Help/Insert → KEY_INSERT
+        0x47: 69,  // Keypad Clear → KEY_NUMLOCK
+        0x51: 117,  // Keypad = → KEY_KPEQUAL
+        0x4B: 98,  // Keypad / → KEY_KPSLASH
+        0x43: 55,  // Keypad * → KEY_KPASTERISK
+        0x4E: 74,  // Keypad - → KEY_KPMINUS
+        0x45: 78,  // Keypad + → KEY_KPPLUS
+        0x4C: 96,  // Keypad Enter → KEY_KPENTER
+        0x41: 83,  // Keypad . → KEY_KPDOT
+        0x52: 82,  // Keypad 0 → KEY_KP0
+        0x53: 79,  // Keypad 1 → KEY_KP1
+        0x54: 80,  // Keypad 2 → KEY_KP2
+        0x55: 81,  // Keypad 3 → KEY_KP3
+        0x56: 75,  // Keypad 4 → KEY_KP4
+        0x57: 76,  // Keypad 5 → KEY_KP5
+        0x58: 77,  // Keypad 6 → KEY_KP6
+        0x59: 71,  // Keypad 7 → KEY_KP7
+        0x5B: 72,  // Keypad 8 → KEY_KP8
+        0x5C: 73,  // Keypad 9 → KEY_KP9
     ]
 }
 

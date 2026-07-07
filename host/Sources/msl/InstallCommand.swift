@@ -6,7 +6,7 @@ struct InstallCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "install",
         abstract:
-            "Install a distro from the catalog or from an image, root tarball, or .msl bundle.")
+            "Install a distro from the catalog or from an image, root tarball, or bundle.")
 
     @Argument(
         help:
@@ -17,7 +17,8 @@ struct InstallCommand: ParsableCommand {
     @Option(
         name: .long,
         help:
-            "Source: an .img ext4 image, a .tar.xz/.tar.gz/.tar root tarball, or a .msl bundle.")
+            "Source: an .img ext4 image, a .tar.xz/.tar.gz/.tar root tarball, or a .msl/.wsl bundle."
+    )
     var from: String?
 
     @Option(name: .long, help: "Installed distro name for catalog installs.")
@@ -143,14 +144,16 @@ struct InstallCommand: ParsableCommand {
         }
     }
 
-    /// Resolve the install plan: a `.msl` source is sniffed for compression and
-    /// its embedded name/default-user; the CLI name wins over the embedded one.
-    /// A non-bundle source still requires an explicit name.
+    /// Resolve the install plan: a `.msl`/`.wsl` source is sniffed for
+    /// compression and its embedded name (msl conf: also default-user); the CLI
+    /// name wins over the embedded one. A non-bundle source still requires an
+    /// explicit name.
     private static func makePlan(
         name: String?, from: String, sizeGiB: Int, existing: [String]
     ) throws -> InstallPlan {
         assert(!from.isEmpty, "--from must not be empty")
-        if from.lowercased().hasSuffix(".msl") {
+        let lower = from.lowercased()
+        if lower.hasSuffix(".msl") || lower.hasSuffix(".wsl") {
             let info = try BundleReader.read(path: from)
             guard let resolved = name ?? info.meta.name else {
                 throw MSLError.invalidArgument(

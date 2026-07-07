@@ -127,6 +127,13 @@ final class GuiSurfaceView: NSView {
 
     override func flagsChanged(with event: NSEvent) {
         let code = event.keyCode
+        // CapsLock fires one flagsChanged per toggle, and xkb toggles caps on
+        // press — so each macOS toggle must arrive as a full press+release.
+        if code == GuiKeymap.virtualCapsLock {
+            owner?.keyEvent(virtualCode: code, down: true)
+            owner?.keyEvent(virtualCode: code, down: false)
+            return
+        }
         let down = !downModifiers.contains(code)
         if down {
             downModifiers.insert(code)

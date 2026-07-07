@@ -114,15 +114,15 @@ public struct InstallPlan: Sendable, Equatable {
         if lower.hasSuffix(".tar.xz") || lower.hasSuffix(".txz") { return .tarball(url, .xz) }
         if lower.hasSuffix(".tar.gz") || lower.hasSuffix(".tgz") { return .tarball(url, .gzip) }
         if lower.hasSuffix(".tar") { return .tarball(url, .none) }
-        if lower.hasSuffix(".msl") {
+        if lower.hasSuffix(".msl") || lower.hasSuffix(".wsl") {
             guard let compression = bundleCompression else {
                 throw MSLError.invalidArgument(
-                    "internal: .msl source needs a sniffed compression: \(path)")
+                    "internal: bundle source needs a sniffed compression: \(path)")
             }
             return .tarball(url, compression)
         }
         throw MSLError.invalidArgument(
-            "unsupported --from type (want .img, .tar.xz, .tar.gz, .tar, or .msl): \(path)")
+            "unsupported --from type (want .img, .tar.xz, .tar.gz, .tar, .msl, or .wsl): \(path)")
     }
 }
 
