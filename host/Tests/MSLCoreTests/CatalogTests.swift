@@ -42,11 +42,14 @@ final class CatalogTests: XCTestCase {
 
     func testKnownDistroIconsResolveByAliases() throws {
         XCTAssertEqual(DistroIconCatalog.icon(for: "ubuntu")?.kind, .svg)
+        XCTAssertEqual(DistroIconCatalog.displayName(for: "ubuntu"), "Ubuntu")
         XCTAssertEqual(
             DistroIconCatalog.icon(for: "arch")?.url, "https://cdn.simpleicons.org/archlinux")
+        XCTAssertEqual(DistroIconCatalog.displayName(for: "arch"), "Arch Linux")
         XCTAssertEqual(
             DistroIconCatalog.icon(for: "archlinux")?.url, "https://cdn.simpleicons.org/archlinux")
         XCTAssertEqual(DistroIconCatalog.icon(for: "fedora")?.kind, .svg)
+        XCTAssertEqual(DistroIconCatalog.displayName(for: "fedora"), "Fedora")
         XCTAssertNil(DistroIconCatalog.icon(for: "custom"))
     }
 

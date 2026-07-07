@@ -57,7 +57,7 @@ final class LauncherTests: XCTestCase {
     func testDefaultApplicationsDirectoryUsesLocalApplicationsDirectory() {
         let url = LauncherStore.defaultApplicationsDirectory(
             env: [:], localApplicationsDirectory: URL(fileURLWithPath: "/Applications"))
-        XCTAssertEqual(url.path, "/Applications/msl")
+        XCTAssertEqual(url.path, "/Applications")
     }
 
     func testCreateRejectsFileAtLauncherDirectoryPath() throws {
@@ -81,7 +81,21 @@ final class LauncherTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = try Fixture.make(root: root, apps: root.appendingPathComponent("msl"))
         let app = try fixture.store.create(name: "ubuntu", mode: .shell, replace: false)
-        XCTAssertEqual(app.path, root.appendingPathComponent("msl/ubuntu.app").path)
+        XCTAssertEqual(app.path, root.appendingPathComponent("msl/Ubuntu.app").path)
+    }
+
+    func testCreateRemovesLegacyNestedLauncher() throws {
+        let fixture = try Fixture.make()
+        let legacy = fixture.apps.appendingPathComponent("msl/ubuntu.app")
+        try FileManager.default.createDirectory(
+            at: legacy.appendingPathComponent("Contents/Resources"),
+            withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(LauncherRecord(distro: "ubuntu", launchMode: .shell))
+        try data.write(to: legacy.appendingPathComponent("Contents/Resources/launcher.json"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+        let app = try fixture.store.create(name: "ubuntu", mode: .shell, replace: false)
+        XCTAssertEqual(app.lastPathComponent, "Ubuntu.app")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
     }
 
     func testCreateCopiesProvidedIcon() throws {

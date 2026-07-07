@@ -70,7 +70,7 @@ public struct LauncherStore: Sendable {
         guard let localApplicationsDirectory else {
             preconditionFailure("macOS did not provide a local Applications directory")
         }
-        return localApplicationsDirectory.appendingPathComponent("msl")
+        return localApplicationsDirectory
     }
 
     @discardableResult
@@ -92,6 +92,7 @@ public struct LauncherStore: Sendable {
         if signBundles { try sign(app: temp) }
         try replaceItem(temp, app)
         try upsertManifest(name: name, mode: mode, path: app.path)
+        try removeLegacyNestedLauncher(name: name, current: app)
         return app
     }
 
@@ -146,7 +147,8 @@ public struct LauncherStore: Sendable {
 
     public func appURL(name: String) -> URL {
         precondition(Registry.isValidName(name), "launcher names are registry names")
-        return applicationsDirectory.appendingPathComponent(name + ".app")
+        let appName = DistroIconCatalog.displayName(for: name) ?? name
+        return applicationsDirectory.appendingPathComponent(appName + ".app")
     }
 
     public func record(in app: URL) throws -> LauncherRecord {
@@ -206,7 +208,7 @@ public struct LauncherStore: Sendable {
         let dict: [String: Any] = [
             "CFBundleExecutable": "msl-launcher",
             "CFBundleIdentifier": "dev.msl.launcher.distro.\(name)",
-            "CFBundleName": name,
+            "CFBundleName": DistroIconCatalog.displayName(for: name) ?? name,
             "CFBundlePackageType": "APPL",
             "CFBundleIconFile": LauncherIcon.bundleIconName,
             "CFBundleVersion": "1",
@@ -312,6 +314,28 @@ public struct LauncherStore: Sendable {
 
     public static func shellQuote(_ value: String) -> String {
         return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+extension LauncherStore {
+    fileprivate func removeLegacyNestedLauncher(name: String, current: URL) throws {
+        let legacyDirectory = applicationsDirectory.appendingPathComponent("msl")
+        let legacy = legacyDirectory.appendingPathComponent(name + ".app")
+        guard legacy.path != current.path, FileManager.default.fileExists(atPath: legacy.path)
+        else {
+            return
+        }
+        guard let record = try? record(in: legacy), record.isOwnedDistro, record.distro == name
+        else {
+            return
+        }
+        try FileManager.default.removeItem(at: legacy)
+        let remaining =
+            (try? FileManager.default.contentsOfDirectory(atPath: legacyDirectory.path))
+            ?? []
+        if remaining.filter({ !$0.hasPrefix(".") }).isEmpty {
+            try? FileManager.default.removeItem(at: legacyDirectory)
+        }
     }
 }
 

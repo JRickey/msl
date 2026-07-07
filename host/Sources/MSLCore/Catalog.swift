@@ -339,11 +339,18 @@ extension Catalog {
 
 public struct DistroIconRecord: Equatable, Sendable {
     public let name: String
+    public let displayName: String
     public let aliases: [String]
     public let icon: CatalogIcon
 }
 
 public enum DistroIconCatalog {
+    public static func displayName(for name: String) -> String? {
+        return records.first { record in
+            record.name == name || record.aliases.contains(name)
+        }?.displayName
+    }
+
     public static func icon(for name: String) -> CatalogIcon? {
         return records.first { record in
             record.name == name || record.aliases.contains(name)
@@ -352,19 +359,19 @@ public enum DistroIconCatalog {
 
     public static let records: [DistroIconRecord] = [
         DistroIconRecord(
-            name: "ubuntu", aliases: [],
+            name: "ubuntu", displayName: "Ubuntu", aliases: [],
             icon: CatalogIcon(
                 kind: .svg, url: "https://cdn.simpleicons.org/ubuntu",
                 sha256: "05908333dce000b0775603cdc3d14b4a7d315d3625c9fa0b374804d6753643c3",
                 sizeBytes: 963)),
         DistroIconRecord(
-            name: "arch", aliases: ["archlinux"],
+            name: "arch", displayName: "Arch Linux", aliases: ["archlinux"],
             icon: CatalogIcon(
                 kind: .svg, url: "https://cdn.simpleicons.org/archlinux",
                 sha256: "1d45fa365b8308aa408565a649e6646232d43e4ccbc02b106021b8b2dcd65a4d",
                 sizeBytes: 780)),
         DistroIconRecord(
-            name: "fedora", aliases: [],
+            name: "fedora", displayName: "Fedora", aliases: [],
             icon: CatalogIcon(
                 kind: .svg, url: "https://cdn.simpleicons.org/fedora",
                 sha256: "dafd9d19355dc0c89e8a14aac3740b224e2eb0e2fb42db050ba3832acaa7b106",
