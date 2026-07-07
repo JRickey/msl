@@ -78,6 +78,8 @@ struct InstallCommand: ParsableCommand {
         let sourceURL = try CatalogDownloader(home: home).fetch(resolved) { progress in
             reporter.emit(progress)
         }
+        let launcherIcon = try prepareLauncherIcon(
+            home: home, resolved: resolved, reporter: reporter)
         let source = InstallSource.tarball(sourceURL, resolved.artifact.compression)
         let plan = try InstallPlan.make(
             name: installName, source: source, sizeGiB: resolved.version.imageSizeGiB,
@@ -86,7 +88,23 @@ struct InstallCommand: ParsableCommand {
         Self.note("install: building image for \(installName)")
         let entry = try install(plan: plan, home: home)
         Self.note("install: registered \(entry.name)")
+        let launcher = try LauncherStore(home: home).create(
+            name: entry.name, mode: .shell, replace: true, icon: launcherIcon)
+        Self.note("launcher: created \(launcher.path)")
         try printInstall(entry, home: home)
+    }
+
+    private func prepareLauncherIcon(
+        home: MSLHome, resolved: CatalogResolved, reporter: CatalogProgressReporter
+    ) throws -> URL? {
+        guard resolved.version.icon != nil else {
+            Self.note("launcher: no catalog icon; generating fallback icon")
+            return nil
+        }
+        Self.note("catalog: preparing launcher icon")
+        return try CatalogIconStore(home: home).icon(for: resolved) { progress in
+            reporter.emit(progress)
+        }
     }
 
     private static func validateCatalogName(_ name: String, registry: Registry) throws {

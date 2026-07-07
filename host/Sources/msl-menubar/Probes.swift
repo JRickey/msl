@@ -140,18 +140,34 @@ enum InstallRunner {
     ) -> InstallOutcome {
         do {
             let prepared = try prepare(home: home, request: request, progress: progress)
+            let launcherIcon = try prepareLauncherIcon(
+                home: home, request: request, progress: progress)
             progress(.message("Building image for \(prepared.plan.name)…"))
             let entry = try InstallDriver(home: home).install(
                 plan: prepared.plan, options: prepared.options)
             progress(.message("Registered \(entry.name)"))
             if case .catalog = request {
                 _ = try LauncherStore(home: home).create(
-                    name: entry.name, mode: .shell, replace: true)
+                    name: entry.name, mode: .shell, replace: true, icon: launcherIcon)
                 progress(.message("Created launcher for \(entry.name)"))
             }
             return .installed(name: entry.name)
         } catch {
             return .failed(message: "\(error)")
+        }
+    }
+
+    private static func prepareLauncherIcon(
+        home: MSLHome, request: InstallRequest, progress: @escaping InstallProgressHandler
+    ) throws -> URL? {
+        guard case .catalog(let resolved, _) = request else { return nil }
+        guard resolved.version.icon != nil else {
+            progress(.message("Generating launcher icon…"))
+            return nil
+        }
+        progress(.message("Preparing launcher icon…"))
+        return try CatalogIconStore(home: home).icon(for: resolved) { event in
+            progress(.catalog(event))
         }
     }
 

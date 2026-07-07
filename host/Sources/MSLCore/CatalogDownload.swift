@@ -106,6 +106,120 @@ public struct CatalogDownloader: Sendable {
     }
 }
 
+public struct CatalogIconStore: Sendable {
+    private let home: MSLHome
+
+    public init(home: MSLHome) {
+        self.home = home
+    }
+
+    public func icon(
+        for resolved: CatalogResolved, progress: CatalogDownloadProgressHandler? = nil
+    ) throws -> URL? {
+        guard let icon = resolved.version.icon else { return nil }
+        try home.ensureDirectories()
+        let original = try originalURL(for: icon)
+        progress?(.checkingCache(path: original.path))
+        if !(try verifyIfPresent(original, sha256: icon.sha256)) {
+            try FileManager.default.createDirectory(
+                at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let partial = original.appendingPathExtension("part")
+            try? FileManager.default.removeItem(at: partial)
+            progress?(.startingDownload(url: icon.url, bytes: icon.sizeBytes))
+            try download(
+                url: icon.url, output: partial, expectedBytes: icon.sizeBytes, progress: progress)
+            progress?(.verifying(path: partial.path, sha256: icon.sha256))
+            guard try sha256Hex(partial) == icon.sha256 else {
+                try? FileManager.default.removeItem(at: partial)
+                throw MSLError.configuration("icon SHA256 mismatch for \(resolved.selector)")
+            }
+            try replace(partial, original)
+        } else {
+            progress?(.cacheHit(path: original.path))
+        }
+        let converted = try convertedURL(for: original, icon: icon)
+        progress?(.ready(path: converted.path))
+        return converted
+    }
+
+    private func originalURL(for icon: CatalogIcon) throws -> URL {
+        let basename = URL(string: icon.url)?.lastPathComponent ?? ""
+        guard !basename.isEmpty, basename != ".", basename != "..", !basename.contains("/") else {
+            throw MSLError.configuration("catalog icon basename invalid")
+        }
+        return home.catalogIconCacheDirectory
+            .appendingPathComponent(icon.sha256)
+            .appendingPathComponent(basename)
+    }
+
+    private func convertedURL(for original: URL, icon: CatalogIcon) throws -> URL {
+        switch icon.kind {
+        case .icns:
+            try LauncherIcon.validateICNS(at: original)
+            return original
+        case .png:
+            let target = original.deletingPathExtension().appendingPathExtension("icns")
+            if isValidICNS(target) {
+                return target
+            }
+            let png = try Data(contentsOf: original)
+            try LauncherIcon.writeICNS(pngData: png, to: target)
+            return target
+        }
+    }
+
+    private func isValidICNS(_ url: URL) -> Bool {
+        guard FileManager.default.isReadableFile(atPath: url.path) else { return false }
+        return (try? LauncherIcon.validateICNS(at: url)) != nil
+    }
+
+    private func verifyIfPresent(_ url: URL, sha256: String) throws -> Bool {
+        guard FileManager.default.isReadableFile(atPath: url.path) else { return false }
+        if try sha256Hex(url) == sha256 { return true }
+        try? FileManager.default.removeItem(at: url)
+        return false
+    }
+
+    private func download(
+        url: String, output: URL, expectedBytes: UInt64,
+        progress: CatalogDownloadProgressHandler?
+    ) throws {
+        guard let source = URL(string: url), source.scheme == "https" else {
+            throw MSLError.configuration("catalog icon URL must be HTTPS: \(url)")
+        }
+        let delegate = CatalogDownloadDelegate(
+            output: output, expectedBytes: expectedBytes, progress: progress)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 10 * 60
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        session.downloadTask(with: source).resume()
+        try delegate.wait()
+    }
+
+    private func replace(_ source: URL, _ destination: URL) throws {
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+    }
+
+    private func sha256Hex(_ url: URL) throws -> String {
+        guard let handle = FileHandle(forReadingAtPath: url.path) else {
+            throw MSLError.io("cannot read \(url.path)")
+        }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let data = handle.readData(ofLength: 1024 * 1024)
+            if data.isEmpty { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
 private final class CatalogDownloadDelegate: NSObject, URLSessionDownloadDelegate {
     private let output: URL
     private let expectedBytes: UInt64

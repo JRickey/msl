@@ -57,8 +57,22 @@ final class InstallQueueTests: XCTestCase {
     }
 
     func testCatalogRequestDisplayNameUsesOverride() throws {
-        let resolved = try Catalog.loadEmbedded().resolve(selector: "ubuntu@24.04")
+        let resolved = catalogResolved()
         let request = InstallRequest.catalog(resolved, installedName: "noble")
         XCTAssertEqual(request.displayName, "ubuntu@24.04 as noble")
+    }
+
+    private func catalogResolved() -> CatalogResolved {
+        let artifact = CatalogArtifact(
+            arch: "arm64", kind: .rootfsTar, compression: .xz,
+            url: "https://example.invalid/rootfs.tar.xz",
+            sha256: String(repeating: "b", count: 64), sizeBytes: 1024)
+        let version = CatalogVersion(
+            version: "24.04", aliases: [], status: .recommended, artifact: artifact, icon: nil,
+            defaultUser: nil, imageSizeGiB: 8, notes: "test")
+        let family = CatalogFamily(
+            name: "ubuntu", friendlyName: "Ubuntu", defaultVersion: "24.04", aliases: [],
+            versions: [version])
+        return CatalogResolved(family: family, version: version, artifact: artifact)
     }
 }

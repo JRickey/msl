@@ -16,6 +16,37 @@ public struct CatalogArtifact: Codable, Equatable, Sendable {
     public let url: String
     public let sha256: String
     public let sizeBytes: UInt64
+
+    public init(
+        arch: String, kind: CatalogArtifactKind, compression: TarCompression, url: String,
+        sha256: String, sizeBytes: UInt64
+    ) {
+        self.arch = arch
+        self.kind = kind
+        self.compression = compression
+        self.url = url
+        self.sha256 = sha256
+        self.sizeBytes = sizeBytes
+    }
+}
+
+public enum CatalogIconKind: String, Codable, Sendable {
+    case icns
+    case png
+}
+
+public struct CatalogIcon: Codable, Equatable, Sendable {
+    public let kind: CatalogIconKind
+    public let url: String
+    public let sha256: String
+    public let sizeBytes: UInt64
+
+    public init(kind: CatalogIconKind, url: String, sha256: String, sizeBytes: UInt64) {
+        self.kind = kind
+        self.url = url
+        self.sha256 = sha256
+        self.sizeBytes = sizeBytes
+    }
 }
 
 public struct CatalogVersion: Codable, Equatable, Sendable {
@@ -23,9 +54,24 @@ public struct CatalogVersion: Codable, Equatable, Sendable {
     public let aliases: [String]
     public let status: CatalogStatus
     public let artifact: CatalogArtifact
+    public let icon: CatalogIcon?
     public let defaultUser: String?
     public let imageSizeGiB: Int
     public let notes: String
+
+    public init(
+        version: String, aliases: [String], status: CatalogStatus, artifact: CatalogArtifact,
+        icon: CatalogIcon?, defaultUser: String?, imageSizeGiB: Int, notes: String
+    ) {
+        self.version = version
+        self.aliases = aliases
+        self.status = status
+        self.artifact = artifact
+        self.icon = icon
+        self.defaultUser = defaultUser
+        self.imageSizeGiB = imageSizeGiB
+        self.notes = notes
+    }
 }
 
 public struct CatalogFamily: Codable, Equatable, Sendable {
@@ -34,12 +80,29 @@ public struct CatalogFamily: Codable, Equatable, Sendable {
     public let defaultVersion: String
     public let aliases: [String]
     public let versions: [CatalogVersion]
+
+    public init(
+        name: String, friendlyName: String, defaultVersion: String, aliases: [String],
+        versions: [CatalogVersion]
+    ) {
+        self.name = name
+        self.friendlyName = friendlyName
+        self.defaultVersion = defaultVersion
+        self.aliases = aliases
+        self.versions = versions
+    }
 }
 
 public struct CatalogResolved: Equatable, Sendable {
     public let family: CatalogFamily
     public let version: CatalogVersion
     public let artifact: CatalogArtifact
+
+    public init(family: CatalogFamily, version: CatalogVersion, artifact: CatalogArtifact) {
+        self.family = family
+        self.version = version
+        self.artifact = artifact
+    }
 
     public var selector: String { "\(family.name)@\(version.version)" }
 }
@@ -168,6 +231,9 @@ extension Catalog {
             try insert(key: alias, into: &seen, label: "\(family) version alias")
         }
         try validateArtifact(version.artifact)
+        if let icon = version.icon {
+            try validateIcon(icon)
+        }
         guard (InstallPlan.minSizeGiB...InstallPlan.maxSizeGiB).contains(version.imageSizeGiB)
         else {
             throw MSLError.configuration("catalog image size out of range for \(family)")
@@ -187,6 +253,19 @@ extension Catalog {
         guard artifact.sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
         else {
             throw MSLError.configuration("catalog SHA256 invalid for \(artifact.url)")
+        }
+    }
+
+    private func validateIcon(_ icon: CatalogIcon) throws {
+        guard icon.url.hasPrefix("https://") else {
+            throw MSLError.configuration("catalog icon URL must be HTTPS: \(icon.url)")
+        }
+        guard icon.sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+        else {
+            throw MSLError.configuration("catalog icon SHA256 invalid for \(icon.url)")
+        }
+        guard (1...5_000_000).contains(icon.sizeBytes) else {
+            throw MSLError.configuration("catalog icon size out of range")
         }
     }
 

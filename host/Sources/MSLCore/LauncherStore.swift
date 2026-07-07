@@ -69,7 +69,9 @@ public struct LauncherStore: Sendable {
     }
 
     @discardableResult
-    public func create(name: String, mode: LauncherMode, replace: Bool) throws -> URL {
+    public func create(
+        name: String, mode: LauncherMode, replace: Bool, icon: URL? = nil
+    ) throws -> URL {
         try validateRegistered(name)
         let app = appURL(name: name)
         if FileManager.default.fileExists(atPath: app.path) {
@@ -80,7 +82,7 @@ public struct LauncherStore: Sendable {
         }
         let temp = applicationsDirectory.appendingPathComponent(".\(name).\(UUID().uuidString).app")
         try? FileManager.default.removeItem(at: temp)
-        try writeBundle(temp, name: name, mode: mode)
+        try writeBundle(temp, name: name, mode: mode, icon: icon)
         if signBundles { try sign(app: temp) }
         try replaceItem(temp, app)
         try upsertManifest(name: name, mode: mode, path: app.path)
@@ -151,7 +153,9 @@ public struct LauncherStore: Sendable {
         }
     }
 
-    private func writeBundle(_ app: URL, name: String, mode: LauncherMode) throws {
+    private func writeBundle(
+        _ app: URL, name: String, mode: LauncherMode, icon: URL?
+    ) throws {
         let contents = app.appendingPathComponent("Contents")
         let macOS = contents.appendingPathComponent("MacOS")
         let resources = contents.appendingPathComponent("Resources")
@@ -159,6 +163,7 @@ public struct LauncherStore: Sendable {
         try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
         try writeInfoPlist(app: app, name: name)
         try writeRecord(resources: resources, name: name, mode: mode)
+        try writeIcon(resources: resources, name: name, icon: icon)
         try writeScript(macOS: macOS)
     }
 
@@ -168,6 +173,7 @@ public struct LauncherStore: Sendable {
             "CFBundleIdentifier": "dev.msl.launcher.distro.\(name)",
             "CFBundleName": name,
             "CFBundlePackageType": "APPL",
+            "CFBundleIconFile": LauncherIcon.bundleIconName,
             "CFBundleVersion": "1",
             "CFBundleShortVersionString": "1.0",
         ]
@@ -181,6 +187,19 @@ public struct LauncherStore: Sendable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(LauncherRecord(distro: name, launchMode: mode))
         try data.write(to: resources.appendingPathComponent("launcher.json"))
+    }
+
+    private func writeIcon(resources: URL, name: String, icon: URL?) throws {
+        let target = resources.appendingPathComponent(LauncherIcon.bundleIconName + ".icns")
+        if let icon {
+            guard FileManager.default.isReadableFile(atPath: icon.path) else {
+                throw MSLError.io("cannot read icon \(icon.path)")
+            }
+            try LauncherIcon.validateICNS(at: icon)
+            try FileManager.default.copyItem(at: icon, to: target)
+            return
+        }
+        try LauncherIcon.writeFallbackICNS(name: name, to: target)
     }
 
     private func writeScript(macOS: URL) throws {

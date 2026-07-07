@@ -33,6 +33,9 @@ public struct MSLHome: Sendable {
     public var catalogCacheDirectory: URL {
         cacheDirectory.appendingPathComponent("catalog")
     }
+    public var catalogIconCacheDirectory: URL {
+        cacheDirectory.appendingPathComponent("catalog-icons")
+    }
     public var logsDirectory: URL { root.appendingPathComponent("logs") }
     public var registryURL: URL { root.appendingPathComponent("registry.json") }
     public var launchersURL: URL { root.appendingPathComponent("launchers.json") }

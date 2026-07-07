@@ -12,6 +12,8 @@ final class LauncherTests: XCTestCase {
         XCTAssertEqual(record.launchMode, .shell)
         XCTAssertTrue(record.isOwnedDistro)
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: appScript(app).path))
+        XCTAssertTrue(FileManager.default.isReadableFile(atPath: appIcon(app).path))
+        XCTAssertEqual(try infoPlist(app)["CFBundleIconFile"] as? String, "msl-distro")
         let rows = try fixture.store.rows(registry: Registry(distros: [fixture.entry]))
         XCTAssertEqual(
             rows, [LauncherRow(distro: "ubuntu", path: app.path, launchMode: .shell, exists: true)])
@@ -52,6 +54,22 @@ final class LauncherTests: XCTestCase {
         XCTAssertEqual(url.path, "/tmp/msl-apps")
     }
 
+    func testCreateCopiesProvidedIcon() throws {
+        let fixture = try Fixture.make()
+        let icon = fixture.root.appendingPathComponent("provided.icns")
+        try Data("icns-test".utf8).write(to: icon)
+        let app = try fixture.store.create(name: "ubuntu", mode: .shell, replace: false, icon: icon)
+        XCTAssertEqual(try Data(contentsOf: appIcon(app)), Data("icns-test".utf8))
+    }
+
+    func testFallbackIconIsICNSContainer() throws {
+        let fixture = try Fixture.make()
+        let app = try fixture.store.create(name: "ubuntu", mode: .shell, replace: false)
+        let data = try Data(contentsOf: appIcon(app))
+        XCTAssertEqual(String(data: data.prefix(4), encoding: .ascii), "icns")
+        XCTAssertGreaterThan(data.count, 1024)
+    }
+
     func testOpenShellRefusesMissingDistroBeforeTerminalLaunch() throws {
         let fixture = try Fixture.make()
         let home = MSLHome(root: fixture.root.appendingPathComponent("home"))
@@ -60,6 +78,16 @@ final class LauncherTests: XCTestCase {
 
     private func appScript(_ app: URL) -> URL {
         return app.appendingPathComponent("Contents/MacOS/msl-launcher")
+    }
+
+    private func appIcon(_ app: URL) -> URL {
+        return app.appendingPathComponent("Contents/Resources/msl-distro.icns")
+    }
+
+    private func infoPlist(_ app: URL) throws -> [String: Any] {
+        let data = try Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+        let value = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        return try XCTUnwrap(value as? [String: Any])
     }
 }
 

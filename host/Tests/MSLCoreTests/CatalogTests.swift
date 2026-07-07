@@ -32,6 +32,26 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(rows.first?.status, .recommended)
     }
 
+    func testCatalogIconRequiresHTTPS() throws {
+        let catalog = catalogWithIcon(
+            CatalogIcon(
+                kind: .png, url: "http://example.invalid/icon.png",
+                sha256: String(repeating: "a", count: 64), sizeBytes: 16))
+        XCTAssertThrowsError(try catalog.validate()) { error in
+            XCTAssertTrue(String(describing: error).contains("HTTPS"))
+        }
+    }
+
+    func testCatalogIconRequiresSHA256() throws {
+        let catalog = catalogWithIcon(
+            CatalogIcon(
+                kind: .icns, url: "https://example.invalid/icon.icns", sha256: "abc", sizeBytes: 16)
+        )
+        XCTAssertThrowsError(try catalog.validate()) { error in
+            XCTAssertTrue(String(describing: error).contains("SHA256"))
+        }
+    }
+
     func testDirectInstallPlanDoesNotDependOnSuffix() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("msl-catalog-\(UUID().uuidString)")
@@ -44,5 +64,19 @@ final class CatalogTests: XCTestCase {
             return XCTFail("expected tarball")
         }
         XCTAssertEqual(compression, .xz)
+    }
+
+    private func catalogWithIcon(_ icon: CatalogIcon) -> Catalog {
+        let artifact = CatalogArtifact(
+            arch: "arm64", kind: .rootfsTar, compression: .xz,
+            url: "https://example.invalid/rootfs.tar.xz",
+            sha256: String(repeating: "b", count: 64), sizeBytes: 1024)
+        let version = CatalogVersion(
+            version: "1", aliases: [], status: .recommended, artifact: artifact, icon: icon,
+            defaultUser: nil, imageSizeGiB: 8, notes: "test")
+        let family = CatalogFamily(
+            name: "test", friendlyName: "Test", defaultVersion: "1", aliases: [],
+            versions: [version])
+        return Catalog(schema: 1, generatedAt: "test", families: [family])
     }
 }
