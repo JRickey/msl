@@ -167,36 +167,60 @@ public struct CatalogIconStore: Sendable {
             try LauncherIcon.validateICNS(at: original)
             return original
         case .png:
-            let target = original.deletingPathExtension().appendingPathExtension("icns")
+            let target = convertedTarget(for: original, icon: icon)
             if isValidICNS(target) {
                 return target
             }
             let png = try Data(contentsOf: original)
-            try LauncherIcon.writeICNS(pngData: png, to: target)
+            try LauncherIcon.writeICNS(
+                pngData: CatalogIconStyler.styledPNG(png, icon: icon), to: target)
             return target
         case .svg:
-            let target = original.deletingPathExtension().appendingPathExtension("icns")
+            let target = convertedTarget(for: original, icon: icon)
             if isValidICNS(target) {
                 return target
             }
-            let png = try rasterizeSVG(original)
-            try LauncherIcon.writeICNS(pngData: png, to: target)
+            let png = try rasterizeSVG(original, icon: icon)
+            try LauncherIcon.writeICNS(
+                pngData: CatalogIconStyler.styledPNG(png, icon: icon), to: target)
             return target
         }
     }
 
-    private func rasterizeSVG(_ original: URL) throws -> Data {
+    private func convertedTarget(for original: URL, icon: CatalogIcon) -> URL {
+        guard let backgroundHex = icon.backgroundHex else {
+            return original.deletingPathExtension().appendingPathExtension("icns")
+        }
+        return original.deletingPathExtension().appendingPathExtension("\(backgroundHex).v3.icns")
+    }
+
+    private func rasterizeSVG(_ original: URL, icon: CatalogIcon) throws -> Data {
         try validateSVG(original)
-        let png = original.appendingPathExtension("png")
+        let source = try styledSVGURL(original, icon: icon)
+        defer {
+            if source != original {
+                try? FileManager.default.removeItem(at: source)
+            }
+        }
+        let png = source.appendingPathExtension("png")
         try? FileManager.default.removeItem(at: png)
         try runProcess(
             "/usr/bin/qlmanage",
-            ["-t", "-s", "1024", "-o", original.deletingLastPathComponent().path, original.path])
+            ["-t", "-s", "1024", "-o", source.deletingLastPathComponent().path, source.path])
         guard FileManager.default.isReadableFile(atPath: png.path) else {
-            throw MSLError.io("Quick Look did not render \(original.path)")
+            throw MSLError.io("Quick Look did not render \(source.path)")
         }
         defer { try? FileManager.default.removeItem(at: png) }
         return try Data(contentsOf: png)
+    }
+
+    private func styledSVGURL(_ original: URL, icon: CatalogIcon) throws -> URL {
+        guard icon.backgroundHex != nil else { return original }
+        let data = try Data(contentsOf: original, options: .mappedIfSafe)
+        let styled = try CatalogIconStyler.styledSVG(data, icon: icon)
+        let target = original.deletingPathExtension().appendingPathExtension("styled.svg")
+        try styled.write(to: target, options: .atomic)
+        return target
     }
 
     private func validateSVG(_ url: URL) throws {
@@ -275,125 +299,3 @@ public struct CatalogIconStore: Sendable {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
-
-private final class CatalogDownloadDelegate: NSObject, URLSessionDownloadDelegate {
-    private let output: URL
-    private let expectedBytes: UInt64
-    private let progress: CatalogDownloadProgressHandler?
-    private let semaphore = DispatchSemaphore(value: 0)
-    private let lock = NSLock()
-    private var result: Result<Void, Error>?
-    private var downloadFinished = false
-    private var downloadError: Error?
-    private var redirectCount = 0
-
-    init(output: URL, expectedBytes: UInt64, progress: CatalogDownloadProgressHandler?) {
-        self.output = output
-        self.expectedBytes = expectedBytes
-        self.progress = progress
-    }
-
-    func wait() throws {
-        semaphore.wait()
-        lock.lock()
-        let final = result
-        lock.unlock()
-        switch final {
-        case .success:
-            return
-        case .failure(let error):
-            throw error
-        case .none:
-            throw MSLError.io("download ended without a result")
-        }
-    }
-
-    func urlSession(
-        _: URLSession, downloadTask _: URLSessionDownloadTask,
-        didWriteData _: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64
-    ) {
-        let received = UInt64(max(totalBytesWritten, 0))
-        let reported = totalBytesExpectedToWrite > 0 ? UInt64(totalBytesExpectedToWrite) : nil
-        let total = reported ?? (expectedBytes > 0 ? expectedBytes : nil)
-        progress?(.downloading(received: received, total: total))
-    }
-
-    func urlSession(
-        _: URLSession, downloadTask _: URLSessionDownloadTask,
-        didFinishDownloadingTo location: URL
-    ) {
-        do {
-            if FileManager.default.fileExists(atPath: output.path) {
-                try FileManager.default.removeItem(at: output)
-            }
-            try FileManager.default.moveItem(at: location, to: output)
-            recordDownload(finished: true, error: nil)
-        } catch {
-            recordDownload(finished: false, error: error)
-        }
-    }
-
-    func urlSession(
-        _: URLSession, task _: URLSessionTask, willPerformHTTPRedirection _: HTTPURLResponse,
-        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        lock.lock()
-        redirectCount += 1
-        let allowed = redirectCount <= 5
-        lock.unlock()
-        guard allowed, request.url?.scheme == "https" else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
-    }
-
-    func urlSession(_: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error {
-            complete(.failure(MSLError.io("download failed: \(error.localizedDescription)")))
-            return
-        }
-        if let response = task.response as? HTTPURLResponse {
-            guard (200...299).contains(response.statusCode) else {
-                complete(.failure(MSLError.io("download failed: HTTP \(response.statusCode)")))
-                return
-            }
-        }
-        lock.lock()
-        let finished = downloadFinished
-        let storedError = downloadError
-        lock.unlock()
-        if let storedError {
-            complete(.failure(MSLError.io("store download failed: \(storedError)")))
-            return
-        }
-        guard finished else {
-            complete(.failure(MSLError.io("download finished without a file")))
-            return
-        }
-        complete(.success(()))
-    }
-
-    private func recordDownload(finished: Bool, error: Error?) {
-        lock.lock()
-        downloadFinished = finished
-        downloadError = error
-        lock.unlock()
-    }
-
-    private func complete(_ value: Result<Void, Error>) {
-        lock.lock()
-        guard result == nil else {
-            lock.unlock()
-            return
-        }
-        result = value
-        lock.unlock()
-        if case .failure = value {
-            try? FileManager.default.removeItem(at: output)
-        }
-        semaphore.signal()
-    }
-}
-
-extension CatalogDownloadDelegate: @unchecked Sendable {}

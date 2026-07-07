@@ -53,11 +53,12 @@ final class CatalogIconStoreTests: XCTestCase {
         try svg.write(to: cached)
         let icon = CatalogIcon(
             kind: .svg, url: "https://example.invalid/ubuntu", sha256: sha,
-            sizeBytes: UInt64(svg.count))
+            sizeBytes: UInt64(svg.count), backgroundHex: "E95420")
 
         let converted = try CatalogIconStore(home: home).icon(icon, label: "ubuntu")
 
         XCTAssertEqual(converted.pathExtension, "icns")
+        XCTAssertTrue(converted.lastPathComponent.contains("E95420"))
         let data = try Data(contentsOf: converted)
         XCTAssertEqual(String(data: Data(data.prefix(4)), encoding: .ascii), "icns")
     }

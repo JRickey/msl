@@ -11,7 +11,8 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(resolved.artifact.compression, .xz)
         XCTAssertTrue(resolved.artifact.url.hasPrefix("https://"))
         XCTAssertEqual(resolved.version.icon?.kind, .svg)
-        XCTAssertEqual(resolved.version.icon?.url, "https://cdn.simpleicons.org/ubuntu")
+        XCTAssertEqual(resolved.version.icon?.url, "https://cdn.simpleicons.org/ubuntu/FFFFFF")
+        XCTAssertEqual(resolved.version.icon?.backgroundHex, "E95420")
     }
 
     func testEmbeddedCatalogResolvesCaseAndVersionAlias() throws {
@@ -42,6 +43,7 @@ final class CatalogTests: XCTestCase {
 
     func testKnownDistroIconsResolveByAliases() throws {
         XCTAssertEqual(DistroIconCatalog.icon(for: "ubuntu")?.kind, .svg)
+        XCTAssertEqual(DistroIconCatalog.icon(for: "ubuntu")?.backgroundHex, "E95420")
         XCTAssertEqual(DistroIconCatalog.displayName(for: "ubuntu"), "Ubuntu")
         XCTAssertEqual(
             DistroIconCatalog.icon(for: "arch")?.url, "https://cdn.simpleicons.org/archlinux")

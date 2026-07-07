@@ -41,12 +41,17 @@ public struct CatalogIcon: Codable, Equatable, Sendable {
     public let url: String
     public let sha256: String
     public let sizeBytes: UInt64
+    public let backgroundHex: String?
 
-    public init(kind: CatalogIconKind, url: String, sha256: String, sizeBytes: UInt64) {
+    public init(
+        kind: CatalogIconKind, url: String, sha256: String, sizeBytes: UInt64,
+        backgroundHex: String? = nil
+    ) {
         self.kind = kind
         self.url = url
         self.sha256 = sha256
         self.sizeBytes = sizeBytes
+        self.backgroundHex = backgroundHex
     }
 }
 
@@ -281,6 +286,13 @@ extension Catalog {
         guard (1...5_000_000).contains(icon.sizeBytes) else {
             throw MSLError.configuration("catalog icon size out of range")
         }
+        if let backgroundHex = icon.backgroundHex {
+            guard
+                backgroundHex.range(of: #"^[0-9A-Fa-f]{6}$"#, options: .regularExpression) != nil
+            else {
+                throw MSLError.configuration("catalog icon background color invalid")
+            }
+        }
     }
 
     private func insert(key: String, into seen: inout Set<String>, label: String) throws {
@@ -295,7 +307,7 @@ extension Catalog {
         "https://cloud-images.ubuntu.com/releases/noble/release-20260615/"
         + "ubuntu-24.04-server-cloudimg-arm64-root.tar.xz"
 
-    private static let ubuntuIcon = "https://cdn.simpleicons.org/ubuntu"
+    private static let ubuntuWhiteIcon = "https://cdn.simpleicons.org/ubuntu/FFFFFF"
 
     private static let embeddedJSON = """
         {
@@ -322,9 +334,10 @@ extension Catalog {
                   },
                   "icon": {
                     "kind": "svg",
-                    "url": "\(ubuntuIcon)",
-                    "sha256": "05908333dce000b0775603cdc3d14b4a7d315d3625c9fa0b374804d6753643c3",
-                    "sizeBytes": 963
+                    "url": "\(ubuntuWhiteIcon)",
+                    "sha256": "816d06168f4d1fc1dbd07402f6efd09cd2a84ba4dece718045c6d45e2b5cbf68",
+                    "sizeBytes": 963,
+                    "backgroundHex": "E95420"
                   },
                   "defaultUser": null,
                   "imageSizeGiB": 8,
@@ -361,9 +374,9 @@ public enum DistroIconCatalog {
         DistroIconRecord(
             name: "ubuntu", displayName: "Ubuntu", aliases: [],
             icon: CatalogIcon(
-                kind: .svg, url: "https://cdn.simpleicons.org/ubuntu",
-                sha256: "05908333dce000b0775603cdc3d14b4a7d315d3625c9fa0b374804d6753643c3",
-                sizeBytes: 963)),
+                kind: .svg, url: "https://cdn.simpleicons.org/ubuntu/FFFFFF",
+                sha256: "816d06168f4d1fc1dbd07402f6efd09cd2a84ba4dece718045c6d45e2b5cbf68",
+                sizeBytes: 963, backgroundHex: "E95420")),
         DistroIconRecord(
             name: "arch", displayName: "Arch Linux", aliases: ["archlinux"],
             icon: CatalogIcon(
