@@ -38,18 +38,29 @@ public enum DaemonClient {
     /// Open an interactive PTY session (shell/run) and attach the local terminal.
     /// Returns the session outcome so the caller maps it to an exit code.
     public static func runSession(
-        home: MSLHome, name: String?, argv: [String], term: String
+        home: MSLHome, name: String?, argv: [String], term: String,
+        extraEnv: [String: String] = [:]
     ) throws -> AttachOutcome {
         try ensureRunning(home)
         let control = try connect(home)
         defer { control.close() }
-        let shellData = try control.shell(buildRequest(name: name, argv: argv, term: term))
+        let shellData = try control.shell(
+            buildRequest(name: name, argv: argv, term: term, extraEnv: extraEnv))
         let attachConn = try connect(home)
         let dataFD = try attachConn.attachRaw(
             sessionID: shellData.sessionID, token: shellData.token)
         return try SessionAttach(
             control: control, sessionID: shellData.sessionID, dataFD: dataFD
         ).run()
+    }
+
+    public static func capture(
+        home: MSLHome, name: String?, argv: [String], term: String = "dumb"
+    ) throws -> ExecData {
+        try ensureRunning(home)
+        let control = try connect(home)
+        defer { control.close() }
+        return try control.capture(buildRequest(name: name, argv: argv, term: term))
     }
 
     public static func status(_ home: MSLHome) throws -> StatusData {
@@ -97,13 +108,17 @@ public enum DaemonClient {
         return try control.mountStatus()
     }
 
-    private static func buildRequest(name: String?, argv: [String], term: String) -> ShellRequest {
+    private static func buildRequest(
+        name: String?, argv: [String], term: String, extraEnv: [String: String] = [:]
+    ) -> ShellRequest {
         let size = Terminal.windowSize(STDIN_FILENO) ?? Terminal.windowSize(STDOUT_FILENO)
         let cwd = mapSessionCwd(
             hostCwd: FileManager.default.currentDirectoryPath, home: NSHomeDirectory(),
             hasMacShare: true)
+        var env = extraEnv
+        env["TERM"] = term
         return ShellRequest(
-            name: name, argv: argv.isEmpty ? nil : argv, env: ["TERM": term],
+            name: name, argv: argv.isEmpty ? nil : argv, env: env,
             rows: size?.rows ?? 40, cols: size?.cols ?? 120, cwd: cwd)
     }
 }

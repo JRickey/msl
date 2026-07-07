@@ -322,7 +322,7 @@ public struct PingData: Decodable, Sendable {
 }
 
 /// Payload of a successful `exec` response.
-public struct ExecData: Decodable, Sendable {
+public struct ExecData: Codable, Sendable, Equatable {
     public let exitCode: Int32
     public let stdout: String
     public let stderr: String

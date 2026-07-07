@@ -40,6 +40,10 @@ public final class LocalClient: @unchecked Sendable {
         return try roundTrip(.shell(req))
     }
 
+    public func capture(_ req: ShellRequest) throws -> ExecData {
+        return try roundTrip(.capture(req))
+    }
+
     public func shutdown() throws {
         let _: LocalEmpty = try roundTrip(.shutdown)
     }

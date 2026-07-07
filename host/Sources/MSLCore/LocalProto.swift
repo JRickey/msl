@@ -24,6 +24,7 @@ public enum LocalRequest: Sendable, Equatable {
     case up(name: String?)
     case down(name: String?, all: Bool, timeoutMs: UInt64?)
     case shell(ShellRequest)
+    case capture(ShellRequest)
     case attach(sessionID: UInt64, token: String)
     case guiConnect(name: String?)
     case resize(sessionID: UInt64, rows: UInt16, cols: UInt16)
@@ -95,7 +96,8 @@ extension LocalRequest: Codable {
             try container.encodeIfPresent(name, forKey: .name)
             try container.encode(all, forKey: .all)
             try container.encodeIfPresent(timeoutMs, forKey: .timeoutMs)
-        case .shell(let req): try encodeShell(req, into: &container)
+        case .shell(let req): try encodeShell(req, into: &container, op: "shell")
+        case .capture(let req): try encodeShell(req, into: &container, op: "capture")
         case .guiConnect(let name):
             try container.encode("gui_connect", forKey: .op)
             try container.encodeIfPresent(name, forKey: .name)
@@ -148,9 +150,9 @@ extension LocalRequest: Codable {
     }
 
     private func encodeShell(
-        _ req: ShellRequest, into container: inout KeyedEncodingContainer<CodingKeys>
+        _ req: ShellRequest, into container: inout KeyedEncodingContainer<CodingKeys>, op: String
     ) throws {
-        try container.encode("shell", forKey: .op)
+        try container.encode(op, forKey: .op)
         try container.encodeIfPresent(req.name, forKey: .name)
         try container.encodeIfPresent(req.argv, forKey: .argv)
         try container.encodeIfPresent(req.env, forKey: .env)
@@ -177,6 +179,7 @@ extension LocalRequest: Codable {
                 all: try container.decodeIfPresent(Bool.self, forKey: .all) ?? false,
                 timeoutMs: try container.decodeIfPresent(UInt64.self, forKey: .timeoutMs))
         case "shell": return .shell(try decodeShell(from: container))
+        case "capture": return .capture(try decodeShell(from: container))
         case "gui_connect":
             return .guiConnect(name: try container.decodeIfPresent(String.self, forKey: .name))
         case "shutdown": return .shutdown
