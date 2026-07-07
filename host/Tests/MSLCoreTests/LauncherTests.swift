@@ -54,6 +54,18 @@ final class LauncherTests: XCTestCase {
         XCTAssertEqual(url.path, "/tmp/msl-apps")
     }
 
+    func testDefaultApplicationsDirectoryFallsBackWhenApplicationsIsFile() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msl-launcher-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try Data("not a directory".utf8).write(to: home.appendingPathComponent("Applications"))
+        let url = LauncherStore.defaultApplicationsDirectory(env: [:], homeDirectory: home)
+        XCTAssertEqual(
+            url.path,
+            home.appendingPathComponent(".msl").appendingPathComponent("Applications").path)
+    }
+
     func testCreateCopiesProvidedIcon() throws {
         let fixture = try Fixture.make()
         let icon = fixture.root.appendingPathComponent("provided.icns")

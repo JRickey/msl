@@ -65,7 +65,18 @@ public struct LauncherStore: Sendable {
         if let override = env["MSL_APPLICATIONS_DIR"], !override.isEmpty {
             return URL(fileURLWithPath: override)
         }
-        return homeDirectory.appendingPathComponent("Applications").appendingPathComponent("msl")
+        let applications = homeDirectory.appendingPathComponent("Applications")
+        if pathExistsAsFile(applications) {
+            return homeDirectory.appendingPathComponent(".msl").appendingPathComponent(
+                "Applications")
+        }
+        return applications.appendingPathComponent("msl")
+    }
+
+    private static func pathExistsAsFile(_ url: URL) -> Bool {
+        var isDirectory = ObjCBool(false)
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        return exists && !isDirectory.boolValue
     }
 
     @discardableResult
