@@ -16,9 +16,10 @@ Apple Silicon.
 ## What msl is
 
 msl is a WSL2-style Linux subsystem for macOS on Apple Silicon. It gives the
-user named Linux distros, daemon-backed shells, command execution, Mac/Linux
-interop, localhost forwarding, `.msl` distro bundles, optional Rosetta x86-64
-Linux translation, and Finder access to Linux files.
+user named Linux distros, daemon-backed shells, command execution, catalog and
+local-source installs, Mac/Linux interop, localhost forwarding, `.msl` distro
+bundles, optional Rosetta x86-64 Linux translation, Finder access to Linux
+files, and Mac app launchers for distros.
 
 The normal user surface is the `msl` CLI:
 
@@ -29,8 +30,15 @@ The normal user surface is the `msl` CLI:
 - `msl shell [distro]` opens an interactive Linux shell.
 - `msl run [distro] -- <command> [args...]` runs one Linux command with faithful
   exit status.
-- `msl install [name] --from <img|tar|tar.gz|tar.xz|msl>` installs a distro.
+- `msl catalog list` and `msl catalog show <selector>` inspect catalog distros.
+- `msl install <selector> [--name <name>]` installs a catalog distro.
+- `msl install [name] --from <img|tar|tar.gz|tar.xz|msl>` installs from a local
+  source.
 - `msl export <name> --output <name>.msl` creates a portable distro bundle.
+- `msl launcher list/create/remove/refresh/reveal/open` manages Mac app
+  launchers under `/Applications/msl` by default.
+- `msl desktop probe <distro>` and `msl desktop launch <distro>` check or launch
+  supported desktop sessions.
 - `msl mount [distro] [--read-only] [--reveal]` mounts the distro at
   `~/msl/<distro>` through Finder when FSKit is available.
 - `msl config <distro> --rosetta on|off` controls x86-64 Linux translation.
@@ -58,6 +66,19 @@ When a task may need Linux through msl:
 If `msl` is missing, tell the user it is not installed or not on `PATH`. Do not
 invent install instructions unless the repository or release notes in the
 current task provide them.
+
+If no distro is installed and the user wants one, prefer the catalog flow when
+available:
+
+```sh
+msl catalog list
+msl catalog show ubuntu
+msl install ubuntu
+```
+
+Use `msl install <selector> --name <name>` to install a catalog distro under a
+different local name. Use `msl install [name] --from <path>` only when the user
+has a specific image, rootfs tarball, or `.msl` bundle.
 
 ## Running Linux commands
 
@@ -179,6 +200,34 @@ installation supports the signed FSKit extension.
 If FSKit is unavailable, use `msl run` and `/mnt/mac` workflows instead of
 assuming Finder mounting works.
 
+## Distro app launchers
+
+Installed distros can have Mac app launchers. Catalog and local-source installs
+create msl-owned launchers by default. The default location is
+`/Applications/msl`; development builds may override it with
+`MSL_APPLICATIONS_DIR`.
+
+Useful launcher commands:
+
+```sh
+msl launcher list
+msl launcher create <distro> --mode shell
+msl launcher create <distro> --mode auto --replace
+msl launcher open <distro>
+msl launcher reveal <distro>
+msl launcher refresh <distro>
+msl launcher remove <distro>
+```
+
+Use `shell` mode for reliable terminal-backed distro entry points. Use `auto`
+or `desktop` mode only when a supported desktop session is installed and the GUI
+bridge is expected to work:
+
+```sh
+msl desktop probe <distro>
+msl desktop launch <distro>
+```
+
 ## Safety and cleanup
 
 - Do not stop or shut down msl while user work may be running.
@@ -195,11 +244,14 @@ assuming Finder mounting works.
 
 - `msl: command not found`: msl is not installed or not on `PATH`.
 - `daemon not running`: `msl shell`, `msl run`, or `msl daemon run` can start it.
-- No distro installed: use `msl install` with a user-provided image, tarball, or
-  `.msl` bundle.
+- No distro installed: try `msl catalog list`, then `msl install <selector>`; use
+  `msl install [name] --from <path>` for user-provided images, tarballs, or
+  `.msl` bundles.
 - Command cannot find project files: check `/mnt/mac` mapping and `pwd` inside
   `msl run`.
 - Linux server unreachable from macOS: check the guest listener with `ss -ltnp`
   and forwarded ports in `msl status`.
 - Finder mount unavailable: check `msl fskit status`; FSKit requires a signed
   extension environment.
+- Launcher missing or stale: run `msl launcher list`, then
+  `msl launcher refresh <distro>`.

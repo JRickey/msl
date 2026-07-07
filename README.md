@@ -49,15 +49,18 @@ Working:
 - Run Ubuntu-style systemd distros as named containerized userlands.
 - Use a resident per-user daemon with lazy shared-VM boot, idle shutdown, and
   faithful shell/command exit codes.
-- Install, list, remove, configure, set default, export, and re-import distros.
-- Share the Mac home directory into Linux at `/mnt/Mac`, with opt-out per
+- Install from the built-in catalog or local image sources; list, remove,
+  configure, set default, export, and re-import distros.
+- Share the Mac home directory into Linux at `/mnt/mac`, with opt-out per
   distro.
 - Mirror guest TCP listeners onto `127.0.0.1` on MacOS.
-- Run Mac commands from Linux through the `Mac` shim.
+- Run Mac commands from Linux through the `mac` shim.
 - Transparently execute Mach-O binaries from Linux through binfmt.
 - Export and install `.msl` distro bundles; double-click `.msl` install is
   handled by `msl.app`.
 - Enable Rosetta per distro for x86-64 Linux binaries.
+- Create Mac app launchers for installed distros in `/Applications/msl`, with
+  `MSL_APPLICATIONS_DIR` as the development override.
 - Mount a distro in Finder at `~/msl/<distro>` through FSKit. Read-only mode is
   certified; the read-write protocol, guest worker, host FSKit surface, CLI
   mode, and write E2E harness have landed.
@@ -94,7 +97,7 @@ Developer builds currently assume:
 
 - Apple Silicon Mac running MacOS 26 or newer.
 - Full Xcode with the MacOS 26 SDK and Swift 6.x toolchain.
-- Rust with the `aarch64-unknown-Linux-musl` target.
+- Rust with the `aarch64-unknown-linux-musl` target.
 - `cargo-zigbuild` and Zig for Linux-musl guest builds from MacOS.
 - A checked-out `kernel/` submodule containing the msl kernel build recipe.
 - Optional for FSKit appex work: `xcodegen`, an Apple Development signing
@@ -179,12 +182,34 @@ Build the CLI:
 make host sign
 ```
 
-Create or install a distro image. A `.msl` bundle can carry its own default
+Install a catalog distro:
+
+```sh
+host/.build/release/msl catalog list
+host/.build/release/msl catalog show ubuntu
+host/.build/release/msl install ubuntu
+```
+
+Use `--name` when the installed distro name should differ from the catalog
+family:
+
+```sh
+host/.build/release/msl install ubuntu@24.04 --name ubuntu-lts
+```
+
+Or install a local distro source. A `.msl` bundle can carry its own default
 name:
 
 ```sh
 host/.build/release/msl install ubuntu --from ./ubuntu-rootfs.tar.xz
 host/.build/release/msl install --from ./ubuntu-custom.msl
+```
+
+Installs create an msl-owned launcher app for the distro:
+
+```sh
+host/.build/release/msl launcher list
+host/.build/release/msl launcher open ubuntu
 ```
 
 Open a shell:
@@ -243,6 +268,9 @@ User-facing commands:
 
 | Command | Purpose |
 | --- | --- |
+| `msl catalog list [--all]` | List catalog distros available for install. |
+| `msl catalog show <selector>` | Show catalog details and the matching install command. |
+| `msl install <selector> [--name <name>]` | Download and install a catalog distro such as `ubuntu` or `ubuntu@24.04`. |
 | `msl install [name] --from <path>` | Install an ext4 image, rootfs tarball, or `.msl` bundle. |
 | `msl list` | List installed distros with state, image size, and hostname. |
 | `msl default <name>` | Set the default distro. |
@@ -257,6 +285,8 @@ User-facing commands:
 | `msl mount [name]` | Mount a distro at `~/msl/<distro>` through FSKit. |
 | `msl unmount [name]` | Unmount a distro Finder view. |
 | `msl fskit enable/status/disable` | Manage the MacOS FSKit enabled-modules setting. |
+| `msl launcher list/create/remove/refresh/reveal/open` | Manage Mac app launchers for installed distros. |
+| `msl desktop probe/launch <name>` | Probe for or launch a supported distro desktop session. |
 | `msl daemon run/install/uninstall` | Run or install the per-user daemon. |
 | `msl up` | Direct boot path for registered or one-off rootfs images. |
 | `msl boot` | Low-level developer VM boot command. |
@@ -272,8 +302,8 @@ on a project that benefits from the utility msl provides.
 Install it into Codex with:
 
 ```sh
-mkdir -p ~/.agents/skills
-cp -R skills/msl ~/.agents/skills/msl
+mkdir -p ~/.codex/skills
+cp -R skills/msl ~/.codex/skills/msl
 ```
 
 Install it into Claude Code with:
@@ -312,7 +342,7 @@ The Rust workspace in `guest/` contains:
 
 - `msl-agent`: guest control plane and distro lifecycle manager.
 - `msl-wire`: shared guest-side wire framing and FS protocol code.
-- `msl-shim`: Linux-side `Mac` shim and transparent Mach-O exec helper.
+- `msl-shim`: Linux-side `mac` shim and transparent Mach-O exec helper.
 - `msl-fsd`: FSKit file-service worker launched inside a distro namespace.
 - `msl-way`: headless Wayland compositor and remoting prototype.
 
@@ -334,17 +364,17 @@ Linux.
 Inside a distro:
 
 ```sh
-Mac sw_vers
-Mac open .
+mac sw_vers
+mac open .
 ```
 
 Transparent Mach-O exec registers binfmt entries inside each distro, so a Mac
-binary on `/mnt/Mac` can be invoked without the `Mac` prefix when the target is
+binary on `/mnt/mac` can be invoked without the `mac` prefix when the target is
 safe to map back to the host.
 
 ## Filesystems
 
-Mac home sharing uses virtiofs at `/mnt/Mac`. It is convenient and correct, but
+Mac home sharing uses virtiofs at `/mnt/mac`. It is convenient and correct, but
 metadata-heavy workloads are slower than guest ext4 because Apple's virtiofs
 path serializes and compounds APFS create/delete costs. Keep build scratch and
 large dependency trees on guest ext4 when performance matters.
@@ -390,7 +420,7 @@ Common guest checks:
 (cd guest && cargo fmt --check)
 (cd guest && cargo test --workspace)
 (cd guest && cargo clippy --all-targets --quiet -- -D warnings)
-(cd guest && cargo clippy --target aarch64-unknown-Linux-musl --all-targets --quiet -- -D warnings)
+(cd guest && cargo clippy --target aarch64-unknown-linux-musl --all-targets --quiet -- -D warnings)
 (cd guest && cargo deny check)
 make guest
 make initramfs

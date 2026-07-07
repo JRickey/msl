@@ -8,19 +8,19 @@ want an AI harness to use msl from other projects.
 Install for one user:
 
 ```sh
-mkdir -p ~/.agents/skills
-cp -R skills/msl ~/.agents/skills/msl
+mkdir -p ~/.codex/skills
+cp -R skills/msl ~/.codex/skills/msl
 ```
 
 Install for a repository:
 
 ```sh
-mkdir -p .agents/skills
-cp -R skills/msl .agents/skills/msl
+mkdir -p .codex/skills
+cp -R skills/msl .codex/skills/msl
 ```
 
-Codex also supports packaging reusable skills as plugins when you want a
-marketplace/install flow.
+Codex also supports packaging reusable skills as plugins when you want an
+installable bundle flow.
 
 ## Claude Code
 
