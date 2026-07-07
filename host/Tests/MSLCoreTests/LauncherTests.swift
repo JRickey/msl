@@ -50,20 +50,38 @@ final class LauncherTests: XCTestCase {
     func testDefaultApplicationsDirectoryHonorsEnvironment() {
         let url = LauncherStore.defaultApplicationsDirectory(
             env: ["MSL_APPLICATIONS_DIR": "/tmp/msl-apps"],
-            homeDirectory: URL(fileURLWithPath: "/Users/test"))
+            localApplicationsDirectory: URL(fileURLWithPath: "/Applications"))
         XCTAssertEqual(url.path, "/tmp/msl-apps")
     }
 
-    func testDefaultApplicationsDirectoryFallsBackWhenApplicationsIsFile() throws {
-        let home = FileManager.default.temporaryDirectory
+    func testDefaultApplicationsDirectoryUsesLocalApplicationsDirectory() {
+        let url = LauncherStore.defaultApplicationsDirectory(
+            env: [:], localApplicationsDirectory: URL(fileURLWithPath: "/Applications"))
+        XCTAssertEqual(url.path, "/Applications/msl")
+    }
+
+    func testCreateRejectsFileAtLauncherDirectoryPath() throws {
+        let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("msl-launcher-home-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: home) }
-        try Data("not a directory".utf8).write(to: home.appendingPathComponent("Applications"))
-        let url = LauncherStore.defaultApplicationsDirectory(env: [:], homeDirectory: home)
-        XCTAssertEqual(
-            url.path,
-            home.appendingPathComponent(".msl").appendingPathComponent("Applications").path)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let launcherDir = root.appendingPathComponent("msl")
+        try Data("not a directory".utf8).write(to: launcherDir)
+        let fixture = try Fixture.make(root: root, apps: launcherDir)
+        XCTAssertThrowsError(
+            try fixture.store.create(name: "ubuntu", mode: .shell, replace: false)
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("not a directory"))
+        }
+    }
+
+    func testCreateBuildsCanonicalApplicationsDirectoryWhenMissing() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msl-launcher-home-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try Fixture.make(root: root, apps: root.appendingPathComponent("msl"))
+        let app = try fixture.store.create(name: "ubuntu", mode: .shell, replace: false)
+        XCTAssertEqual(app.path, root.appendingPathComponent("msl/ubuntu.app").path)
     }
 
     func testCreateCopiesProvidedIcon() throws {
@@ -109,10 +127,14 @@ private struct Fixture {
     let entry: DistroEntry
     let store: LauncherStore
 
-    static func make() throws -> Fixture {
-        let root = FileManager.default.temporaryDirectory
+    static func make(
+        root providedRoot: URL? = nil, apps providedApps: URL? = nil
+    ) throws -> Fixture {
+        let root =
+            providedRoot
+            ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("msl-launcher-tests-\(UUID().uuidString)")
-        let apps = root.appendingPathComponent("Applications")
+        let apps = providedApps ?? root.appendingPathComponent("Applications")
         let home = MSLHome(root: root.appendingPathComponent("home"))
         try home.ensureDirectories()
         let entry = DistroEntry(

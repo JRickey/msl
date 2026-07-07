@@ -60,23 +60,17 @@ public struct LauncherStore: Sendable {
 
     public static func defaultApplicationsDirectory(
         env: [String: String] = ProcessInfo.processInfo.environment,
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        localApplicationsDirectory: URL? = FileManager.default.urls(
+            for: .applicationDirectory, in: .localDomainMask
+        ).first
     ) -> URL {
         if let override = env["MSL_APPLICATIONS_DIR"], !override.isEmpty {
             return URL(fileURLWithPath: override)
         }
-        let applications = homeDirectory.appendingPathComponent("Applications")
-        if pathExistsAsFile(applications) {
-            return homeDirectory.appendingPathComponent(".msl").appendingPathComponent(
-                "Applications")
+        guard let localApplicationsDirectory else {
+            preconditionFailure("macOS did not provide a local Applications directory")
         }
-        return applications.appendingPathComponent("msl")
-    }
-
-    private static func pathExistsAsFile(_ url: URL) -> Bool {
-        var isDirectory = ObjCBool(false)
-        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
-        return exists && !isDirectory.boolValue
+        return localApplicationsDirectory.appendingPathComponent("msl")
     }
 
     @discardableResult
@@ -84,6 +78,7 @@ public struct LauncherStore: Sendable {
         name: String, mode: LauncherMode, replace: Bool, icon: URL? = nil
     ) throws -> URL {
         try validateRegistered(name)
+        try ensureApplicationsDirectory()
         let app = appURL(name: name)
         if FileManager.default.fileExists(atPath: app.path) {
             try validateOwned(app: app, distro: name)
@@ -107,6 +102,35 @@ public struct LauncherStore: Sendable {
             try FileManager.default.removeItem(at: app)
         }
         try removeManifest(name: name)
+    }
+
+    private func ensureApplicationsDirectory() throws {
+        let parent = applicationsDirectory.deletingLastPathComponent()
+        try ensureDirectory(parent)
+        var isDirectory = ObjCBool(false)
+        let exists = FileManager.default.fileExists(
+            atPath: applicationsDirectory.path, isDirectory: &isDirectory)
+        if exists {
+            guard isDirectory.boolValue else {
+                throw MSLError.configuration(
+                    "launcher applications path is not a directory: \(applicationsDirectory.path)")
+            }
+            return
+        }
+        try FileManager.default.createDirectory(
+            at: applicationsDirectory, withIntermediateDirectories: false)
+    }
+
+    private func ensureDirectory(_ url: URL) throws {
+        var isDirectory = ObjCBool(false)
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else {
+                throw MSLError.configuration(
+                    "launcher applications parent is not a directory: \(url.path)")
+            }
+            return
+        }
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
     public func rows(registry: Registry) throws -> [LauncherRow] {
