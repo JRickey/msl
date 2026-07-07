@@ -261,9 +261,24 @@ extension DaemonCore {
     func authStatus(name: String?) throws -> AuthStatusData {
         let resolved = try resolveName(name)
         let policy = try AuthPolicyStore(url: config.home.authPolicyURL).policy(for: resolved)
-        let agent = HostSSHAgentProxy().available
+        let hostAgent = HostSSHAgentProxy().available
+        let sshAgent = policy.sshAgent ?? hostAgent
         return AuthStatusData(
-            distro: resolved, sshAgent: policy.sshAgent ?? agent, secrets: policy.secrets)
+            distro: resolved,
+            sshAgent: sshAgent,
+            secrets: policy.secrets,
+            sshAgentDetail: authSSHAgentDetail(policy: policy.sshAgent, hostAgent: hostAgent),
+            secretsDetail: authSecretsDetail(enabled: policy.secrets))
+    }
+
+    private func authSSHAgentDetail(policy: Bool?, hostAgent: Bool) -> String? {
+        if policy == false { return "disabled by policy" }
+        if !hostAgent { return "host SSH_AUTH_SOCK is unavailable" }
+        return nil
+    }
+
+    private func authSecretsDetail(enabled: Bool) -> String? {
+        enabled ? nil : "disabled by policy"
     }
 
     private func markAuthActivity(begin: Bool) {

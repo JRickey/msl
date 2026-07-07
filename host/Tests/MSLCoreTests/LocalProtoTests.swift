@@ -94,10 +94,15 @@ final class LocalReplyRoundTripTests: XCTestCase {
     }
 
     func testAuthStatusReplyRoundTrip() throws {
-        let status = AuthStatusData(distro: "ubuntu", sshAgent: true, secrets: false)
+        let status = AuthStatusData(
+            distro: "ubuntu", sshAgent: true, secrets: false,
+            sshAgentDetail: "host SSH_AUTH_SOCK is unavailable",
+            secretsDetail: "disabled by policy")
         let reply = try LocalResponse<AuthStatusData>.decode(try LocalReply.ok(status))
         XCTAssertEqual(reply.data, status)
         let json = String(bytes: try LocalReply.ok(status), encoding: .utf8) ?? ""
         XCTAssertTrue(json.contains("\"ssh_agent\""), json)
+        XCTAssertTrue(json.contains("\"ssh_agent_detail\""), json)
+        XCTAssertTrue(json.contains("\"secrets_bus\""), json)
     }
 }

@@ -19,8 +19,15 @@ struct AuthCommand: ParsableCommand {
         func run() throws {
             let status = try DaemonClient.authStatus(MSLHome.resolve(), name: distro)
             print("distro: \(status.distro)")
-            print("ssh-agent: \(status.sshAgent ? "available" : "unavailable")")
-            print("secrets: \(status.secrets ? "available" : "unavailable")")
+            print("ssh-agent: \(format(status.sshAgent, detail: status.sshAgentDetail))")
+            print("secrets: \(format(status.secrets, detail: status.secretsDetail))")
+            print("secrets-bus: \(status.secretsBus)")
+        }
+
+        private func format(_ available: Bool, detail: String?) -> String {
+            let prefix = available ? "available" : "unavailable"
+            guard let detail else { return prefix }
+            return "\(prefix) (\(detail))"
         }
     }
 
