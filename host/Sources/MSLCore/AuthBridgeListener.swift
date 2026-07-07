@@ -267,13 +267,20 @@ extension DaemonCore {
             distro: resolved,
             sshAgent: sshAgent,
             secrets: policy.secrets,
-            sshAgentDetail: authSSHAgentDetail(policy: policy.sshAgent, hostAgent: hostAgent),
+            sshAgentDetail: authSSHAgentDetail(
+                policy: policy.sshAgent, hostAgent: hostAgent,
+                forwarding: policy.sshAgentForwarding),
+            sshAgentForwarding: policy.sshAgentForwarding,
             secretsDetail: authSecretsDetail(enabled: policy.secrets))
     }
 
-    private func authSSHAgentDetail(policy: Bool?, hostAgent: Bool) -> String? {
+    private func authSSHAgentDetail(
+        policy: Bool?, hostAgent: Bool, forwarding: AuthForwardingPolicy
+    ) -> String? {
         if policy == false { return "disabled by policy" }
         if !hostAgent { return "host SSH_AUTH_SOCK is unavailable" }
+        if forwarding == .ask { return "forwarding prompts unavailable; treating ask as off" }
+        if forwarding == .off { return "OpenSSH session-bind forwarding is rejected" }
         return nil
     }
 

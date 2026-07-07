@@ -102,6 +102,7 @@ final class LocalReplyRoundTripTests: XCTestCase {
         XCTAssertEqual(reply.data, status)
         let json = String(bytes: try LocalReply.ok(status), encoding: .utf8) ?? ""
         XCTAssertTrue(json.contains("\"ssh_agent\""), json)
+        XCTAssertTrue(json.contains("\"ssh_agent_forwarding\""), json)
         XCTAssertTrue(json.contains("\"ssh_agent_detail\""), json)
         XCTAssertTrue(json.contains("\"secrets_bus\""), json)
     }

@@ -41,7 +41,10 @@ public struct AuthPolicyStore: Sendable {
         return try load().distros[distro] ?? AuthPolicy()
     }
 
-    public func set(distro: String, secrets: Bool?, sshAgent: Bool?) throws {
+    public func set(
+        distro: String, secrets: Bool?, sshAgent: Bool?,
+        sshAgentForwarding: AuthForwardingPolicy? = nil
+    ) throws {
         guard Registry.isValidName(distro) else {
             throw MSLError.invalidArgument("invalid distro name: \(distro)")
         }
@@ -49,6 +52,7 @@ public struct AuthPolicyStore: Sendable {
         var policy = file.distros[distro] ?? AuthPolicy()
         if let secrets { policy.secrets = secrets }
         if let sshAgent { policy.sshAgent = sshAgent }
+        if let sshAgentForwarding { policy.sshAgentForwarding = sshAgentForwarding }
         file.distros[distro] = policy
         try save(file)
     }

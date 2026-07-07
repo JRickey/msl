@@ -31,7 +31,10 @@ extension DaemonCore {
         let policy = try AuthPolicyStore(url: config.home.authPolicyURL).policy(for: name)
         let hostAgent = HostSSHAgentProxy().available
         return authSessions.create(
-            distro: name, sshAgent: policy.sshAgent ?? hostAgent, secrets: policy.secrets)
+            distro: name,
+            sshAgent: policy.sshAgent ?? hostAgent,
+            sshAgentForwarding: policy.sshAgentForwarding == .on,
+            secrets: policy.secrets)
     }
 
     func mergedEnv(_ env: [String: String]?, auth: AuthSession) -> [String: String] {

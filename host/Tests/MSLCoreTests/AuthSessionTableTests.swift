@@ -6,7 +6,8 @@ import XCTest
 final class AuthSessionTableTests: XCTestCase {
     func testCreatePublishesGuestEnvironment() {
         let table = AuthSessionTable()
-        let session = table.create(distro: "ubuntu", sshAgent: true, secrets: false)
+        let session = table.create(
+            distro: "ubuntu", sshAgent: true, sshAgentForwarding: true, secrets: false)
         let env = session.environment
 
         XCTAssertEqual(env["MSL_AUTH_ID"], session.id)
@@ -14,6 +15,7 @@ final class AuthSessionTableTests: XCTestCase {
         XCTAssertEqual(env["MSL_AUTH_DISTRO"], "ubuntu")
         XCTAssertEqual(env["MSL_AUTH_PORT"], String(Proto.authPort))
         XCTAssertEqual(env["MSL_AUTH_SSH"], "1")
+        XCTAssertEqual(env["MSL_AUTH_SSH_FORWARDING"], "1")
         XCTAssertEqual(env["MSL_AUTH_SECRETS"], "0")
         XCTAssertEqual(env["MSL_AUTH_VERSION"], "1")
     }
@@ -21,6 +23,7 @@ final class AuthSessionTableTests: XCTestCase {
     func testValidateAcceptsMatchingPeerAndEnabledSurface() throws {
         let table = AuthSessionTable()
         let session = table.create(distro: "ubuntu", sshAgent: true, secrets: false)
+        XCTAssertFalse(session.sshAgentForwarding)
         let peer = AuthPeer(
             id: session.id, token: session.token, distro: "ubuntu", uid: 1000, pid: 42,
             comm: "ssh")

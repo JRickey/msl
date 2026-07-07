@@ -20,6 +20,7 @@ struct AuthCommand: ParsableCommand {
             let status = try DaemonClient.authStatus(MSLHome.resolve(), name: distro)
             print("distro: \(status.distro)")
             print("ssh-agent: \(format(status.sshAgent, detail: status.sshAgentDetail))")
+            print("ssh-agent-forwarding: \(status.sshAgentForwarding.rawValue)")
             print("secrets: \(format(status.secrets, detail: status.secretsDetail))")
             print("secrets-bus: \(status.secretsBus)")
         }
@@ -45,14 +46,22 @@ struct AuthCommand: ParsableCommand {
         @Option(name: .customLong("ssh-agent"), help: "Set SSH agent policy: on or off.")
         var sshAgent: Toggle?
 
+        @Option(
+            name: .customLong("ssh-agent-forwarding"),
+            help: "Set remote SSH agent forwarding policy: off, ask, or on.")
+        var sshAgentForwarding: AuthForwardingPolicy?
+
         func run() throws {
             let home = MSLHome.resolve()
             let name = try Registry.load(from: home.registryURL).resolveDefault(requested: distro)
                 .name
             let store = AuthPolicyStore(url: home.authPolicyURL)
-            if secrets != nil || sshAgent != nil {
+            if secrets != nil || sshAgent != nil || sshAgentForwarding != nil {
                 try store.set(
-                    distro: name, secrets: secrets?.boolValue, sshAgent: sshAgent?.boolValue)
+                    distro: name,
+                    secrets: secrets?.boolValue,
+                    sshAgent: sshAgent?.boolValue,
+                    sshAgentForwarding: sshAgentForwarding)
             }
             let policy = try store.policy(for: name)
             print("distro: \(name)")
@@ -79,3 +88,5 @@ enum Toggle: String, ExpressibleByArgument {
         }
     }
 }
+
+extension AuthForwardingPolicy: ExpressibleByArgument {}

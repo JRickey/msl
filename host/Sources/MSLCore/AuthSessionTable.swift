@@ -5,6 +5,7 @@ public struct AuthSession: Equatable, Sendable {
     public let token: String
     public let distro: String
     public let sshAgent: Bool
+    public let sshAgentForwarding: Bool
     public let secrets: Bool
     public var guestSessionID: UInt64?
 
@@ -15,6 +16,7 @@ public struct AuthSession: Equatable, Sendable {
             "MSL_AUTH_DISTRO": distro,
             "MSL_AUTH_PORT": String(Proto.authPort),
             "MSL_AUTH_SSH": sshAgent ? "1" : "0",
+            "MSL_AUTH_SSH_FORWARDING": sshAgentForwarding ? "1" : "0",
             "MSL_AUTH_SECRETS": secrets ? "1" : "0",
         ]
         env["MSL_AUTH_VERSION"] = "1"
@@ -29,11 +31,14 @@ public final class AuthSessionTable: @unchecked Sendable {
 
     public init() {}
 
-    public func create(distro: String, sshAgent: Bool, secrets: Bool) -> AuthSession {
+    public func create(
+        distro: String, sshAgent: Bool, sshAgentForwarding: Bool = false, secrets: Bool
+    ) -> AuthSession {
         precondition(!distro.isEmpty, "auth session distro must not be empty")
         let session = AuthSession(
             id: Token.generate(), token: Token.generate(), distro: distro,
-            sshAgent: sshAgent, secrets: secrets, guestSessionID: nil)
+            sshAgent: sshAgent, sshAgentForwarding: sshAgentForwarding, secrets: secrets,
+            guestSessionID: nil)
         lock.lock()
         byID[session.id] = session
         lock.unlock()

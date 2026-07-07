@@ -17,11 +17,13 @@ final class AuthPolicyStoreTests: XCTestCase {
         let url = tempURL()
         let store = AuthPolicyStore(url: url)
 
-        try store.set(distro: "ubuntu", secrets: false, sshAgent: true)
+        try store.set(
+            distro: "ubuntu", secrets: false, sshAgent: true, sshAgentForwarding: .on)
         let loaded = try AuthPolicyStore(url: url).policy(for: "ubuntu")
 
         XCTAssertFalse(loaded.secrets)
         XCTAssertEqual(loaded.sshAgent, true)
+        XCTAssertEqual(loaded.sshAgentForwarding, .on)
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
         XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.uint16Value, 0o600)
     }

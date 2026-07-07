@@ -8,6 +8,7 @@ public struct AuthStatusData: Sendable, Equatable, Codable {
     public let distro: String
     public let sshAgent: Bool
     public let secrets: Bool
+    public let sshAgentForwarding: AuthForwardingPolicy
     public let sshAgentDetail: String?
     public let secretsBus: String
     public let secretsDetail: String?
@@ -16,6 +17,7 @@ public struct AuthStatusData: Sendable, Equatable, Codable {
         case distro
         case sshAgent = "ssh_agent"
         case secrets
+        case sshAgentForwarding = "ssh_agent_forwarding"
         case sshAgentDetail = "ssh_agent_detail"
         case secretsBus = "secrets_bus"
         case secretsDetail = "secrets_detail"
@@ -23,12 +25,14 @@ public struct AuthStatusData: Sendable, Equatable, Codable {
 
     public init(
         distro: String, sshAgent: Bool, secrets: Bool, sshAgentDetail: String? = nil,
+        sshAgentForwarding: AuthForwardingPolicy = .off,
         secretsBus: String? = nil, secretsDetail: String? = nil
     ) {
         precondition(!distro.isEmpty, "auth status distro must not be empty")
         self.distro = distro
         self.sshAgent = sshAgent
         self.secrets = secrets
+        self.sshAgentForwarding = sshAgentForwarding
         self.sshAgentDetail = sshAgentDetail
         self.secretsBus = secretsBus ?? Self.defaultSecretsBus(secrets: secrets)
         self.secretsDetail = secretsDetail
