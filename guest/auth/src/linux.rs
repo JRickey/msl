@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -19,6 +20,18 @@ use crate::ssh::{self, Decision};
 
 const SOCKET_WAIT_TICKS: usize = 50;
 const SOCKET_WAIT: Duration = Duration::from_millis(20);
+const DBUS_DAEMON_CANDIDATES: &[&str] = &["/usr/bin/dbus-daemon", "/bin/dbus-daemon"];
+const DBUS_BROKER_CANDIDATES: &[&str] = &["/usr/bin/dbus-broker-launch", "/bin/dbus-broker-launch"];
+const SOCKET_ACTIVATE_CANDIDATES: &[&str] = &[
+    "/usr/bin/systemd-socket-activate",
+    "/bin/systemd-socket-activate",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BusLauncher {
+    DbusDaemon { path: String },
+    DbusBroker { broker: String, activator: String },
+}
 
 #[must_use]
 pub fn run_session() -> i32 {
@@ -74,14 +87,7 @@ fn parse_session_args() -> Result<Vec<String>, String> {
 }
 
 fn prepare_ssh_agent() -> Result<String, String> {
-    let root = runtime_root()?;
-    let dir = format!("{root}/msl");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("runtime dir: {e}"))?;
-    let mut perms = std::fs::metadata(&dir)
-        .map_err(|e| format!("runtime metadata: {e}"))?
-        .permissions();
-    perms.set_mode(0o700);
-    std::fs::set_permissions(&dir, perms).map_err(|e| format!("runtime mode: {e}"))?;
+    let dir = auth_runtime_dir()?;
     let sock = format!("{dir}/ssh-agent.sock");
     let _ = std::fs::remove_file(&sock);
     spawn_agent(&sock)?;
@@ -104,6 +110,23 @@ fn runtime_root() -> Result<String, String> {
     perms.set_mode(0o700);
     std::fs::set_permissions(&root, perms).map_err(|e| format!("runtime root mode: {e}"))?;
     Ok(root)
+}
+
+fn auth_runtime_dir() -> Result<String, String> {
+    let root = runtime_root()?;
+    let dir = format!("{root}/msl");
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
+fn ensure_private_dir(dir: &str) -> Result<(), String> {
+    assert!(!dir.is_empty(), "runtime directory must not be empty");
+    std::fs::create_dir_all(dir).map_err(|e| format!("runtime dir: {e}"))?;
+    let mut perms = std::fs::metadata(dir)
+        .map_err(|e| format!("runtime metadata: {e}"))?
+        .permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(dir, perms).map_err(|e| format!("runtime mode: {e}"))
 }
 
 fn spawn_agent(sock: &str) -> Result<(), String> {
@@ -141,8 +164,20 @@ fn prepare_secret_service(env: &mut Vec<(String, String)>) -> Result<(), String>
 }
 
 fn start_session_bus(env: &[(String, String)]) -> Result<String, String> {
-    let daemon = find_executable(&["/usr/bin/dbus-daemon", "/bin/dbus-daemon"])
-        .ok_or_else(|| "dbus-daemon is not installed".to_string())?;
+    let launcher = find_session_bus_launcher().ok_or_else(bus_provider_error)?;
+    start_bus_launcher(&launcher, env)
+}
+
+fn start_bus_launcher(launcher: &BusLauncher, env: &[(String, String)]) -> Result<String, String> {
+    assert!(!env.is_empty(), "session env must include variables");
+    match launcher {
+        BusLauncher::DbusDaemon { path } => start_dbus_daemon(path, env),
+        BusLauncher::DbusBroker { broker, activator } => start_dbus_broker(broker, activator, env),
+    }
+}
+
+fn start_dbus_daemon(daemon: &str, env: &[(String, String)]) -> Result<String, String> {
+    assert!(!daemon.is_empty(), "dbus-daemon path must not be empty");
     let output = Command::new(daemon)
         .args(["--session", "--fork", "--print-address=1", "--print-pid=1"])
         .env_clear()
@@ -154,6 +189,70 @@ fn start_session_bus(env: &[(String, String)]) -> Result<String, String> {
         return Err(command_error("dbus-daemon", &output.stderr));
     }
     parse_bus_address(&output.stdout)
+}
+
+fn start_dbus_broker(
+    broker: &str,
+    activator: &str,
+    env: &[(String, String)],
+) -> Result<String, String> {
+    assert!(
+        !broker.is_empty(),
+        "dbus-broker-launch path must not be empty"
+    );
+    assert!(
+        !activator.is_empty(),
+        "systemd-socket-activate path must not be empty"
+    );
+    let dir = auth_runtime_dir()?;
+    let sock = format!("{dir}/session-bus.sock");
+    let _ = std::fs::remove_file(&sock);
+    let address = dbus_unix_path_address(&sock);
+    let child = Command::new(activator)
+        .arg(format!("--listen={sock}"))
+        .arg(broker)
+        .arg("--scope")
+        .arg("user")
+        .env_clear()
+        .envs(env.iter().map(|(key, value)| (key, value)))
+        .spawn()
+        .map_err(|e| format!("start dbus-broker-launch: {e}"))?;
+    assert!(child.id() > 0, "spawned bus launcher pid must be positive");
+    wait_for_socket(&sock)?;
+    Ok(address)
+}
+
+fn find_session_bus_launcher() -> Option<BusLauncher> {
+    find_session_bus_launcher_with(|path| Path::new(path).is_file())
+}
+
+fn find_session_bus_launcher_with<F>(exists: F) -> Option<BusLauncher>
+where
+    F: Fn(&str) -> bool,
+{
+    if let Some(path) = first_existing(DBUS_DAEMON_CANDIDATES, &exists) {
+        return Some(BusLauncher::DbusDaemon { path });
+    }
+    let broker = first_existing(DBUS_BROKER_CANDIDATES, &exists)?;
+    let activator = first_existing(SOCKET_ACTIVATE_CANDIDATES, &exists)?;
+    Some(BusLauncher::DbusBroker { broker, activator })
+}
+
+fn first_existing<F>(candidates: &[&str], exists: &F) -> Option<String>
+where
+    F: Fn(&str) -> bool,
+{
+    for candidate in candidates {
+        if exists(candidate) {
+            return Some((*candidate).to_string());
+        }
+    }
+    None
+}
+
+fn bus_provider_error() -> String {
+    "dbus-daemon is not installed, and dbus-broker-launch requires systemd-socket-activate"
+        .to_string()
 }
 
 fn spawn_secretsd(env: &[(String, String)]) -> Result<(), String> {
@@ -182,6 +281,26 @@ fn parse_bus_address(stdout: &[u8]) -> Result<String, String> {
     }
 }
 
+fn dbus_unix_path_address(path: &str) -> String {
+    assert!(!path.is_empty(), "dbus socket path must not be empty");
+    format!("unix:path={}", dbus_address_escape(path))
+}
+
+fn dbus_address_escape(value: &str) -> String {
+    assert!(!value.is_empty(), "dbus address value must not be empty");
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'/' | b'.') {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push('%');
+            let result = write!(&mut escaped, "{byte:02X}");
+            assert!(result.is_ok(), "writing to String cannot fail");
+        }
+    }
+    escaped
+}
+
 fn command_error(label: &str, stderr: &[u8]) -> String {
     let detail = String::from_utf8_lossy(stderr).trim().to_string();
     if detail.is_empty() {
@@ -189,15 +308,6 @@ fn command_error(label: &str, stderr: &[u8]) -> String {
     } else {
         format!("{label} failed: {detail}")
     }
-}
-
-fn find_executable(candidates: &[&str]) -> Option<String> {
-    for candidate in candidates {
-        if Path::new(candidate).is_file() {
-            return Some((*candidate).to_string());
-        }
-    }
-    None
 }
 
 fn env_value(env: &[(String, String)], key: &str) -> Option<String> {
@@ -335,4 +445,80 @@ fn write_agent_packet<W: Write>(writer: &mut W, packet: &[u8]) -> io::Result<()>
 fn fail(message: &str) -> i32 {
     eprintln!("msl-auth: {message}");
     255
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BusLauncher, bus_provider_error, dbus_address_escape, dbus_unix_path_address,
+        find_session_bus_launcher_with, parse_bus_address,
+    };
+
+    fn exists(path: &str, present: &[&str]) -> bool {
+        assert!(!path.is_empty(), "candidate path must not be empty");
+        present.contains(&path)
+    }
+
+    #[test]
+    fn bus_launcher_prefers_dbus_daemon() {
+        let launcher = find_session_bus_launcher_with(|path| {
+            exists(
+                path,
+                &[
+                    "/usr/bin/dbus-daemon",
+                    "/usr/bin/dbus-broker-launch",
+                    "/usr/bin/systemd-socket-activate",
+                ],
+            )
+        });
+        assert_eq!(
+            launcher,
+            Some(BusLauncher::DbusDaemon {
+                path: "/usr/bin/dbus-daemon".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bus_launcher_accepts_broker_with_activator() {
+        let launcher = find_session_bus_launcher_with(|path| {
+            exists(
+                path,
+                &["/bin/dbus-broker-launch", "/bin/systemd-socket-activate"],
+            )
+        });
+        assert_eq!(
+            launcher,
+            Some(BusLauncher::DbusBroker {
+                broker: "/bin/dbus-broker-launch".to_string(),
+                activator: "/bin/systemd-socket-activate".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bus_launcher_rejects_broker_without_activator() {
+        let launcher =
+            find_session_bus_launcher_with(|path| exists(path, &["/usr/bin/dbus-broker-launch"]));
+        let message = bus_provider_error();
+        assert_eq!(launcher, None);
+        assert!(message.contains("dbus-daemon"));
+        assert!(message.contains("systemd-socket-activate"));
+    }
+
+    #[test]
+    fn dbus_address_escapes_socket_path() {
+        let escaped = dbus_address_escape("/tmp/msl auth/session,bus.sock");
+        let address = dbus_unix_path_address("/tmp/msl auth/session,bus.sock");
+        assert_eq!(escaped, "/tmp/msl%20auth/session%2Cbus.sock");
+        assert_eq!(address, "unix:path=/tmp/msl%20auth/session%2Cbus.sock");
+    }
+
+    #[test]
+    fn bus_address_parser_takes_first_line() {
+        let parsed = parse_bus_address(b"unix:path=/tmp/bus\n1234\n").expect("valid address");
+        assert_eq!(parsed, "unix:path=/tmp/bus");
+        assert!(parse_bus_address(b"").is_err());
+        assert!(parse_bus_address(b"\n123\n").is_err());
+    }
 }
