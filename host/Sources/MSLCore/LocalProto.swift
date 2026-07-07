@@ -33,6 +33,7 @@ public enum LocalRequest: Sendable, Equatable {
     case mountCommit(name: String, mountpoint: String)
     case mountUnmount(name: String, force: Bool)
     case mountStatus
+    case authStatus(name: String?)
     case shutdown
 
     /// Encode to a UTF-8 JSON frame payload, enforcing the 4 MiB bound.
@@ -98,6 +99,9 @@ extension LocalRequest: Codable {
         case .shell(let req): try encodeShell(req, into: &container)
         case .guiConnect(let name):
             try container.encode("gui_connect", forKey: .op)
+            try container.encodeIfPresent(name, forKey: .name)
+        case .authStatus(let name):
+            try container.encode("auth_status", forKey: .op)
             try container.encodeIfPresent(name, forKey: .name)
         case .shutdown: try container.encode("shutdown", forKey: .op)
         case .attach, .resize, .signal, .wait: try encodeSession(into: &container)
@@ -179,6 +183,8 @@ extension LocalRequest: Codable {
         case "shell": return .shell(try decodeShell(from: container))
         case "gui_connect":
             return .guiConnect(name: try container.decodeIfPresent(String.self, forKey: .name))
+        case "auth_status":
+            return .authStatus(name: try container.decodeIfPresent(String.self, forKey: .name))
         case "shutdown": return .shutdown
         default: return try decodeMountOp(op, from: container)
         }

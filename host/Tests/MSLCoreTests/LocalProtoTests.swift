@@ -19,6 +19,8 @@ final class LocalRequestRoundTripTests: XCTestCase {
             .resize(sessionID: 7, rows: 30, cols: 100),
             .signal(sessionID: 7, signal: 2),
             .wait(sessionID: 9),
+            .authStatus(name: "ubuntu"),
+            .authStatus(name: nil),
             .shutdown,
         ]
         for request in cases {
@@ -89,5 +91,13 @@ final class LocalReplyRoundTripTests: XCTestCase {
         let status = StatusData(vm: "stopped", distros: [], idleTimeoutS: 60)
         let json = String(bytes: try LocalReply.ok(status), encoding: .utf8) ?? ""
         XCTAssertTrue(json.contains("\"idle_timeout_s\""), json)
+    }
+
+    func testAuthStatusReplyRoundTrip() throws {
+        let status = AuthStatusData(distro: "ubuntu", sshAgent: true, secrets: false)
+        let reply = try LocalResponse<AuthStatusData>.decode(try LocalReply.ok(status))
+        XCTAssertEqual(reply.data, status)
+        let json = String(bytes: try LocalReply.ok(status), encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"ssh_agent\""), json)
     }
 }

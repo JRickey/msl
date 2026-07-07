@@ -22,6 +22,9 @@ public enum Proto {
     /// Reverse interop exec (mac_exec v1): the guest shim dials CID_HOST here.
     public static let interopPort: UInt32 = 5010
 
+    /// Reverse auth bridge: guest service adapters dial CID_HOST here.
+    public static let authPort: UInt32 = 5040
+
     /// Wire protocol version advertised by a v1.4 agent in the `ping` reply.
     public static let version = 4
 }

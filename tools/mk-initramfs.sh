@@ -13,6 +13,9 @@ AGENT="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-agent"
 SHIM="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/mac"
 FSD="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-fsd"
 WAY="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-way"
+SESSION="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-session"
+SSH_AGENT="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-ssh-agent"
+SECRETSD="$REPO_ROOT/guest/target/aarch64-unknown-linux-musl/release/msl-secretsd"
 
 # Pinned busybox: Alpine v3.21 aarch64 static build. The multiarch busybox.net
 # binaries ship only 32-bit armv8l for ARM, which will not run on this kernel.
@@ -48,6 +51,24 @@ fi
 
 if [ ! -f "$SHIM" ]; then
 	echo "mk-initramfs: missing interop shim: $SHIM" >&2
+	echo "  build it first: (cd guest && cargo zigbuild --workspace --target aarch64-unknown-linux-musl --release)" >&2
+	exit 1
+fi
+
+if [ ! -f "$SESSION" ]; then
+	echo "mk-initramfs: missing auth session helper: $SESSION" >&2
+	echo "  build it first: (cd guest && cargo zigbuild --workspace --target aarch64-unknown-linux-musl --release)" >&2
+	exit 1
+fi
+
+if [ ! -f "$SSH_AGENT" ]; then
+	echo "mk-initramfs: missing ssh-agent adapter: $SSH_AGENT" >&2
+	echo "  build it first: (cd guest && cargo zigbuild --workspace --target aarch64-unknown-linux-musl --release)" >&2
+	exit 1
+fi
+
+if [ ! -f "$SECRETSD" ]; then
+	echo "mk-initramfs: missing Secret Service adapter: $SECRETSD" >&2
 	echo "  build it first: (cd guest && cargo zigbuild --workspace --target aarch64-unknown-linux-musl --release)" >&2
 	exit 1
 fi
@@ -106,6 +127,9 @@ install -m 0755 "$AGENT" "$stage/init"
 install -m 0755 "$BB" "$stage/bin/busybox"
 install -m 0755 "$SHIM" "$stage/tools/mac"
 install -m 0755 "$FSD" "$stage/tools/msl-fsd"
+install -m 0755 "$SESSION" "$stage/tools/msl-session"
+install -m 0755 "$SSH_AGENT" "$stage/tools/msl-ssh-agent"
+install -m 0755 "$SECRETSD" "$stage/tools/msl-secretsd"
 if [ -f "$WAY" ]; then
 	install -m 0755 "$WAY" "$stage/tools/msl-way"
 fi

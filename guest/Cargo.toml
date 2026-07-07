@@ -1,5 +1,5 @@
 [workspace]
-members = ["agent", "wire", "shim", "way", "fsd"]
+members = ["agent", "wire", "shim", "way", "fsd", "auth"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 libc = "0.2"
 vsock = "0.5"
 msl-wire = { path = "wire" }

@@ -87,6 +87,7 @@ extension DaemonCore {
         forwarder.start()
         startPollTimer()
         installInterop(host: host)
+        installAuthBridge(host: host)
         log("VM booted with \(entries.count) image(s) attached")
     }
 
@@ -171,7 +172,7 @@ extension DaemonCore {
         let saved = withLock { () -> TeardownBundle in
             let bundle = TeardownBundle(
                 wake: powerWake, forwarder: forwarder, pollTimer: pollTimer,
-                interop: interopListener, host: host)
+                interop: interopListener, auth: authListener, host: host)
             host = nil
             control = nil
             attached = []
@@ -181,6 +182,8 @@ extension DaemonCore {
             powerWake = nil
             forwarder = nil
             interopListener = nil
+            authListener = nil
+            authSessions.removeAll()
             pollTimer = nil
             balloonTargetMiB = 0
             comfortTicks = 0
@@ -191,7 +194,9 @@ extension DaemonCore {
         }
         saved.pollTimer?.cancel()
         saved.interop?.stop()
+        saved.auth?.stop()
         saved.host?.removeInteropListener(port: Proto.interopPort)
+        saved.host?.removeInteropListener(port: Proto.authPort)
         saved.forwarder?.stop()
         saved.wake?.stop()
     }
@@ -350,29 +355,6 @@ extension DaemonCore {
         let rosetta = (entry?.rosetta ?? false) && withLock { rosettaAttached }
         assert(!hostname.isEmpty, "resolved hostname must not be empty")
         return DistroBootSettings(hostname: hostname, macShare: macShare, rosetta: rosetta)
-    }
-
-    /// Session argv + cwd policy. A /mnt/mac cwd cannot exist in a distro that
-    /// opted out of the share — fall back before the guest's fatal chdir.
-    func resolveSession(
-        name: String, requested: [String]?, cwd requestedCwd: String
-    ) throws -> (argv: [String], cwd: String) {
-        assert(!name.isEmpty, "distro name must not be empty")
-        assert(!requestedCwd.isEmpty, "cwd must not be empty")
-        let registry = try Registry.load(from: config.home.registryURL)
-        let entry = registry.entry(name: name)
-        let shareOn = config.shareHomePath != nil && (entry?.macShare ?? true)
-        let cwd = UserWrap.effectiveCwd(requestedCwd, macShare: shareOn)
-        guard let user = entry?.defaultUser else {
-            return (requested ?? ["/bin/bash", "-l"], cwd)
-        }
-        return (UserWrap.wrap(user: user, argv: requested, cwd: cwd), cwd)
-    }
-
-    func mergedEnv(_ env: [String: String]?) -> [String: String] {
-        var result = env ?? [:]
-        if result["TERM"] == nil { result["TERM"] = config.term }
-        return result
     }
 
     private func syncTimeIfRunning() {

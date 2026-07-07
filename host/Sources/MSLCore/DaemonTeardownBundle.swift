@@ -7,5 +7,6 @@ struct TeardownBundle {
     let forwarder: PortForwarder?
     let pollTimer: DispatchSourceTimer?
     let interop: InteropListener?
+    let auth: AuthBridgeListener?
     let host: VMHost?
 }

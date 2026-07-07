@@ -65,26 +65,56 @@ public final class DaemonServer: @unchecked Sendable {
 
     private func replyFor(_ request: LocalRequest) -> Data {
         do {
-            switch request {
-            case .status: return okFrame(try core.status())
-            case .up(let name): try core.up(name: name); return okFrame(LocalEmpty())
-            case .down(let name, let all, let timeoutMs):
-                try core.down(name: name, all: all, timeoutMs: timeoutMs)
-                return okFrame(LocalEmpty())
-            case .shell(let req): return okFrame(try core.openShell(req))
-            case .resize(let sessionID, let rows, let cols):
-                try core.resize(sessionID: sessionID, rows: rows, cols: cols)
-                return okFrame(LocalEmpty())
-            case .signal(let sessionID, let sig):
-                try core.signal(sessionID: sessionID, signal: sig)
-                return okFrame(LocalEmpty())
-            case .wait(let sessionID): return okFrame(try core.wait(sessionID: sessionID))
-            case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
-                return try mountReply(request)
-            default: return errorFrame("unsupported request")
-            }
+            return try replyBody(for: request)
         } catch {
             return errorFrame(describe(error))
+        }
+    }
+
+    private func replyBody(for request: LocalRequest) throws -> Data {
+        switch request {
+        case .status, .up, .down, .shell:
+            return try lifecycleReply(request)
+        case .resize, .signal, .wait:
+            return try sessionReply(request)
+        case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
+            return try mountReply(request)
+        case .authStatus(let name):
+            return okFrame(try core.authStatus(name: name))
+        default:
+            return errorFrame("unsupported request")
+        }
+    }
+
+    private func lifecycleReply(_ request: LocalRequest) throws -> Data {
+        switch request {
+        case .status:
+            return okFrame(try core.status())
+        case .up(let name):
+            try core.up(name: name)
+            return okFrame(LocalEmpty())
+        case .down(let name, let all, let timeoutMs):
+            try core.down(name: name, all: all, timeoutMs: timeoutMs)
+            return okFrame(LocalEmpty())
+        case .shell(let req):
+            return okFrame(try core.openShell(req))
+        default:
+            return errorFrame("unsupported lifecycle request")
+        }
+    }
+
+    private func sessionReply(_ request: LocalRequest) throws -> Data {
+        switch request {
+        case .resize(let sessionID, let rows, let cols):
+            try core.resize(sessionID: sessionID, rows: rows, cols: cols)
+            return okFrame(LocalEmpty())
+        case .signal(let sessionID, let sig):
+            try core.signal(sessionID: sessionID, signal: sig)
+            return okFrame(LocalEmpty())
+        case .wait(let sessionID):
+            return okFrame(try core.wait(sessionID: sessionID))
+        default:
+            return errorFrame("unsupported session request")
         }
     }
 
