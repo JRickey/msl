@@ -61,6 +61,7 @@ jobs:
         env:
           APP_CERT: ${{ secrets.DEVELOPER_ID_APPLICATION_CERT_P12_BASE64 }}
           APP_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
+          APP_CERT_SHA1: ${{ secrets.DEVELOPER_ID_APPLICATION_CERT_SHA1 }}
           INSTALLER_CERT: ${{ secrets.DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
           INSTALLER_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}
           APP_PROFILE: ${{ secrets.APP_DEVELOPER_ID_PROFILE_BASE64 }}
@@ -75,10 +76,19 @@ jobs:
           security import "$RUNNER_TEMP/app.p12" -k release.keychain-db -P "$APP_CERT_PASSWORD" -T /usr/bin/codesign
           security import "$RUNNER_TEMP/installer.p12" -k release.keychain-db -P "$INSTALLER_CERT_PASSWORD" -T /usr/bin/productbuild
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RUNNER_TEMP" release.keychain-db
-          app_identity=$(security find-identity -v -p codesigning release.keychain-db | awk -F '"' '/Developer ID Application/ { print $2; exit }')
-          installer_identity=$(security find-identity -v -p basic release.keychain-db | awk -F '"' '/Developer ID Installer/ { print $2; exit }')
-          if [ -z "$app_identity" ] || [ -z "$installer_identity" ]; then
+          app_identity=$(printf '%s' "$APP_CERT_SHA1" | tr '[:lower:]' '[:upper:]' | tr -d ' :')
+          if ! printf '%s' "$app_identity" | grep -Eq '^[0-9A-F]{40}$'; then
+            echo "DEVELOPER_ID_APPLICATION_CERT_SHA1 must be the 40-character SHA-1 hash from security find-identity" >&2
+            exit 1
+          fi
+          if ! security find-identity -v -p codesigning release.keychain-db | \
+            awk -v wanted="$app_identity" '$2 == wanted && /Developer ID Application/ { found = 1 } END { exit !found }'; then
+            echo "Imported Developer ID Application P12 does not contain identity $app_identity" >&2
             security find-identity -v -p codesigning release.keychain-db
+            exit 1
+          fi
+          installer_identity=$(security find-identity -v -p basic release.keychain-db | awk -F '"' '/Developer ID Installer/ { print $2; exit }')
+          if [ -z "$installer_identity" ]; then
             security find-identity -v -p basic release.keychain-db
             exit 1
           fi
@@ -86,6 +96,50 @@ jobs:
           echo "RELEASE_INSTALLER_SIGN_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
           echo "$APP_PROFILE" | base64 --decode > "$RUNNER_TEMP/app.provisionprofile"
           echo "$FSKIT_PROFILE" | base64 --decode > "$RUNNER_TEMP/fskit.provisionprofile"
+          security find-certificate -a -p release.keychain-db > "$RUNNER_TEMP/release-certs.pem"
+          python3 - "$app_identity" \
+            "$RUNNER_TEMP/release-certs.pem" \
+            "$RUNNER_TEMP/app.provisionprofile" \
+            "$RUNNER_TEMP/fskit.provisionprofile" <<'PY'
+          import base64
+          import hashlib
+          import plistlib
+          import re
+          import subprocess
+          import sys
+
+          wanted_sha1 = sys.argv[1].upper()
+          pem = open(sys.argv[2], "rb").read()
+          cert = None
+          for match in re.finditer(
+              rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----",
+              pem,
+              re.S,
+          ):
+              der = base64.b64decode(re.sub(rb"\s+", b"", match.group(1)))
+              if hashlib.sha1(der).hexdigest().upper() == wanted_sha1:
+                  cert = der
+                  break
+          if cert is None:
+              print(f"Imported keychain does not contain certificate {wanted_sha1}")
+              sys.exit(1)
+          cert_fp = hashlib.sha256(cert).hexdigest().upper()
+
+          for profile in sys.argv[3:]:
+              profile_plist = plistlib.loads(
+                  subprocess.check_output(["security", "cms", "-D", "-i", profile])
+              )
+              authorized = profile_plist.get("DeveloperCertificates", [])
+              if cert in authorized:
+                  continue
+              profile_fps = [
+                  hashlib.sha256(profile_cert).hexdigest().upper()
+                  for profile_cert in authorized
+              ]
+              print(f"{profile} does not authorize Developer ID Application cert {cert_fp}")
+              print("authorized certs:", ", ".join(profile_fps))
+              sys.exit(1)
+          PY
 
       - name: Build signed pkg
         env:

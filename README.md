@@ -162,11 +162,14 @@ make notarize VERSION=0.1.0
 GitHub releases use the same targets on `macos-26` and require these secrets:
 `APPLE_TEAM_ID`, `DEVELOPER_ID_APPLICATION_CERT_P12_BASE64`,
 `DEVELOPER_ID_APPLICATION_CERT_PASSWORD`,
+`DEVELOPER_ID_APPLICATION_CERT_SHA1`,
 `DEVELOPER_ID_INSTALLER_CERT_P12_BASE64`,
 `DEVELOPER_ID_INSTALLER_CERT_PASSWORD`,
 `APP_DEVELOPER_ID_PROFILE_BASE64`, `FSKIT_DEVELOPER_ID_PROFILE_BASE64`,
 `APPLE_ID`, and
 `APPLE_APP_SPECIFIC_PASSWORD`.
+`DEVELOPER_ID_APPLICATION_CERT_SHA1` must be the SHA-1 identity hash authorized
+by both provisioning profiles, not just any cert with the same display name.
 
 ## Quick Start
 
