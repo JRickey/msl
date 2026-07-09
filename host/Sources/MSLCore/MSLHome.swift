@@ -37,6 +37,9 @@ public struct MSLHome: Sendable {
         cacheDirectory.appendingPathComponent("catalog-icons")
     }
     public var logsDirectory: URL { root.appendingPathComponent("logs") }
+    public var authDirectory: URL { root.appendingPathComponent("auth") }
+    public var authPolicyURL: URL { authDirectory.appendingPathComponent("policy.json") }
+    public var secretsMetadataURL: URL { authDirectory.appendingPathComponent("secrets.json") }
     public var registryURL: URL { root.appendingPathComponent("registry.json") }
     public var launchersURL: URL { root.appendingPathComponent("launchers.json") }
 
@@ -49,7 +52,7 @@ public struct MSLHome: Sendable {
     /// Create the home, `distros/`, and `logs/` directories if absent.
     public func ensureDirectories() throws {
         let fileManager = FileManager.default
-        for dir in [root, distrosDirectory, logsDirectory] {  // bounded: three dirs
+        for dir in [root, distrosDirectory, logsDirectory, authDirectory] {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }

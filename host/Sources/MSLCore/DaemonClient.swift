@@ -138,6 +138,13 @@ public enum DaemonClient {
         return try control.mountStatus()
     }
 
+    public static func authStatus(_ home: MSLHome, name: String?) throws -> AuthStatusData {
+        try ensureRunning(home)
+        let control = try connect(home)
+        defer { control.close() }
+        return try control.authStatus(name: name)
+    }
+
     private static func buildRequest(
         name: String?, argv: [String], term: String, extraEnv: [String: String] = [:]
     ) -> ShellRequest {

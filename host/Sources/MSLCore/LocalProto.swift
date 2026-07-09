@@ -39,6 +39,7 @@ public enum LocalRequest: Sendable, Equatable {
     case mountCommit(name: String, mountpoint: String)
     case mountUnmount(name: String, force: Bool)
     case mountStatus
+    case authStatus(name: String?)
     case shutdown
 
     /// Encode to a UTF-8 JSON frame payload, enforcing the 4 MiB bound.
@@ -93,10 +94,8 @@ extension LocalRequest: Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .status: try container.encode("status", forKey: .op)
-        case .up(let name):
-            try container.encode("up", forKey: .op)
-            try container.encodeIfPresent(name, forKey: .name)
+        case .status, .shutdown, .up, .guiConnect, .authStatus:
+            try encodeBare(into: &container)
         case .down(let name, let all, let timeoutMs):
             try container.encode("down", forKey: .op)
             try container.encodeIfPresent(name, forKey: .name)
@@ -104,16 +103,33 @@ extension LocalRequest: Codable {
             try container.encodeIfPresent(timeoutMs, forKey: .timeoutMs)
         case .shell(let req): try encodeShell(req, into: &container, op: "shell")
         case .capture(let req): try encodeShell(req, into: &container, op: "capture")
-        case .guiConnect(let name):
-            try container.encode("gui_connect", forKey: .op)
-            try container.encodeIfPresent(name, forKey: .name)
         case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch:
             try encodeGui(into: &container)
-        case .shutdown: try container.encode("shutdown", forKey: .op)
         case .attach, .resize, .signal, .wait: try encodeSession(into: &container)
         case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
             try encodeMount(into: &container)
         }
+    }
+
+    /// Ops whose wire form is an op tag plus an optional distro name.
+    private func encodeBare(into container: inout KeyedEncodingContainer<CodingKeys>) throws {
+        switch self {
+        case .status: try container.encode("status", forKey: .op)
+        case .shutdown: try container.encode("shutdown", forKey: .op)
+        case .up(let name): try encodeNamed("up", name, into: &container)
+        case .guiConnect(let name): try encodeNamed("gui_connect", name, into: &container)
+        case .authStatus(let name): try encodeNamed("auth_status", name, into: &container)
+        default: break
+        }
+    }
+
+    private func encodeNamed(
+        _ op: String, _ name: String?, into container: inout KeyedEncodingContainer<CodingKeys>
+    ) throws {
+        assert(!op.isEmpty, "local op tag must not be empty")
+        assert(name.map { !$0.isEmpty } ?? true, "distro name must not be empty when present")
+        try container.encode(op, forKey: .op)
+        try container.encodeIfPresent(name, forKey: .name)
     }
 
     private func encodeGui(into container: inout KeyedEncodingContainer<CodingKeys>) throws {
@@ -219,6 +235,8 @@ extension LocalRequest: Codable {
         case "capture": return .capture(try decodeShell(from: container))
         case "gui_connect":
             return .guiConnect(name: try container.decodeIfPresent(String.self, forKey: .name))
+        case "auth_status":
+            return .authStatus(name: try container.decodeIfPresent(String.self, forKey: .name))
         case "shutdown": return .shutdown
         default: return try decodeGuiOp(op, from: container)
         }

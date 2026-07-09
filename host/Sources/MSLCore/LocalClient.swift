@@ -84,6 +84,10 @@ public final class LocalClient: @unchecked Sendable {
         return try roundTrip(.mountStatus)
     }
 
+    public func authStatus(name: String?) throws -> AuthStatusData {
+        return try roundTrip(.authStatus(name: name))
+    }
+
     /// After a framed OK, detach the fd; the caller owns a raw PTY byte pipe
     /// to the guest.
     public func attachRaw(sessionID: UInt64, token: String) throws -> Int32 {

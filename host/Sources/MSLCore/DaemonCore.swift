@@ -37,6 +37,8 @@ public final class DaemonCore: @unchecked Sendable {
     let mountTable = FSMountTable()
     var mountListener: FSMountListener?
     let mountInitLock = NSLock()
+    let authSessions = AuthSessionTable()
+    var authListener: AuthBridgeListener?
 
     public init(config: DaemonConfig) {
         self.config = config
@@ -106,9 +108,17 @@ public final class DaemonCore: @unchecked Sendable {
         let session = try resolveSession(
             name: entry.name, requested: req.argv, cwd: req.cwd ?? "/root")
         let open = SessionOpenReq(
-            argv: session.argv, cwd: session.cwd, env: mergedEnv(req.env), rows: req.rows,
+            argv: session.argv, cwd: session.cwd,
+            env: mergedEnv(req.env, auth: session.auth), rows: req.rows,
             cols: req.cols, distro: entry.name)
-        let opened = try control.sessionOpen(open)
+        let opened: SessionOpenData
+        do {
+            opened = try control.sessionOpen(open)
+            authSessions.bind(authID: session.auth.id, guestSessionID: opened.sessionID)
+        } catch {
+            authSessions.remove(session.auth.id)
+            throw error
+        }
         let localToken = Token.generate()
         try withLockThrowing {
             try sessions.add(
@@ -130,7 +140,7 @@ public final class DaemonCore: @unchecked Sendable {
         let session = try resolveSession(
             name: entry.name, requested: req.argv, cwd: req.cwd ?? "/root")
         return try control.exec(
-            argv: session.argv, env: mergedEnv(req.env), timeoutMs: timeoutMs,
+            argv: session.argv, env: mergedEnv(req.env, auth: session.auth), timeoutMs: timeoutMs,
             distro: entry.name, cwd: session.cwd)
     }
 
@@ -186,12 +196,14 @@ public final class DaemonCore: @unchecked Sendable {
 
     /// Reap a session whose relay ended normally (guest closed on child exit).
     public func endSession(sessionID: UInt64) {
+        authSessions.removeGuestSession(sessionID)
         reap(sessionID: sessionID, kill: false)
     }
 
     /// Forced reap for a session with no live relay (attach failure, ACK
     /// failure, or an unattached orphan): SIGKILL the guest child, then reap.
     public func abortSession(sessionID: UInt64) {
+        authSessions.removeGuestSession(sessionID)
         reap(sessionID: sessionID, kill: true)
     }
 

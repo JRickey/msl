@@ -1,0 +1,32 @@
+[package]
+name = "msl-auth"
+version = "0.1.2"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "msl-session"
+path = "src/session_main.rs"
+
+[[bin]]
+name = "msl-ssh-agent"
+path = "src/ssh_agent_main.rs"
+
+[[bin]]
+name = "msl-secretsd"
+path = "src/secrets_main.rs"
+
+[dependencies]
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+msl-wire = { workspace = true }
+zbus = "5.16"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = { workspace = true }
+
+[lints]
+workspace = true
