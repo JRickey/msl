@@ -19,6 +19,10 @@ final class LocalRequestRoundTripTests: XCTestCase {
             .resize(sessionID: 7, rows: 30, cols: 100),
             .signal(sessionID: 7, signal: 2),
             .wait(sessionID: 9),
+            .capture(
+                ShellRequest(
+                    name: "ubuntu", argv: ["/bin/true"], env: ["TERM": "dumb"],
+                    rows: 40, cols: 120, cwd: "/root")),
             .shutdown,
         ]
         for request in cases {
@@ -36,6 +40,16 @@ final class LocalRequestRoundTripTests: XCTestCase {
     func testShellRoundTripWithDefaults() throws {
         let req = ShellRequest(name: nil, argv: nil, env: nil, rows: 40, cols: 120, cwd: nil)
         XCTAssertEqual(try roundTrip(.shell(req)), .shell(req))
+    }
+
+    func testCaptureUsesOpName() throws {
+        let req = ShellRequest(
+            name: "ubuntu", argv: ["/bin/echo", "ok"], env: nil, rows: 40, cols: 120,
+            cwd: "/root")
+        let data = try LocalRequest.capture(req).encoded()
+        let json = String(bytes: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"capture\""), json)
+        XCTAssertEqual(try LocalRequest.decode(data), .capture(req))
     }
 
     func testAttachUsesSnakeCaseSessionKey() throws {
@@ -75,6 +89,12 @@ final class LocalReplyRoundTripTests: XCTestCase {
     func testWaitReplyRoundTrip() throws {
         let data = LocalWaitData(done: true, exitCode: 42)
         let reply = try LocalResponse<LocalWaitData>.decode(try LocalReply.ok(data))
+        XCTAssertEqual(reply.data, data)
+    }
+
+    func testCaptureReplyRoundTrip() throws {
+        let data = ExecData(exitCode: 7, stdout: "out", stderr: "err", truncated: false)
+        let reply = try LocalResponse<ExecData>.decode(try LocalReply.ok(data))
         XCTAssertEqual(reply.data, data)
     }
 

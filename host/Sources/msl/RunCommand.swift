@@ -13,9 +13,16 @@ struct RunCommand: ParsableCommand {
     @Argument(parsing: .postTerminator, help: "Command after -- (required).")
     var command: [String] = []
 
+    @Flag(help: "Launch as a GUI app through the native presenter.")
+    var gui = false
+
     func run() throws {
         guard !command.isEmpty else {
             throw ValidationError("usage: msl run [name] -- <command> [args...]")
+        }
+        if gui {
+            try GuiLaunchSupport.launch(name: name, command: command)
+            return
         }
         let home = MSLHome.resolve()
         let term = ProcessInfo.processInfo.environment["TERM"] ?? "xterm-256color"

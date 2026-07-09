@@ -71,20 +71,31 @@ public final class DaemonServer: @unchecked Sendable {
             case .down(let name, let all, let timeoutMs):
                 try core.down(name: name, all: all, timeoutMs: timeoutMs)
                 return okFrame(LocalEmpty())
-            case .shell(let req): return okFrame(try core.openShell(req))
-            case .resize(let sessionID, let rows, let cols):
-                try core.resize(sessionID: sessionID, rows: rows, cols: cols)
-                return okFrame(LocalEmpty())
-            case .signal(let sessionID, let sig):
-                try core.signal(sessionID: sessionID, signal: sig)
-                return okFrame(LocalEmpty())
-            case .wait(let sessionID): return okFrame(try core.wait(sessionID: sessionID))
+            case .shell, .capture, .resize, .signal, .wait:
+                return try sessionReply(request)
+            case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch:
+                return try guiReply(request)
             case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
                 return try mountReply(request)
             default: return errorFrame("unsupported request")
             }
         } catch {
             return errorFrame(describe(error))
+        }
+    }
+
+    private func sessionReply(_ request: LocalRequest) throws -> Data {
+        switch request {
+        case .shell(let req): return okFrame(try core.openShell(req))
+        case .capture(let req): return okFrame(try core.capture(req))
+        case .resize(let sessionID, let rows, let cols):
+            try core.resize(sessionID: sessionID, rows: rows, cols: cols)
+            return okFrame(LocalEmpty())
+        case .signal(let sessionID, let sig):
+            try core.signal(sessionID: sessionID, signal: sig)
+            return okFrame(LocalEmpty())
+        case .wait(let sessionID): return okFrame(try core.wait(sessionID: sessionID))
+        default: return errorFrame("unsupported request")
         }
     }
 
@@ -99,6 +110,17 @@ public final class DaemonServer: @unchecked Sendable {
             try core.unmount(name: name, force: force)
             return okFrame(LocalEmpty())
         case .mountStatus: return okFrame(core.mountStatus())
+        default: return errorFrame("unsupported request")
+        }
+    }
+
+    private func guiReply(_ request: LocalRequest) throws -> Data {
+        switch request {
+        case .guiProbe(let req): return okFrame(try core.guiProbe(req))
+        case .guiStart(let req): return okFrame(try core.guiStart(req))
+        case .guiStatus(let req): return okFrame(try core.guiStatus(req))
+        case .guiStop(let req): return okFrame(try core.guiStop(req))
+        case .guiLaunch(let req): return okFrame(try core.guiLaunch(req))
         default: return errorFrame("unsupported request")
         }
     }

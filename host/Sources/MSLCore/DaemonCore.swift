@@ -119,6 +119,21 @@ public final class DaemonCore: @unchecked Sendable {
         return ShellData(sessionID: opened.sessionID, token: localToken)
     }
 
+    /// Run a bounded command in a distro and return captured stdout/stderr.
+    public func capture(_ req: ShellRequest, timeoutMs: UInt64 = 30_000) throws -> ExecData {
+        beginOp()
+        defer { endOp() }
+        let entry = try ensureUp(req.name)
+        guard let control = withLock({ self.control }) else {
+            throw MSLError.configuration("VM not running")
+        }
+        let session = try resolveSession(
+            name: entry.name, requested: req.argv, cwd: req.cwd ?? "/root")
+        return try control.exec(
+            argv: session.argv, env: mergedEnv(req.env), timeoutMs: timeoutMs,
+            distro: entry.name, cwd: session.cwd)
+    }
+
     /// Consume the single-use attach token and open the guest data plane; the
     /// returned raw fd is relayed byte-for-byte to the client by the server. Any
     /// failure after the token is consumed reaps the session (no leak).

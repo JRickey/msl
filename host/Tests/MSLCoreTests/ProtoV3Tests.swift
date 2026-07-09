@@ -4,8 +4,8 @@ import XCTest
 @testable import MSLCore
 
 final class ProtoV3Tests: XCTestCase {
-    func testVersionIsFour() {
-        XCTAssertEqual(Proto.version, 4)
+    func testVersionIsFive() {
+        XCTAssertEqual(Proto.version, 5)
         XCTAssertEqual(Proto.forwardPort, 5003)
     }
 
@@ -51,6 +51,40 @@ final class ProtoV3Tests: XCTestCase {
         let json = Data(#"{"ports":[22,3000,8080]}"#.utf8)
         let listeners = try JSONDecoder().decode(NetListenersData.self, from: json)
         XCTAssertEqual(listeners.ports, [22, 3000, 8080])
+    }
+
+    func testGuiRuntimeReqEncodesDistroAndUser() throws {
+        let req = GuiRuntimeReq(distro: "ubuntu", user: "root")
+        let data = try JSONEncoder().encode(req)
+        let json = try XCTUnwrap(String(bytes: data, encoding: .utf8))
+        XCTAssertTrue(json.contains("\"distro\":\"ubuntu\""), json)
+        XCTAssertTrue(json.contains("\"user\":\"root\""), json)
+    }
+
+    func testGuiLaunchReqEncodesScopedLaunch() throws {
+        let req = GuiLaunchReq(
+            distro: "ubuntu", argv: ["/usr/bin/gedit"], env: ["WAYLAND_DISPLAY": "msl-way-0"],
+            cwd: "/tmp")
+        let data = try JSONEncoder().encode(req)
+        let json = try XCTUnwrap(String(bytes: data, encoding: .utf8))
+        XCTAssertTrue(json.contains("\"argv\":[\"\\/usr\\/bin\\/gedit\"]"), json)
+        XCTAssertTrue(json.contains("\"cwd\":\"\\/tmp\""), json)
+        XCTAssertTrue(json.contains("\"WAYLAND_DISPLAY\":\"msl-way-0\""), json)
+    }
+
+    func testGuiProbeDecodes() throws {
+        let text =
+            #"{"runtime":{"state":"running","runtime_dir":"/tmp/msl-gui-0","#
+            + #""wayland_display":"msl-way-0","socket_present":true,"pid":7,"#
+            + #""log_tail":""},"capabilities":[{"name":"msl-way","present":true},"#
+            + #"{"name":"gimp","present":false}]}"#
+        let json = Data(text.utf8)
+        let probe = try JSONDecoder().decode(GuiProbeData.self, from: json)
+        XCTAssertEqual(probe.runtime.state, "running")
+        XCTAssertEqual(probe.runtime.pid, 7)
+        XCTAssertTrue(
+            probe.capabilities.contains(GuiCapabilityData(name: "msl-way", present: true)))
+        XCTAssertTrue(probe.capabilities.contains(GuiCapabilityData(name: "gimp", present: false)))
     }
 
     func testForwardHelloEncodesPort() throws {

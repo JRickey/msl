@@ -8,7 +8,7 @@ use serde_json::Value;
 
 pub const AGENT_NAME: &str = "msl-agent";
 pub const AGENT_VERSION: &str = "0.0.1";
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +91,25 @@ pub struct MkfsReq {
 pub struct DistroDownReq {
     pub name: String,
     pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GuiRuntimeReq {
+    pub distro: String,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GuiLaunchReq {
+    pub distro: String,
+    #[serde(default)]
+    pub user: Option<String>,
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

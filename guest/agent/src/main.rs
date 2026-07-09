@@ -11,6 +11,7 @@ mod conn;
 mod distro;
 mod exec;
 mod frame;
+mod gui;
 mod log;
 mod mem;
 mod net;

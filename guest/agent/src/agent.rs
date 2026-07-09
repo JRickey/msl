@@ -14,8 +14,8 @@ use crate::distro::{self, Distros};
 use crate::exec::{self, ExecOpts};
 use crate::proto::{
     self, AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, DistroDownReq, DistroStateReq,
-    DistroUpReq, Empty, MkfsReq, PROTOCOL_VERSION, PingData, Request, SessionOpenReq,
-    SessionRefReq, SessionResizeReq, SessionSignalReq, SetTimeReq,
+    DistroUpReq, Empty, GuiLaunchReq, GuiRuntimeReq, MkfsReq, PROTOCOL_VERSION, PingData, Request,
+    SessionOpenReq, SessionRefReq, SessionResizeReq, SessionSignalReq, SetTimeReq,
 };
 use crate::session::{self, Sessions};
 use crate::sys;
@@ -126,6 +126,11 @@ impl Agent {
             "mem_stats" => Self::handle_mem_stats(req.id),
             "mem_reclaim" => Self::handle_mem_reclaim(req.id),
             "net_listeners" => Self::handle_net_listeners(req.id),
+            "gui_probe" => self.handle_gui_probe(req),
+            "gui_start" => self.handle_gui_start(req),
+            "gui_status" => self.handle_gui_status(req),
+            "gui_stop" => self.handle_gui_stop(req),
+            "gui_launch" => self.handle_gui_launch(req),
             other => proto::encode_err(req.id, &format!("unknown op: {other}")),
         }
     }
@@ -328,6 +333,75 @@ impl Agent {
     fn handle_net_listeners(id: u64) -> Vec<u8> {
         respond(id, do_net_listeners())
     }
+
+    fn handle_gui_probe(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
+        respond(
+            req.id,
+            parsed.and_then(|r| {
+                validate_gui_user(r.user.as_deref())?;
+                self.gui_runtime(&r.distro, crate::gui::probe)
+            }),
+        )
+    }
+
+    fn handle_gui_start(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
+        respond(
+            req.id,
+            parsed.and_then(|r| {
+                validate_gui_user(r.user.as_deref())?;
+                self.gui_runtime(&r.distro, crate::gui::start)
+            }),
+        )
+    }
+
+    fn handle_gui_status(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
+        respond(
+            req.id,
+            parsed.and_then(|r| {
+                validate_gui_user(r.user.as_deref())?;
+                self.gui_runtime(&r.distro, crate::gui::status)
+            }),
+        )
+    }
+
+    fn handle_gui_stop(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
+        respond(
+            req.id,
+            parsed.and_then(|r| {
+                validate_gui_user(r.user.as_deref())?;
+                self.gui_runtime(&r.distro, crate::gui::stop)
+            }),
+        )
+    }
+
+    fn handle_gui_launch(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiLaunchReq, String> = parse(&req.req);
+        let result = parsed.and_then(|r| {
+            validate_gui_user(r.user.as_deref())?;
+            let init_pid = self.gui_init_pid(&r.distro)?;
+            crate::gui::launch(init_pid, &r.argv, &r.env, r.cwd.as_deref())
+        });
+        respond(req.id, result)
+    }
+
+    fn gui_runtime<T: Serialize>(
+        &self,
+        distro: &str,
+        action: fn(i32) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let init_pid = self.gui_init_pid(distro)?;
+        action(init_pid)
+    }
+
+    fn gui_init_pid(&self, distro: &str) -> Result<i32, String> {
+        distro::validate_name(distro)?;
+        self.distro_pid(distro)
+            .ok_or_else(|| "distro not running".to_string())
+    }
 }
 
 fn run_mkfs(dev: &str) -> Result<Empty, String> {
@@ -363,6 +437,14 @@ fn validate_set_time(sec: i64) -> Result<(), String> {
         Ok(())
     } else {
         Err("set_time sec must be after 2023".to_string())
+    }
+}
+
+fn validate_gui_user(user: Option<&str>) -> Result<(), String> {
+    match user {
+        None | Some("root") => Ok(()),
+        Some("") => Err("gui user must not be empty".to_string()),
+        Some(_) => Err("gui user selection is not implemented".to_string()),
     }
 }
 
@@ -526,12 +608,12 @@ mod tests {
     }
 
     #[test]
-    fn ping_reports_protocol_four() {
+    fn ping_reports_protocol_five() {
         let value = call(&Agent::new(), r#"{"id":7,"op":"ping"}"#);
         assert_eq!(value["id"], 7);
         assert_eq!(value["ok"], true);
         assert_eq!(value["data"]["agent"], "msl-agent");
-        assert_eq!(value["data"]["protocol"], 4);
+        assert_eq!(value["data"]["protocol"], 5);
     }
 
     // The three v1.3 ops route to their gated wrappers; on the host build those
@@ -558,6 +640,49 @@ mod tests {
         assert_eq!(value["id"], 42);
         assert_eq!(value["ok"], false);
         assert!(value["error"].as_str().expect("err").contains("linux"));
+    }
+
+    #[test]
+    fn gui_status_routes() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":50,"op":"gui_status","req":{"distro":"ubuntu"}}"#,
+        );
+        assert_eq!(value["id"], 50);
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"], "distro not running");
+    }
+
+    #[test]
+    fn gui_user_selection_is_explicitly_rejected() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":51,"op":"gui_probe","req":{"distro":"ubuntu","user":"dev"}}"#,
+        );
+        assert_eq!(value["id"], 51);
+        assert_eq!(value["ok"], false);
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("err")
+                .contains("user selection")
+        );
+    }
+
+    #[test]
+    fn gui_launch_validates_distro_name() {
+        let value = call(
+            &Agent::new(),
+            r#"{"id":52,"op":"gui_launch","req":{"distro":"Bad","argv":[]}}"#,
+        );
+        assert_eq!(value["id"], 52);
+        assert_eq!(value["ok"], false);
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("err")
+                .contains("name must match")
+        );
     }
 
     #[test]
