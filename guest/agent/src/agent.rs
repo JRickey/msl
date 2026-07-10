@@ -234,24 +234,20 @@ impl Agent {
         respond(req.id, result)
     }
 
-    // A live distro takes the poweroff/wait path; the per-name sync/unmount
-    // teardown and Failed->Stopped settle then run unconditionally, no lock held.
     fn distro_down(&self, name: &str, timeout_ms: u64) -> Result<proto::DistroDownData, String> {
         assert!(!name.is_empty(), "distro_down needs a name");
         debug_assert!((distro::DOWN_MIN_MS..=distro::DOWN_MAX_MS).contains(&timeout_ms));
-        let active = {
-            let guard = self.distros.lock().map_err(|_| "distro lock".to_string())?;
-            guard.active_pid(name)
+        let claim = {
+            let mut guard = self.distros.lock().map_err(|_| "distro lock".to_string())?;
+            guard.claim_cleanup(name, None)?
         };
-        if let Some(pid) = active {
-            assert!(pid > 0, "active init pid must be positive");
-            do_poweroff_and_wait(&self.distros, name, pid, timeout_ms);
+        let Some(claim) = claim else {
+            return Ok(proto::DistroDownData { state: "stopped" });
+        };
+        if claim.init_pid().is_some() {
+            do_shutdown_claimed(&self.distros, name, claim, timeout_ms)?;
         }
-        do_teardown(name);
-        self.distros
-            .lock()
-            .map_err(|_| "distro lock".to_string())?
-            .settle_and_remove(name);
+        do_complete_claimed_cleanup(&self.distros, name, claim)?;
         Ok(proto::DistroDownData { state: "stopped" })
     }
 
@@ -510,26 +506,56 @@ fn do_distro_up(
 }
 
 #[cfg(target_os = "linux")]
-fn do_poweroff_and_wait(distros: &Mutex<Distros>, name: &str, init_pid: i32, timeout_ms: u64) {
-    distro::poweroff_and_wait(distros, name, init_pid, timeout_ms);
+fn do_shutdown_claimed(
+    distros: &Mutex<Distros>,
+    name: &str,
+    claim: distro::CleanupClaim,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    distro::shutdown_claimed(distros, name, claim, timeout_ms)
 }
 
 #[cfg(not(target_os = "linux"))]
-const fn do_poweroff_and_wait(
+fn do_shutdown_claimed(
     _distros: &Mutex<Distros>,
     _name: &str,
-    _init_pid: i32,
+    claim: distro::CleanupClaim,
     _timeout_ms: u64,
-) {
+) -> Result<(), String> {
+    if claim.init_pid().is_some() {
+        Ok(())
+    } else {
+        Err("shutdown claim has no live init".to_string())
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn do_teardown(name: &str) {
-    distro::teardown(name);
+fn do_complete_claimed_cleanup(
+    distros: &Mutex<Distros>,
+    name: &str,
+    claim: distro::CleanupClaim,
+) -> Result<(), String> {
+    distro::complete_claimed_cleanup(distros, name, claim)
 }
 
 #[cfg(not(target_os = "linux"))]
-const fn do_teardown(_name: &str) {}
+fn do_complete_claimed_cleanup(
+    distros: &Mutex<Distros>,
+    name: &str,
+    claim: distro::CleanupClaim,
+) -> Result<(), String> {
+    let mut guard = distros.lock().map_err(|_| "distro lock".to_string())?;
+    if !guard.begin_finalize(name, claim) {
+        return Err("cleanup claim changed before finalization".to_string());
+    }
+    let removed = guard.finish_finalize(name, claim, Ok(()))?;
+    drop(guard);
+    if removed {
+        Ok(())
+    } else {
+        Err("cleanup generation is not stopped".to_string())
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn do_session_open(
@@ -874,13 +900,12 @@ mod tests {
     }
 
     #[test]
-    fn distro_down_from_failed_reports_stopped_and_settles() {
+    fn distro_down_from_failed_cleans_and_reports_stopped() {
         let agent = Agent::new();
         {
-            // A crashed boot lands in Failed (init exits inside the ready window).
             let mut guard = agent.distros.lock().expect("distro lock");
-            guard.reserve("ubuntu", "/dev/vda").expect("reserve");
-            guard.begin("ubuntu", 4242);
+            let generation = guard.reserve("ubuntu", "/dev/vda").expect("reserve");
+            guard.begin("ubuntu", generation, 4242).expect("begin");
             let name = guard.on_init_exit(4242);
             let state = guard.snapshot("ubuntu").state;
             drop(guard);
@@ -893,7 +918,6 @@ mod tests {
         );
         assert_eq!(first["ok"], true);
         assert_eq!(first["data"]["state"], "stopped");
-        // Settled to Stopped, so distro_state and a repeat call agree.
         let state = call(
             &agent,
             r#"{"id":24,"op":"distro_state","req":{"name":"ubuntu"}}"#,
@@ -941,12 +965,13 @@ mod tests {
         let agent = Agent::new();
         {
             let mut guard = agent.distros.lock().expect("distro lock");
-            guard.reserve("one", "/dev/vda").expect("reserve one");
-            guard.begin("one", 100);
-            guard.promote("one");
-            guard.reserve("two", "/dev/vdb").expect("reserve two");
-            guard.begin("two", 200);
-            guard.promote("two");
+            let one = guard.reserve("one", "/dev/vda").expect("reserve one");
+            guard.begin("one", one, 100).expect("begin one");
+            assert!(guard.promote("one", one, 100));
+            let two = guard.reserve("two", "/dev/vdb").expect("reserve two");
+            guard.begin("two", two, 200).expect("begin two");
+            assert!(guard.promote("two", two, 200));
+            drop(guard);
         }
         let value = call(&agent, r#"{"id":32,"op":"distro_state"}"#);
         let list = value["data"]["distros"].as_array().expect("distros array");

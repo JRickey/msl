@@ -685,7 +685,7 @@ printf 'runtime_dir=%s\n' '{xdg}'
 [ -S '{xdg}/{WAYLAND_DISPLAY}' ] && echo "socket=present" || echo "socket=missing"
 if [ -f '{root}/{LOG_NAME}' ]; then
   printf 'log_tail=%s\n' "$(tail -20 '{root}/{LOG_NAME}' | tr '\n' '|')"
-  disp_line="$(grep 'DISPLAY=:' '{root}/{LOG_NAME}' | tail -n 1)"
+  disp_line="$(grep -m 1 'DISPLAY=:' '{root}/{LOG_NAME}')"
   [ -n "$disp_line" ] && printf 'x11_display_line=%s\n' "$disp_line"
 fi
 "#
@@ -766,9 +766,9 @@ printf 'runtime_dir=%s\n' '{xdg}'
 #[cfg(test)]
 mod tests {
     use super::{
-        Ident, MAX_RUNTIMES, MAX_WINDOWS, Runtimes, check_dir, ensure_user_dir, gui_env,
-        parse_fields, parse_x11_display, passwd_entry, supplementary_groups, validate_argv,
-        validate_runtime_name, validate_user,
+        Context, Ident, MAX_RUNTIMES, MAX_WINDOWS, Runtimes, check_dir, ensure_user_dir, gui_env,
+        parse_fields, parse_x11_display, passwd_entry, status_script, supplementary_groups,
+        validate_argv, validate_runtime_name, validate_user,
     };
     use std::fmt::Write as _;
     use std::fs;
@@ -833,6 +833,21 @@ mod tests {
             parse_x11_display("DISPLAY=:007hostname"),
             Some(":007".to_string())
         );
+    }
+
+    #[test]
+    fn status_script_stops_at_first_display_announcement() {
+        let ctx = Context {
+            user: "dev".to_string(),
+            init_pid: 42,
+            ident: Ident::new(1000, 1000, Vec::new()).expect("identity"),
+            xdg: "/run/user/1000".to_string(),
+            root: "/run/user/1000/msl-gui".to_string(),
+        };
+        let script = status_script(&ctx);
+        assert!(script.contains("grep -m 1 'DISPLAY=:'"));
+        assert!(!script.contains("grep 'DISPLAY=:'"));
+        assert!(!script.contains("tail -n 1"));
     }
 
     #[test]
