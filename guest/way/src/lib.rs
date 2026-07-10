@@ -16,6 +16,8 @@ pub mod remote;
 pub mod comp;
 #[cfg(target_os = "linux")]
 pub mod input;
+#[cfg(target_os = "linux")]
+pub mod xwm;
 
 /// Wayland globals the compositor must advertise from startup for the supported
 /// toolkits (GTK ≥4.12) to accept the display. `build_state` registers exactly

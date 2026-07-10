@@ -38,6 +38,10 @@ pub struct GuiRuntimeData {
     pub pid: Option<u32>,
     pub windows: u32,
     pub log_tail: String,
+    // The X11 DISPLAY the compositor announced once XWayland readied, parsed from
+    // its log; absent until then, and absent entirely when XWayland is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x11_display: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -463,6 +467,7 @@ pub fn probe(ctx: &Context) -> Result<GuiProbeData, String> {
         capabilities: vec![
             capability("msl-way", &fields, "msl_way"),
             capability("xkb-data", &fields, "xkb_data"),
+            capability("xwayland", &fields, "xwayland"),
             capability("gtk4-widget-factory", &fields, "gtk4_widget_factory"),
             capability("gimp", &fields, "gimp"),
         ],
@@ -591,7 +596,39 @@ fn runtime_from_fields(
         pid: fields.get("pid").and_then(|pid| pid.parse::<u32>().ok()),
         windows,
         log_tail: fields.get("log_tail").cloned().unwrap_or_default(),
+        x11_display: fields
+            .get("x11_display_line")
+            .and_then(|line| parse_x11_display(line)),
     }
+}
+
+const MAX_DISPLAY_DIGITS: usize = 10;
+
+// Extract the `:N` display token from a compositor `DISPLAY=:N` log line; the
+// guest log is untrusted, so only a colon followed by ASCII digits is accepted.
+#[must_use]
+pub fn parse_x11_display(line: &str) -> Option<String> {
+    let marker = line.find("DISPLAY=:")?;
+    let rest = &line[marker + "DISPLAY=".len()..];
+    let bytes = rest.as_bytes();
+    debug_assert_eq!(
+        bytes.first(),
+        Some(&b':'),
+        "display token must start with colon"
+    );
+    let mut end = 1;
+    // bounded: display numbers are small; a runaway digit run is rejected
+    for _ in 0..MAX_DISPLAY_DIGITS {
+        match bytes.get(end) {
+            Some(b) if b.is_ascii_digit() => end += 1,
+            _ => break,
+        }
+    }
+    if end == 1 {
+        return None;
+    }
+    debug_assert!(end <= rest.len(), "display token within the source line");
+    Some(rest[..end].to_string())
 }
 
 pub fn parse_fields(text: &str) -> HashMap<String, String> {
@@ -648,6 +685,8 @@ printf 'runtime_dir=%s\n' '{xdg}'
 [ -S '{xdg}/{WAYLAND_DISPLAY}' ] && echo "socket=present" || echo "socket=missing"
 if [ -f '{root}/{LOG_NAME}' ]; then
   printf 'log_tail=%s\n' "$(tail -20 '{root}/{LOG_NAME}' | tr '\n' '|')"
+  disp_line="$(grep 'DISPLAY=:' '{root}/{LOG_NAME}' | tail -n 1)"
+  [ -n "$disp_line" ] && printf 'x11_display_line=%s\n' "$disp_line"
 fi
 "#
     )
@@ -659,6 +698,7 @@ fn probe_script(ctx: &Context) -> String {
         r#"{head}
 [ -x {WAY_BIN} ] && echo "msl_way=present" || echo "msl_way=missing"
 [ -d /usr/share/X11/xkb ] && echo "xkb_data=present" || echo "xkb_data=missing"
+command -v Xwayland >/dev/null 2>&1 && echo "xwayland=present" || echo "xwayland=missing"
 command -v gtk4-widget-factory >/dev/null 2>&1 && echo "gtk4_widget_factory=present" || echo "gtk4_widget_factory=missing"
 command -v gimp >/dev/null 2>&1 && echo "gimp=present" || echo "gimp=missing"
 "#
@@ -727,8 +767,8 @@ printf 'runtime_dir=%s\n' '{xdg}'
 mod tests {
     use super::{
         Ident, MAX_RUNTIMES, MAX_WINDOWS, Runtimes, check_dir, ensure_user_dir, gui_env,
-        parse_fields, passwd_entry, supplementary_groups, validate_argv, validate_runtime_name,
-        validate_user,
+        parse_fields, parse_x11_display, passwd_entry, supplementary_groups, validate_argv,
+        validate_runtime_name, validate_user,
     };
     use std::fmt::Write as _;
     use std::fs;
@@ -774,6 +814,25 @@ mod tests {
             assert_eq!(env.get(key).map(String::as_str), Some(value), "{key}");
         }
         assert!(!env.contains_key("DISPLAY"), "XWayland owns DISPLAY later");
+    }
+
+    #[test]
+    fn parse_x11_display_extracts_colon_number() {
+        assert_eq!(
+            parse_x11_display("msl-way: DISPLAY=:0"),
+            Some(":0".to_string())
+        );
+        assert_eq!(
+            parse_x11_display("prefix DISPLAY=:12 trailing text"),
+            Some(":12".to_string()),
+            "stops at the first non-digit"
+        );
+        assert_eq!(parse_x11_display("msl-way: DISPLAY=:"), None, "no digits");
+        assert_eq!(parse_x11_display("no display here"), None);
+        assert_eq!(
+            parse_x11_display("DISPLAY=:007hostname"),
+            Some(":007".to_string())
+        );
     }
 
     #[test]

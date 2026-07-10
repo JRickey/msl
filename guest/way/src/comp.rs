@@ -35,6 +35,8 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
+use smithay::wayland::xwayland_shell::XWaylandShellState;
+use smithay::xwayland::{X11Surface, X11Wm};
 
 use crate::frames;
 use crate::ledger::Ledger;
@@ -48,9 +50,13 @@ pub const OUTPUT_W: i32 = 1920;
 pub const OUTPUT_H: i32 = 1080;
 pub const DEFAULT_REFRESH_HZ: u32 = 60;
 
-/// A window's shell role. Toplevels carry the host size-authority machine;
-/// popups are client-sized and anchored to `parent` (a win id) at `pos`
-/// (parent-geometry-relative logical points).
+/// A window's shell role.
+///
+/// Toplevels carry the host size-authority machine; popups are client-sized and
+/// anchored to `parent` (a win id) at `pos` (parent-geometry-relative logical
+/// points). `X11` wraps an `XWayland` surface, whose presentation (toplevel vs.
+/// override-redirect popup) is derived from the X11 window at announce time
+/// rather than from a second shell object.
 pub enum WinRole {
     Toplevel(ToplevelSurface),
     Popup {
@@ -58,6 +64,7 @@ pub enum WinRole {
         parent: u32,
         pos: (i32, i32),
     },
+    X11(X11Surface),
 }
 
 /// One remoted window: its Wayland role and handles, current attributes mirrored
@@ -111,6 +118,13 @@ impl Win {
     }
 
     #[must_use]
+    pub fn new_x11(x11: X11Surface, surface: WlSurface) -> Self {
+        debug_assert!(surface.is_alive(), "x11 window on dead surface");
+        debug_assert!(x11.alive(), "x11 window backing is dead");
+        Self::with_role(WinRole::X11(x11), surface)
+    }
+
+    #[must_use]
     pub fn new_popup(
         popup: PopupSurface,
         surface: WlSurface,
@@ -125,7 +139,7 @@ impl Win {
     pub const fn toplevel(&self) -> Option<&ToplevelSurface> {
         match &self.role {
             WinRole::Toplevel(t) => Some(t),
-            WinRole::Popup { .. } => None,
+            WinRole::Popup { .. } | WinRole::X11(_) => None,
         }
     }
 
@@ -133,7 +147,15 @@ impl Win {
     pub const fn popup(&self) -> Option<&PopupSurface> {
         match &self.role {
             WinRole::Popup { popup, .. } => Some(popup),
-            WinRole::Toplevel(_) => None,
+            WinRole::Toplevel(_) | WinRole::X11(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn x11(&self) -> Option<&X11Surface> {
+        match &self.role {
+            WinRole::X11(x11) => Some(x11),
+            WinRole::Toplevel(_) | WinRole::Popup { .. } => None,
         }
     }
 
@@ -148,10 +170,15 @@ impl Win {
     }
 
     #[must_use]
+    pub const fn is_x11(&self) -> bool {
+        matches!(self.role, WinRole::X11(_))
+    }
+
+    #[must_use]
     pub const fn parent(&self) -> Option<u32> {
         match self.role {
             WinRole::Popup { parent, .. } => Some(parent),
-            WinRole::Toplevel(_) => None,
+            WinRole::Toplevel(_) | WinRole::X11(_) => None,
         }
     }
 
@@ -190,6 +217,12 @@ pub struct State {
     pub grabs: crate::popups::GrabStack,
     pub dismissed: crate::popups::DismissedSet,
     pub warned_popup_configure: bool,
+    pub xwayland_shell: XWaylandShellState,
+    pub xwm: Option<X11Wm>,
+    /// Set by the SIGTERM/SIGINT handler; the run loop returns on the next wake
+    /// so `State` drops and the `XWayland` `X11Lock` unlinks its `/tmp/.X11-unix`
+    /// socket instead of leaking on an abrupt kill.
+    pub shutdown: bool,
 }
 
 impl State {
@@ -290,10 +323,15 @@ impl CompositorHandler for State {
         &mut self.compositor
     }
 
+    // XWayland's connection carries `XWaylandClientData`, not our `ClientState`;
+    // the foreign lifetime admits no fallback, and exactly one type is present.
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        if let Some(xwl) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &xwl.compositor_state;
+        }
         &client
             .get_data::<ClientState>()
-            .expect("client missing ClientState")
+            .expect("wayland client carries neither ClientState nor XWaylandClientData")
             .compositor
     }
 
@@ -418,7 +456,29 @@ impl SeatHandler for State {
     }
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
-        self.focus = focused.and_then(|s| self.win_id_of(s));
+        let next = focused.and_then(|s| self.win_id_of(s));
+        let prev = self.focus;
+        if prev != next {
+            self.set_x11_activation(prev, false);
+            self.set_x11_activation(next, true);
+        }
+        self.focus = next;
+    }
+}
+
+impl State {
+    /// Mirror keyboard focus onto an X11 window's activation/stacking; a no-op
+    /// for missing or non-X11 windows so xdg focus is unaffected.
+    fn set_x11_activation(&mut self, win: Option<u32>, activated: bool) {
+        let Some(win) = win else { return };
+        debug_assert!(win != 0, "reserved window id 0 in focus change");
+        let Some(x11) = self.windows.get(&win).and_then(|w| w.x11().cloned()) else {
+            return;
+        };
+        let _ = x11.set_activated(activated);
+        if activated && let Some(xwm) = self.xwm.as_mut() {
+            let _ = xwm.raise_window(&x11);
+        }
     }
 }
 
