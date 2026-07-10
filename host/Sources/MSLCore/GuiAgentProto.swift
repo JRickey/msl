@@ -43,6 +43,9 @@ public struct GuiRuntimeData: Codable, Equatable, Sendable {
     // live-window count. Optional so a v1.4 agent still decodes.
     public let user: String?
     public let windows: UInt32?
+    // The X11 DISPLAY the compositor announced, if XWayland is enabled.
+    // Optional so an agent that omits the field still decodes.
+    public let x11Display: String?
 
     enum CodingKeys: String, CodingKey {
         case state, pid, user, windows
@@ -50,11 +53,13 @@ public struct GuiRuntimeData: Codable, Equatable, Sendable {
         case waylandDisplay = "wayland_display"
         case socketPresent = "socket_present"
         case logTail = "log_tail"
+        case x11Display = "x11_display"
     }
 
     public init(
         state: String, runtimeDir: String, waylandDisplay: String, socketPresent: Bool,
-        pid: UInt32?, logTail: String, user: String? = nil, windows: UInt32? = nil
+        pid: UInt32?, logTail: String, user: String? = nil, windows: UInt32? = nil,
+        x11Display: String? = nil
     ) {
         self.state = state
         self.runtimeDir = runtimeDir
@@ -64,6 +69,7 @@ public struct GuiRuntimeData: Codable, Equatable, Sendable {
         self.logTail = logTail
         self.user = user
         self.windows = windows
+        self.x11Display = x11Display
     }
 }
 

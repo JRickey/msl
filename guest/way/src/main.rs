@@ -38,8 +38,8 @@ mod linux {
     use msl_way::comp::{self, ClientState, State};
     use msl_way::ledger::Ledger;
     use msl_way::remote::{
-        Configure, Hello, HelloAck, HostMsg, Key, PROTOCOL_VERSION, Pointer, T_HELLO, T_HELLO_ACK,
-        T_STATS, accept_host, bind_vsock, from_json_frame, read_frame, write_json,
+        Configure, Hello, HostMsg, Key, PROTOCOL_VERSION, Pointer, T_HELLO, T_HELLO_ACK, T_STATS,
+        accept_host, bind_vsock, decode_hello_ack, read_frame, write_json,
     };
     use msl_way::{frames, input};
 
@@ -204,7 +204,7 @@ mod linux {
                 "expected hello_ack",
             ));
         }
-        let ack: HelloAck = from_json_frame(&frame.payload)?;
+        let ack = decode_hello_ack(&frame.payload)?;
         if ack.version != PROTOCOL_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -212,7 +212,7 @@ mod linux {
             ));
         }
         state.scale = if ack.scale > 0.0 { ack.scale } else { 1.0 };
-        state.refresh_hz = ack.refresh_hz.max(1);
+        state.refresh_hz = ack.refresh_hz_rounded();
         state.sync_output();
         let reader = stream.try_clone()?;
         let (tx, rx) = mpsc::sync_channel(HOST_QUEUE_CAP);
