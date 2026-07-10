@@ -112,11 +112,13 @@ impl<B: Backend> Server<B> {
             return Err(libc::EINVAL);
         }
         let parent_handle = self.nodes.resolve(parent, &mut self.backend)?;
-        let (_child, child_stat) = self.backend.lookup(parent_handle, name)?;
+        let (child, child_stat) = self.backend.lookup(parent_handle, name)?;
         let node_id = self
             .nodes
             .observe_child(parent, name, child_stat.item_type());
-        Ok(ReplyBody::Attr(stat::to_attr(node_id, parent, &child_stat)))
+        let attr = stat::to_attr(node_id, parent, &child_stat);
+        self.backend.close(child);
+        Ok(ReplyBody::Attr(attr))
     }
 
     fn getattr(&mut self, node: u64) -> Result<ReplyBody, i32> {
@@ -348,6 +350,7 @@ mod tests {
     use super::Server;
     use crate::backend::{Backend, DirItem, Handle, RenameResult};
     use crate::names::is_valid_component;
+    use crate::nodes::ROOT_ID;
     use crate::stat::Stat;
     use msl_wire::fs::{
         ItemType, ReplyBody, Request, RequestFrame, SETATTR_ATIME, SETATTR_GID, SETATTR_MODE,
@@ -461,6 +464,10 @@ mod tests {
             }
             self.open += 1;
             Ok(())
+        }
+
+        const fn live_handles(&self) -> usize {
+            self.open
         }
 
         fn child_pos(&self, parent: Handle, name: &str) -> Result<(usize, usize), i32> {
@@ -1619,6 +1626,28 @@ mod tests {
                 _ => panic!("lookup/getattr under fd pressure must succeed for {name}"),
             }
         }
+    }
+
+    #[test]
+    fn repeated_lookup_closes_temporary_handles() {
+        const DESCRIPTOR_CAP: usize = 4;
+        const LOOKUP_COUNT: usize = 64;
+        let mut fs = sample();
+        fs.budget = DESCRIPTOR_CAP;
+        let mut srv = Server::new(fs, DESCRIPTOR_CAP, false).expect("root");
+        let baseline = srv.backend.live_handles();
+        let mut node = 0;
+
+        for _ in 0..LOOKUP_COUNT {
+            node = lookup_node(&mut srv, ROOT_ID, "os");
+            assert_eq!(srv.backend.live_handles(), baseline);
+        }
+
+        match call(&mut srv, Request::Getattr { node, wanted: 0 }) {
+            ReplyBody::Attr(attr) => assert_eq!(attr.size, 3),
+            _ => panic!("wrong body"),
+        }
+        assert_eq!(srv.backend.live_handles(), baseline + 1);
     }
 
     #[test]
