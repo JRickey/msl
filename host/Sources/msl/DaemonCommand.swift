@@ -20,10 +20,10 @@ struct DaemonRunCommand: ParsableCommand {
     var idleTimeout: Int = 60
 
     @Option(name: .long, help: "Virtual CPU count for the shared VM.")
-    var cpus: Int = 4
+    var cpus: Int?
 
     @Option(name: .long, help: "Guest memory in MiB for the shared VM.")
-    var memoryMib: UInt64 = 4096
+    var memoryMib: UInt64?
 
     @Option(name: .long, help: "Kernel image (default: MSL home, then $MSL_KERNEL or ./kernel).")
     var kernel: String?

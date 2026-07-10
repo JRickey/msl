@@ -1,7 +1,6 @@
 import Foundation
 
-/// Tunables for the resident daemon's shared VM. The daemon boots lazily from
-/// the registry, so most of these mirror `msl up`'s defaults.
+/// Tunables for the resident daemon's shared VM.
 public struct DaemonConfig: Sendable {
     public let home: MSLHome
     public let kernelPath: String
@@ -19,9 +18,10 @@ public struct DaemonConfig: Sendable {
 
     public init(
         home: MSLHome, kernelPath: String, initramfsPath: String, cmdline: String = "console=hvc0",
-        cpus: Int = 4, memoryMiB: UInt64 = 4096, shareHomePath: String?, bootTimeout: Double = 60,
-        idleTimeoutS: Int = 60, term: String = "xterm-256color", memoryFloorMiB: UInt64 = 1024,
-        pollIntervalS: Double = 2, interopEnabled: Bool = true
+        cpus: Int? = nil, memoryMiB: UInt64? = nil, shareHomePath: String?,
+        bootTimeout: Double = 60, idleTimeoutS: Int = 60, term: String = "xterm-256color",
+        memoryFloorMiB: UInt64 = 1024, pollIntervalS: Double = 2,
+        interopEnabled: Bool = true, sizing: SharedVMSizing = .current()
     ) {
         precondition(!kernelPath.isEmpty, "kernel path must not be empty")
         precondition(!initramfsPath.isEmpty, "initramfs path must not be empty")
@@ -31,8 +31,8 @@ public struct DaemonConfig: Sendable {
         self.kernelPath = kernelPath
         self.initramfsPath = initramfsPath
         self.cmdline = cmdline
-        self.cpus = cpus
-        self.memoryMiB = memoryMiB
+        self.cpus = cpus ?? sizing.cpuCount
+        self.memoryMiB = memoryMiB ?? sizing.memoryMiB
         self.shareHomePath = shareHomePath
         self.bootTimeout = bootTimeout
         self.idleTimeoutS = idleTimeoutS
