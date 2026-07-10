@@ -102,17 +102,31 @@ public final class LocalClient: @unchecked Sendable {
         return framed.detachDescriptor()
     }
 
+    /// Prepare the GUI runtime if needed and mint a single-use attach token.
+    public func guiToken(name: String?, user: String? = nil) throws -> GuiTokenData {
+        return try roundTrip(.guiToken(name: name, user: user))
+    }
+
     /// After a framed OK, detach the fd; the caller owns a raw surface-plane byte
-    /// pipe to the guest.
-    public func guiConnectRaw(name: String?) throws -> Int32 {
+    /// pipe to the guest. The token is consumed by this call.
+    public func guiAttachRaw(distro: String, user: String?, token: String) throws -> Int32 {
+        precondition(!distro.isEmpty, "GUI attach distro must not be empty")
+        precondition(!token.isEmpty, "GUI attach token must not be empty")
         lock.lock()
         defer { lock.unlock() }
-        try framed.send(try LocalRequest.guiConnect(name: name).encoded())
+        try framed.send(
+            try LocalRequest.guiAttach(distro: distro, user: user, token: token).encoded())
         let reply = try LocalResponse<LocalEmpty>.decode(try framed.receive())
         guard reply.ok else {
-            throw MSLError.remote(reply.error ?? "gui connect rejected")
+            throw MSLError.remote(reply.error ?? "gui attach rejected")
         }
         return framed.detachDescriptor()
+    }
+
+    /// Mint a token and immediately spend it on this connection.
+    public func guiConnectRaw(name: String?) throws -> Int32 {
+        let minted = try guiToken(name: name)
+        return try guiAttachRaw(distro: minted.distro, user: minted.user, token: minted.token)
     }
 
     private func roundTrip<Payload: Decodable & Sendable>(

@@ -10,12 +10,15 @@ use std::process::{ChildStderr, ChildStdout, ExitStatus};
 use std::time::{Duration, Instant};
 
 use crate::proto::ExecData;
-use crate::sys::{self, PollTarget};
+use crate::sys::{self, Ident, PollTarget};
 
 pub struct ExecOpts<'a> {
     pub distro: bool,
     pub cwd: Option<&'a str>,
     pub init_pid: Option<i32>,
+    // Credentials the namespace-entering child drops to; agent-context execs
+    // have no namespace to enter and must leave it unset.
+    pub ident: Option<&'a Ident>,
 }
 
 const MAX_CAPTURE: usize = 1024 * 1024;
@@ -70,6 +73,9 @@ pub fn run(
     opts: &ExecOpts,
 ) -> Result<ExecData, String> {
     assert_valid_argv(argv)?;
+    if opts.ident.is_some() && !opts.distro {
+        return Err("exec failed: identity requires a distro namespace".to_string());
+    }
     let deadline_ms = timeout_ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
     if opts.distro {
         run_distro(argv, env, deadline_ms, opts)
@@ -328,7 +334,7 @@ fn run_distro(
         .init_pid
         .ok_or_else(|| "distro not running".to_string())?;
     let ns_fds = sys::open_ns_fds(init_pid).map_err(|e| format!("exec failed: {e}"))?;
-    let spec = build_capture_spec(argv, env, opts.cwd, ns_fds)?;
+    let spec = build_capture_spec(argv, env, opts, ns_fds)?;
     let child = {
         let _spawn = crate::wait::spawn_lock();
         let spawned = sys::spawn_captured(&spec);
@@ -344,7 +350,7 @@ fn run_distro(
 fn build_capture_spec(
     argv: &[String],
     env: &HashMap<String, String>,
-    cwd: Option<&str>,
+    opts: &ExecOpts,
     ns_fds: Vec<std::os::unix::io::RawFd>,
 ) -> Result<sys::CaptureSpec, String> {
     use std::ffi::CString;
@@ -359,16 +365,18 @@ fn build_capture_spec(
         let pair = format!("{key}={value}");
         envp_c.push(CString::new(pair).map_err(|_| "nul in env".to_string())?);
     }
-    let cwd_c = match cwd {
+    let cwd_c = match opts.cwd {
         Some(dir) => Some(CString::new(dir).map_err(|_| "nul in cwd".to_string())?),
         None => None,
     };
     assert!(!argv_c.is_empty(), "captured argv must be non-empty");
+    assert!(!ns_fds.is_empty(), "captured exec needs namespace fds");
     Ok(sys::CaptureSpec {
         ns_fds,
         cwd: cwd_c,
         argv: argv_c,
         envp: envp_c,
+        ident: opts.ident.cloned(),
     })
 }
 
@@ -444,7 +452,22 @@ mod tests {
             distro: false,
             cwd: None,
             init_pid: None,
+            ident: None,
         }
+    }
+
+    #[test]
+    fn rejects_identity_without_a_distro_namespace() {
+        let ident = crate::sys::Ident::new(1000, 1000, Vec::new()).expect("ident");
+        let opts = ExecOpts {
+            distro: false,
+            cwd: None,
+            init_pid: None,
+            ident: Some(&ident),
+        };
+        let argv = vec!["/bin/echo".to_string()];
+        let err = run(&argv, &HashMap::new(), 1000, &opts).expect_err("identity rejected");
+        assert!(err.contains("distro namespace"), "{err}");
     }
 
     #[test]
@@ -510,6 +533,7 @@ mod tests {
             distro: false,
             cwd: Some("/tmp"),
             init_pid: None,
+            ident: None,
         };
         let data = run(&argv, &HashMap::new(), 5000, &opts).expect("pwd runs");
         assert!(data.stdout.starts_with("/tmp") || data.stdout.starts_with("/private/tmp"));

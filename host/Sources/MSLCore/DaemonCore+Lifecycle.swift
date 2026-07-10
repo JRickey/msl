@@ -159,6 +159,7 @@ extension DaemonCore {
     func performStop() {
         guard let control = withLock({ self.control }), let host = withLock({ self.host })
         else { return }
+        teardownGui(distro: nil)
         drainMounts()
         for name in withLock({ Array(distrosUp) }).sorted() {  // bounded: <=26 distros
             _ = try? control.distroDown(name: name, timeoutMs: 15000)
@@ -179,6 +180,7 @@ extension DaemonCore {
             distrosUp = []
             rosettaAttached = false
             sessions = SessionTable()
+            guiRuntimes.removeAll()
             powerWake = nil
             forwarder = nil
             interopListener = nil
@@ -209,8 +211,8 @@ extension DaemonCore {
         teardownState()
     }
 
-    /// Coarse tick: reap sessions no client attached to within the deadline, then
-    /// stop the VM if it has been idle (no live or pending-unexpired sessions).
+    /// Coarse tick: reap sessions no client attached to within the deadline and
+    /// GUI runtimes whose reconnect window closed, then stop the VM if it is idle.
     func idleTick() {
         let now = Date()
         let expired = withLock { sessions.expiredPending(now: now, deadline: attachDeadline) }
@@ -218,12 +220,15 @@ extension DaemonCore {
             log("reaping session \(sessionID): no client attached within \(Int(attachDeadline))s")
             abortSession(sessionID: sessionID)
         }
+        guard withLock({ running }) else { return }
+        reapExpiredGuiRuntimes(now: now)
         let stop = withLock { () -> Bool in
             guard running else { return false }
             return IdlePolicy.shouldStop(
                 now: now, lastActivity: lastActivity,
                 liveSessions: sessions.liveCountForIdle(now: now, deadline: attachDeadline),
-                pendingOps: pendingOps, timeoutSeconds: config.idleTimeoutS)
+                pendingOps: pendingOps, guiHolds: guiRuntimes.holdCount(now: now),
+                timeoutSeconds: config.idleTimeoutS)
         }
         guard stop else { return }
         lifecycleQueue.async { [weak self] in self?.performStop() }
@@ -253,13 +258,15 @@ extension DaemonCore {
         withLock { comfortTicks = comfortable ? min(comfortTicks + 1, 1_000_000) : 0 }
     }
 
-    /// Fire `mem_reclaim` at most once per idle period (no live sessions, no
-    /// pending ops, ≥30 s idle). Returns whether reclaim ran on this tick.
+    /// Fire `mem_reclaim` at most once per idle period (no live sessions, no GUI
+    /// holds, no pending ops, ≥30 s idle). Returns whether reclaim ran this tick.
     private func runIdleHygiene(control: ControlClient) -> Bool {
         let now = Date()
         let idle = withLock { () -> Bool in
             let live = sessions.liveCountForIdle(now: now, deadline: attachDeadline)
-            return live == 0 && pendingOps == 0 && now.timeIntervalSince(lastActivity) >= 30
+            let guiHolds = guiRuntimes.holdCount(now: now)
+            return live == 0 && guiHolds == 0 && pendingOps == 0
+                && now.timeIntervalSince(lastActivity) >= 30
         }
         guard idle else {
             withLock { reclaimedThisIdle = false }
@@ -318,9 +325,10 @@ extension DaemonCore {
                 availableMiB: (lastMemStats?.memAvailableKiB ?? 0) / 1024)
         }
         let ports = withLock { forwarder }?.mirroredPorts()
+        let gui = withLock { guiRuntimes.statuses() }
         return StatusData(
             vm: "running", distros: distros, idleTimeoutS: config.idleTimeoutS,
-            memory: memory, forwardedPorts: ports)
+            memory: memory, forwardedPorts: ports, gui: gui)
     }
 
     private func makeBootSpec(diskPaths: [String]) throws -> BootSpec {

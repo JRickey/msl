@@ -13,6 +13,10 @@ public final class DaemonCore: @unchecked Sendable {
     let lifecycleQueue = DispatchQueue(label: "msl.daemon.lifecycle", qos: .userInitiated)
     private let idleQueue = DispatchQueue(label: "msl.daemon.idle", qos: .utility)
     let attachDeadline: TimeInterval = 30
+    let guiAttachDeadline: TimeInterval = 30
+    /// How long a GUI runtime survives with no presenter attached before it is
+    /// stopped (the spec's bounded presenter-reconnect window).
+    let guiPresenterGrace: TimeInterval = 60
 
     var running = false
     var host: VMHost?
@@ -21,6 +25,7 @@ public final class DaemonCore: @unchecked Sendable {
     var distrosUp: Set<String> = []
     var rosettaAttached = false
     var sessions = SessionTable()
+    var guiRuntimes = GuiRuntimeTable()
     var lastActivity = Date()
     var pendingOps = 0
     var powerWake: PowerWake?
@@ -87,6 +92,7 @@ public final class DaemonCore: @unchecked Sendable {
                 return
             }
             guard let resolved, let control = withLock({ self.control }) else { return }
+            teardownGui(distro: resolved)
             unmountForDistroDown(resolved)
             _ = try control.distroDown(name: resolved, timeoutMs: timeoutMs ?? 15000)
             withLock {
@@ -165,33 +171,6 @@ public final class DaemonCore: @unchecked Sendable {
             abortSession(sessionID: sessionID)
             throw error
         }
-    }
-
-    /// Ensure the VM + distro are up, then open the guest GUI surface plane
-    /// (vsock 5020). The raw fd is relayed to the client; `endGuiConnect` must
-    /// balance this call once the relay ends. Holds an op reference meanwhile so
-    /// the VM is not idle-reaped under a live presenter.
-    public func beginGuiConnect(name: String?) throws -> Int32 {
-        beginOp()
-        do {
-            let entry = try ensureUp(name)
-            assert(!entry.name.isEmpty, "resolved distro name must not be empty")
-            guard let host = withLock({ self.host }) else {
-                throw MSLError.configuration("VM not running")
-            }
-            let fd = try host.connectRaw(port: GuiProto.port, timeout: min(config.bootTimeout, 5))
-            assert(fd >= 0, "connectRaw returns a valid fd or throws")
-            return fd
-        } catch {
-            endOp()
-            throw error
-        }
-    }
-
-    /// Balance a successful `beginGuiConnect` when its relay finishes.
-    public func endGuiConnect() {
-        endOp()
-        withLock { lastActivity = Date() }
     }
 
     /// Reap a session whose relay ended normally (guest closed on child exit).

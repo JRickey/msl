@@ -31,6 +31,20 @@ final class IdlePolicyTests: XCTestCase {
                 timeoutSeconds: 60))
     }
 
+    func testBlockedByGuiHolds() {
+        XCTAssertFalse(
+            IdlePolicy.shouldStop(
+                now: now, lastActivity: idle(seconds: 999), liveSessions: 0, pendingOps: 0,
+                guiHolds: 1, timeoutSeconds: 60))
+    }
+
+    func testGuiHoldsDefaultToZero() {
+        XCTAssertTrue(
+            IdlePolicy.shouldStop(
+                now: now, lastActivity: idle(seconds: 999), liveSessions: 0, pendingOps: 0,
+                timeoutSeconds: 60))
+    }
+
     func testNotYetElapsed() {
         XCTAssertFalse(
             IdlePolicy.shouldStop(

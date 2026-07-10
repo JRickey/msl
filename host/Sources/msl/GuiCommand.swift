@@ -171,12 +171,18 @@ enum GuiLaunchSupport {
             home: home, name: name, argv: ["/bin/sh", "-lc", script], term: "dumb")
     }
 
+    /// Mint a single-use attach token for the prepared runtime, then present it to
+    /// claim the raw surface-plane fd. The daemon refuses an untokenized attach.
     private static func openSurfacePlane(home: MSLHome, name: String) throws -> Int32 {
+        precondition(!name.isEmpty, "GUI distro name must not be empty")
         try DaemonClient.ensureRunning(home)
         let control = try DaemonClient.connect(home)
         defer { control.close() }
         do {
-            return try control.guiConnectRaw(name: name)
+            let minted = try control.guiToken(name: name)
+            assert(!minted.token.isEmpty, "daemon must mint a non-empty attach token")
+            return try control.guiAttachRaw(
+                distro: minted.distro, user: minted.user, token: minted.token)
         } catch {
             let message = (error as? MSLError)?.description ?? error.localizedDescription
             FileHandle.standardError.write(

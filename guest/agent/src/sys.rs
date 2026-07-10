@@ -20,6 +20,30 @@ pub const fn decode_pid(buf: [u8; 4]) -> i32 {
     i32::from_ne_bytes(buf)
 }
 
+// Credentials a namespace-entering exec drops to. Resolved in the agent so the
+// post-fork child calls only async-signal-safe libc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ident {
+    pub uid: u32,
+    pub gid: u32,
+    pub groups: Vec<u32>,
+}
+
+impl Ident {
+    pub const MAX_GROUPS: usize = 32;
+
+    pub fn new(uid: u32, gid: u32, groups: Vec<u32>) -> io::Result<Self> {
+        if groups.len() > Self::MAX_GROUPS {
+            return Err(invalid("too many supplementary groups"));
+        }
+        Ok(Self { uid, gid, groups })
+    }
+}
+
+fn invalid(msg: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg)
+}
+
 pub fn kernel_release() -> io::Result<String> {
     let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::uname(&raw mut uts) };
@@ -113,11 +137,6 @@ fn ensure_dir(path: &str) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),
     }
-}
-
-#[cfg(target_os = "linux")]
-fn invalid(msg: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,22 +387,52 @@ pub fn open_ns_fds(init_pid: libc::pid_t) -> io::Result<Vec<RawFd>> {
     if init_pid <= 0 {
         return Err(invalid("bad init pid"));
     }
-    let kinds = ["pid", "ipc", "uts", "mnt"];
+    // `net` is the agent's own namespace today (the distro clone omits
+    // CLONE_NEWNET); joining it keeps entry uniform if that ever changes, and a
+    // kernel built without network namespaces simply has no file to join.
+    let kinds = ["pid", "ipc", "uts", "mnt", "net"];
     let mut fds: Vec<RawFd> = Vec::with_capacity(kinds.len());
-    // bounded: exactly four namespace kinds
+    // bounded: exactly five namespace kinds
     for kind in kinds {
         let path = CString::new(format!("/proc/{init_pid}/ns/{kind}"))
             .map_err(|_| invalid("nul in ns path"))?;
         let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
             let err = io::Error::last_os_error();
+            if kind == "net" && err.raw_os_error() == Some(libc::ENOENT) {
+                continue;
+            }
             close_all(&fds);
             return Err(err);
         }
         fds.push(fd);
     }
-    debug_assert_eq!(fds.len(), kinds.len());
+    debug_assert!(!fds.is_empty() && fds.len() <= kinds.len());
     Ok(fds)
+}
+
+// Post-setns, pre-execve credential drop. `setuid` runs last because it is the
+// only irreversible step: the retained root uid is what authorizes the rest.
+#[cfg(target_os = "linux")]
+unsafe fn drop_privileges(ident: &Ident) -> c_int {
+    unsafe {
+        if libc::setgid(ident.gid) != 0 {
+            return -1;
+        }
+        if libc::setgroups(ident.groups.len(), ident.groups.as_ptr()) != 0 {
+            return -1;
+        }
+        if libc::setuid(ident.uid) != 0 {
+            return -1;
+        }
+        if libc::getuid() != ident.uid
+            || libc::geteuid() != ident.uid
+            || libc::getgid() != ident.gid
+        {
+            return -1;
+        }
+        0
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -896,6 +945,7 @@ pub struct CaptureSpec {
     pub cwd: Option<CString>,
     pub argv: Vec<CString>,
     pub envp: Vec<CString>,
+    pub ident: Option<Ident>,
 }
 
 // A captured distro command: the reaper/exec waits `leader` (the direct child,
@@ -1024,6 +1074,11 @@ fn child_captured_body(
             || libc::dup2(devnull, 0) < 0
             || libc::dup2(out[1], 1) < 0
             || libc::dup2(err[1], 2) < 0
+        {
+            libc::_exit(127);
+        }
+        if let Some(ident) = &spec.ident
+            && drop_privileges(ident) != 0
         {
             libc::_exit(127);
         }
@@ -1186,13 +1241,21 @@ fn null_terminated(items: &[CString]) -> Vec<*const c_char> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_pid;
+    use super::{Ident, decode_pid};
 
     #[test]
     fn decode_pid_round_trips_native_endian() {
         for pid in [1_i32, 4242, 65_535, i32::MAX] {
             assert_eq!(decode_pid(pid.to_ne_bytes()), pid);
         }
+    }
+
+    #[test]
+    fn ident_bounds_supplementary_groups() {
+        let ok = Ident::new(1000, 1000, vec![1000, 27]).expect("small group set");
+        assert_eq!((ok.uid, ok.gid, ok.groups.len()), (1000, 1000, 2));
+        let too_many: Vec<u32> = (0..=u32::try_from(Ident::MAX_GROUPS).expect("fits")).collect();
+        assert!(Ident::new(1000, 1000, too_many).is_err());
     }
 
     #[cfg(target_os = "linux")]

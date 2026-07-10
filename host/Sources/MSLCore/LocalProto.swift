@@ -18,7 +18,9 @@ public enum LocalProto {
 }
 
 /// One request from a client connection. A connection may issue many of these
-/// sequentially; `attach` is terminal (the connection then goes raw).
+/// sequentially; `attach` and `guiAttach` are terminal (the connection then goes
+/// raw). There is no untokenized path to the guest surface plane: `guiToken`
+/// mints a single-use token that `guiAttach` consumes.
 public enum LocalRequest: Sendable, Equatable {
     case status
     case up(name: String?)
@@ -26,7 +28,8 @@ public enum LocalRequest: Sendable, Equatable {
     case shell(ShellRequest)
     case capture(ShellRequest)
     case attach(sessionID: UInt64, token: String)
-    case guiConnect(name: String?)
+    case guiToken(name: String?, user: String?)
+    case guiAttach(distro: String, user: String?, token: String)
     case guiProbe(GuiRuntimeReq)
     case guiStart(GuiRuntimeReq)
     case guiStatus(GuiRuntimeReq)
@@ -94,7 +97,7 @@ extension LocalRequest: Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .status, .shutdown, .up, .guiConnect, .authStatus:
+        case .status, .shutdown, .up, .authStatus:
             try encodeBare(into: &container)
         case .down(let name, let all, let timeoutMs):
             try container.encode("down", forKey: .op)
@@ -103,7 +106,7 @@ extension LocalRequest: Codable {
             try container.encodeIfPresent(timeoutMs, forKey: .timeoutMs)
         case .shell(let req): try encodeShell(req, into: &container, op: "shell")
         case .capture(let req): try encodeShell(req, into: &container, op: "capture")
-        case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch:
+        case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch, .guiToken, .guiAttach:
             try encodeGui(into: &container)
         case .attach, .resize, .signal, .wait: try encodeSession(into: &container)
         case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
@@ -117,7 +120,6 @@ extension LocalRequest: Codable {
         case .status: try container.encode("status", forKey: .op)
         case .shutdown: try container.encode("shutdown", forKey: .op)
         case .up(let name): try encodeNamed("up", name, into: &container)
-        case .guiConnect(let name): try encodeNamed("gui_connect", name, into: &container)
         case .authStatus(let name): try encodeNamed("auth_status", name, into: &container)
         default: break
         }
@@ -149,6 +151,15 @@ extension LocalRequest: Codable {
             try container.encode(req.argv, forKey: .argv)
             try container.encode(req.env, forKey: .env)
             try container.encodeIfPresent(req.cwd, forKey: .cwd)
+        case .guiToken(let name, let user):
+            try container.encode("gui_token", forKey: .op)
+            try container.encodeIfPresent(name, forKey: .name)
+            try container.encodeIfPresent(user, forKey: .user)
+        case .guiAttach(let distro, let user, let token):
+            try container.encode("gui_attach", forKey: .op)
+            try container.encode(distro, forKey: .distro)
+            try container.encodeIfPresent(user, forKey: .user)
+            try container.encode(token, forKey: .token)
         default: break
         }
     }
@@ -233,8 +244,6 @@ extension LocalRequest: Codable {
                 timeoutMs: try container.decodeIfPresent(UInt64.self, forKey: .timeoutMs))
         case "shell": return .shell(try decodeShell(from: container))
         case "capture": return .capture(try decodeShell(from: container))
-        case "gui_connect":
-            return .guiConnect(name: try container.decodeIfPresent(String.self, forKey: .name))
         case "auth_status":
             return .authStatus(name: try container.decodeIfPresent(String.self, forKey: .name))
         case "shutdown": return .shutdown
@@ -251,6 +260,15 @@ extension LocalRequest: Codable {
         case "gui_status": return .guiStatus(try decodeGuiRuntime(from: container))
         case "gui_stop": return .guiStop(try decodeGuiRuntime(from: container))
         case "gui_launch": return .guiLaunch(try decodeGuiLaunch(from: container))
+        case "gui_token":
+            return .guiToken(
+                name: try container.decodeIfPresent(String.self, forKey: .name),
+                user: try container.decodeIfPresent(String.self, forKey: .user))
+        case "gui_attach":
+            return .guiAttach(
+                distro: try container.decode(String.self, forKey: .distro),
+                user: try container.decodeIfPresent(String.self, forKey: .user),
+                token: try container.decode(String.self, forKey: .token))
         default: return try decodeMountOp(op, from: container)
         }
     }

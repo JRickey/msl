@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::distro::{self, Distros};
 use crate::exec::{self, ExecOpts};
+use crate::gui;
 use crate::proto::{
     self, AGENT_NAME, AGENT_VERSION, DEFAULT_TIMEOUT_MS, DistroDownReq, DistroStateReq,
     DistroUpReq, Empty, GuiLaunchReq, GuiRuntimeReq, MkfsReq, PROTOCOL_VERSION, PingData, Request,
@@ -27,6 +28,7 @@ pub struct Agent {
     sessions: Mutex<Sessions>,
     distros: Mutex<Distros>,
     fsd_workers: Mutex<HashMap<i32, String>>,
+    gui: Mutex<gui::Runtimes>,
 }
 
 impl Default for Agent {
@@ -42,6 +44,7 @@ impl Agent {
             sessions: Mutex::new(Sessions::new()),
             distros: Mutex::new(Distros::new()),
             fsd_workers: Mutex::new(HashMap::new()),
+            gui: Mutex::new(gui::Runtimes::new()),
         }
     }
 
@@ -157,6 +160,7 @@ impl Agent {
             distro: req.distro.is_some(),
             cwd: req.cwd.as_deref(),
             init_pid,
+            ident: None,
         };
         respond(req.id, exec::run(&req.argv, &req.env, timeout, &opts))
     }
@@ -336,71 +340,89 @@ impl Agent {
 
     fn handle_gui_probe(&self, req: &Request) -> Vec<u8> {
         let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
-        respond(
-            req.id,
-            parsed.and_then(|r| {
-                validate_gui_user(r.user.as_deref())?;
-                self.gui_runtime(&r.distro, crate::gui::probe)
-            }),
-        )
-    }
-
-    fn handle_gui_start(&self, req: &Request) -> Vec<u8> {
-        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
-        respond(
-            req.id,
-            parsed.and_then(|r| {
-                validate_gui_user(r.user.as_deref())?;
-                self.gui_runtime(&r.distro, crate::gui::start)
-            }),
-        )
-    }
-
-    fn handle_gui_status(&self, req: &Request) -> Vec<u8> {
-        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
-        respond(
-            req.id,
-            parsed.and_then(|r| {
-                validate_gui_user(r.user.as_deref())?;
-                self.gui_runtime(&r.distro, crate::gui::status)
-            }),
-        )
-    }
-
-    fn handle_gui_stop(&self, req: &Request) -> Vec<u8> {
-        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
-        respond(
-            req.id,
-            parsed.and_then(|r| {
-                validate_gui_user(r.user.as_deref())?;
-                self.gui_runtime(&r.distro, crate::gui::stop)
-            }),
-        )
-    }
-
-    fn handle_gui_launch(&self, req: &Request) -> Vec<u8> {
-        let parsed: Result<GuiLaunchReq, String> = parse(&req.req);
         let result = parsed.and_then(|r| {
-            validate_gui_user(r.user.as_deref())?;
-            let init_pid = self.gui_init_pid(&r.distro)?;
-            crate::gui::launch(init_pid, &r.argv, &r.env, r.cwd.as_deref())
+            let ctx = self.gui_context(&r.distro, r.user.as_deref())?;
+            gui::probe(&ctx)
         });
         respond(req.id, result)
     }
 
-    fn gui_runtime<T: Serialize>(
-        &self,
-        distro: &str,
-        action: fn(i32) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let init_pid = self.gui_init_pid(distro)?;
-        action(init_pid)
+    // The table slot is reserved before the compositor starts, so a full table
+    // refuses the runtime instead of orphaning a process it cannot track.
+    fn handle_gui_start(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
+        let result = parsed.and_then(|r| {
+            let ctx = self.gui_context(&r.distro, r.user.as_deref())?;
+            let fresh = self.gui_table()?.insert(&r.distro, ctx.user())?;
+            let windows = self.gui_table()?.windows(&r.distro, ctx.user());
+            match gui::start(&ctx, windows) {
+                Ok((data, created)) => {
+                    self.gui_table()?
+                        .mark_owns_xdg(&r.distro, ctx.user(), created);
+                    Ok(data)
+                }
+                Err(message) => {
+                    if fresh {
+                        self.gui_table()?.remove(&r.distro, ctx.user());
+                    }
+                    Err(message)
+                }
+            }
+        });
+        respond(req.id, result)
     }
 
-    fn gui_init_pid(&self, distro: &str) -> Result<i32, String> {
+    fn handle_gui_status(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
+        let result = parsed.and_then(|r| {
+            let ctx = self.gui_context(&r.distro, r.user.as_deref())?;
+            let windows = self.gui_table()?.windows(&r.distro, ctx.user());
+            gui::status(&ctx, windows)
+        });
+        respond(req.id, result)
+    }
+
+    fn handle_gui_stop(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiRuntimeReq, String> = parse(&req.req);
+        let result = parsed.and_then(|r| {
+            let ctx = self.gui_context(&r.distro, r.user.as_deref())?;
+            let owns_xdg = self.gui_table()?.owns_xdg(&r.distro, ctx.user());
+            let data = gui::stop(&ctx, owns_xdg)?;
+            self.gui_table()?.remove(&r.distro, ctx.user());
+            Ok(data)
+        });
+        respond(req.id, result)
+    }
+
+    // The window budget is charged before the spawn and refunded when the guest
+    // refuses it, so a rejected launch cannot leak a slot.
+    fn handle_gui_launch(&self, req: &Request) -> Vec<u8> {
+        let parsed: Result<GuiLaunchReq, String> = parse(&req.req);
+        let result = parsed.and_then(|r| {
+            let ctx = self.gui_context(&r.distro, r.user.as_deref())?;
+            let _ = self.gui_table()?.add_window(&r.distro, ctx.user())?;
+            gui::launch(&ctx, &r.argv, &r.env, r.cwd.as_deref()).inspect_err(|_| {
+                if let Ok(mut table) = self.gui.lock() {
+                    table.release_window(&r.distro, ctx.user());
+                }
+            })
+        });
+        respond(req.id, result)
+    }
+
+    fn gui_table(&self) -> Result<std::sync::MutexGuard<'_, gui::Runtimes>, String> {
+        self.gui.lock().map_err(|_| "gui lock".to_string())
+    }
+
+    // Names are rejected before any distro state is consulted, so a malformed
+    // distro or user is reported as such rather than as "distro not running".
+    fn gui_context(&self, distro: &str, user: Option<&str>) -> Result<gui::Context, String> {
         distro::validate_name(distro)?;
-        self.distro_pid(distro)
-            .ok_or_else(|| "distro not running".to_string())
+        gui::validate_user(user.unwrap_or(gui::DEFAULT_USER))?;
+        let init_pid = self
+            .distro_pid(distro)
+            .ok_or_else(|| "distro not running".to_string())?;
+        gui::Context::resolve(distro, user, init_pid)
     }
 }
 
@@ -415,6 +437,7 @@ fn run_mkfs(dev: &str) -> Result<Empty, String> {
         distro: false,
         cwd: None,
         init_pid: None,
+        ident: None,
     };
     let data = exec::run(
         &argv,
@@ -437,14 +460,6 @@ fn validate_set_time(sec: i64) -> Result<(), String> {
         Ok(())
     } else {
         Err("set_time sec must be after 2023".to_string())
-    }
-}
-
-fn validate_gui_user(user: Option<&str>) -> Result<(), String> {
-    match user {
-        None | Some("root") => Ok(()),
-        Some("") => Err("gui user must not be empty".to_string()),
-        Some(_) => Err("gui user selection is not implemented".to_string()),
     }
 }
 
@@ -653,20 +668,23 @@ mod tests {
         assert_eq!(value["error"], "distro not running");
     }
 
+    // A malformed user is refused before the distro table is consulted, and a
+    // well-formed one gets as far as needing a running distro.
     #[test]
-    fn gui_user_selection_is_explicitly_rejected() {
-        let value = call(
-            &Agent::new(),
-            r#"{"id":51,"op":"gui_probe","req":{"distro":"ubuntu","user":"dev"}}"#,
+    fn gui_validates_the_user_before_distro_state() {
+        let agent = Agent::new();
+        let bad = call(
+            &agent,
+            r#"{"id":51,"op":"gui_probe","req":{"distro":"ubuntu","user":"../root"}}"#,
         );
-        assert_eq!(value["id"], 51);
-        assert_eq!(value["ok"], false);
-        assert!(
-            value["error"]
-                .as_str()
-                .expect("err")
-                .contains("user selection")
+        assert_eq!(bad["ok"], false);
+        assert!(bad["error"].as_str().expect("err").contains("gui user"));
+        let named = call(
+            &agent,
+            r#"{"id":53,"op":"gui_probe","req":{"distro":"ubuntu","user":"dev"}}"#,
         );
+        assert_eq!(named["ok"], false);
+        assert_eq!(named["error"], "distro not running");
     }
 
     #[test]

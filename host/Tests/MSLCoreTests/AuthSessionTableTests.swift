@@ -4,6 +4,8 @@ import XCTest
 @testable import MSLCore
 
 final class AuthSessionTableTests: XCTestCase {
+    private let running: (String) -> Bool = { _ in true }
+
     func testCreatePublishesGuestEnvironment() {
         let table = AuthSessionTable()
         let session = table.create(
@@ -28,7 +30,7 @@ final class AuthSessionTableTests: XCTestCase {
             id: session.id, token: session.token, distro: "ubuntu", uid: 1000, pid: 42,
             comm: "ssh")
 
-        XCTAssertEqual(try table.validate(peer, surface: .sshAgent), session)
+        XCTAssertEqual(try table.validate(peer, surface: .sshAgent, isRunning: running), session)
     }
 
     func testValidateRejectsWrongToken() {
@@ -37,7 +39,9 @@ final class AuthSessionTableTests: XCTestCase {
         let peer = AuthPeer(
             id: session.id, token: "wrong", distro: "ubuntu", uid: nil, pid: nil, comm: nil)
 
-        XCTAssertThrowsError(try table.validate(peer, surface: .sshAgent)) { error in
+        XCTAssertThrowsError(
+            try table.validate(peer, surface: .sshAgent, isRunning: running)
+        ) { error in
             XCTAssertEqual((error as? AuthValidationError)?.code, .denied)
         }
     }
@@ -49,8 +53,25 @@ final class AuthSessionTableTests: XCTestCase {
             id: session.id, token: session.token, distro: "ubuntu", uid: nil, pid: nil,
             comm: nil)
 
-        XCTAssertThrowsError(try table.validate(peer, surface: .sshAgent)) { error in
+        XCTAssertThrowsError(
+            try table.validate(peer, surface: .sshAgent, isRunning: running)
+        ) { error in
             XCTAssertEqual((error as? AuthValidationError)?.code, .denied)
+        }
+    }
+
+    func testValidateRejectsSessionWhoseDistroStopped() {
+        let table = AuthSessionTable()
+        let session = table.create(distro: "ubuntu", sshAgent: true, secrets: false)
+        let peer = AuthPeer(
+            id: session.id, token: session.token, distro: "ubuntu", uid: nil, pid: nil,
+            comm: nil)
+
+        XCTAssertThrowsError(
+            try table.validate(peer, surface: .sshAgent, isRunning: { _ in false })
+        ) { error in
+            XCTAssertEqual((error as? AuthValidationError)?.code, .denied)
+            XCTAssertEqual((error as? AuthValidationError)?.message, "distro is not running")
         }
     }
 
@@ -64,7 +85,9 @@ final class AuthSessionTableTests: XCTestCase {
         table.bind(authID: session.id, guestSessionID: 7)
         table.removeGuestSession(7)
 
-        XCTAssertThrowsError(try table.validate(peer, surface: .sshAgent)) { error in
+        XCTAssertThrowsError(
+            try table.validate(peer, surface: .sshAgent, isRunning: running)
+        ) { error in
             XCTAssertEqual((error as? AuthValidationError)?.code, .denied)
         }
     }

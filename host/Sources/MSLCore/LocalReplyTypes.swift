@@ -32,30 +32,94 @@ public struct MemoryStatus: Sendable, Equatable, Codable {
     }
 }
 
-/// Payload of the `status` reply. `memory` and `forwardedPorts` are optional so
-/// older clients can decode newer daemon replies.
+/// One GUI runtime's line in the `status` reply, keyed by `(distro, user)`.
+public struct GuiRuntimeStatus: Sendable, Equatable, Codable {
+    public let distro: String
+    public let user: String
+    public let state: String
+    public let pid: UInt32?
+    public let waylandDisplay: String
+    public let x11Display: String?
+    public let presenters: Int
+    public let windows: Int
+    public let lastError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case distro, user, state, pid, presenters, windows
+        case waylandDisplay = "wayland_display"
+        case x11Display = "x11_display"
+        case lastError = "last_error"
+    }
+
+    public init(
+        distro: String, user: String, state: String, pid: UInt32?, waylandDisplay: String,
+        x11Display: String?, presenters: Int, windows: Int, lastError: String?
+    ) {
+        precondition(!distro.isEmpty, "GUI status distro must not be empty")
+        precondition(presenters >= 0 && windows >= 0, "GUI status counts must be non-negative")
+        self.distro = distro
+        self.user = user
+        self.state = state
+        self.pid = pid
+        self.waylandDisplay = waylandDisplay
+        self.x11Display = x11Display
+        self.presenters = presenters
+        self.windows = windows
+        self.lastError = lastError
+    }
+}
+
+/// Payload of the `status` reply. `memory`, `forwardedPorts`, and `gui` are
+/// optional so older clients can decode newer daemon replies.
 public struct StatusData: Sendable, Equatable, Codable {
     public let vm: String
     public let distros: [DistroStatus]
     public let idleTimeoutS: Int
     public let memory: MemoryStatus?
     public let forwardedPorts: [UInt16]?
+    public let gui: [GuiRuntimeStatus]?
 
     enum CodingKeys: String, CodingKey {
-        case vm, distros, memory
+        case vm, distros, memory, gui
         case idleTimeoutS = "idle_timeout_s"
         case forwardedPorts = "forwarded_ports"
     }
 
     public init(
         vm: String, distros: [DistroStatus], idleTimeoutS: Int,
-        memory: MemoryStatus? = nil, forwardedPorts: [UInt16]? = nil
+        memory: MemoryStatus? = nil, forwardedPorts: [UInt16]? = nil,
+        gui: [GuiRuntimeStatus]? = nil
     ) {
         self.vm = vm
         self.distros = distros
         self.idleTimeoutS = idleTimeoutS
         self.memory = memory
         self.forwardedPorts = forwardedPorts
+        self.gui = gui
+    }
+}
+
+/// Payload of the `gui_token` reply: the resolved runtime identity plus a
+/// single-use attach token and how long it stays valid.
+public struct GuiTokenData: Sendable, Equatable, Codable {
+    public let distro: String
+    public let user: String?
+    public let token: String
+    public let expiresInS: Int
+
+    enum CodingKeys: String, CodingKey {
+        case distro, user, token
+        case expiresInS = "expires_in_s"
+    }
+
+    public init(distro: String, user: String?, token: String, expiresInS: Int) {
+        precondition(!distro.isEmpty, "GUI token distro must not be empty")
+        precondition(!token.isEmpty, "GUI attach token must not be empty")
+        precondition(expiresInS > 0, "GUI attach token lifetime must be positive")
+        self.distro = distro
+        self.user = user
+        self.token = token
+        self.expiresInS = expiresInS
     }
 }
 

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Security
 
@@ -31,17 +32,22 @@ public protocol SecretByteStore: Sendable {
 public struct SecurityKeychainBackend: SecretByteStore {
     public init() {}
 
+    /// Update-then-add; a concurrent writer can win the gap between the two, so
+    /// `errSecDuplicateItem` folds back into a single retried update.
     public func store(service: String, account: String, secret: Data) throws {
         let query = baseQuery(service: service, account: account)
         let attrs = [kSecValueData: secret] as CFDictionary
         let status = SecItemUpdate(query as CFDictionary, attrs)
         if status == errSecSuccess { return }
-        if status != errSecItemNotFound { throw keychainError(status) }
+        guard status == errSecItemNotFound else { throw Self.mapStatus(status) }
         var add = query
         add[kSecValueData] = secret
         add[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         let added = SecItemAdd(add as CFDictionary, nil)
-        guard added == errSecSuccess else { throw keychainError(added) }
+        if added == errSecSuccess { return }
+        guard added == errSecDuplicateItem else { throw Self.mapStatus(added) }
+        let retried = SecItemUpdate(query as CFDictionary, attrs)
+        guard retried == errSecSuccess else { throw Self.mapStatus(retried) }
     }
 
     public func read(service: String, account: String) throws -> Data {
@@ -50,9 +56,9 @@ public struct SecurityKeychainBackend: SecretByteStore {
         query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { throw keychainError(status) }
+        guard status == errSecSuccess else { throw Self.mapStatus(status) }
         guard let data = result as? Data else {
-            throw MSLError.protocolMismatch("keychain item did not return data")
+            throw AuthProxyError.backend("keychain item did not return data")
         }
         return data
     }
@@ -61,7 +67,26 @@ public struct SecurityKeychainBackend: SecretByteStore {
         let query = baseQuery(service: service, account: account)
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw keychainError(status)
+            throw Self.mapStatus(status)
+        }
+    }
+
+    /// Keychain statuses the Secret Service surface must distinguish; anything
+    /// else is an opaque backend failure the guest reports as `internal`.
+    static func mapStatus(_ status: OSStatus) -> AuthProxyError {
+        assert(status != errSecSuccess, "success is not an error")
+        let message =
+            SecCopyErrorMessageString(status, nil) as String?
+            ?? "keychain status \(status)"
+        switch status {
+        case errSecItemNotFound:
+            return .notFound(message)
+        case errSecInteractionNotAllowed, errSecInteractionRequired, errSecNotAvailable:
+            return .locked(message)
+        case errSecUserCanceled, errSecAuthFailed:
+            return .denied(message)
+        default:
+            return .backend(message)
         }
     }
 
@@ -75,12 +100,6 @@ public struct SecurityKeychainBackend: SecretByteStore {
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
         ]
     }
-
-    private func keychainError(_ status: OSStatus) -> MSLError {
-        let fallback = "keychain status \(status)"
-        let message = SecCopyErrorMessageString(status, nil) as String? ?? fallback
-        return .configuration(message)
-    }
 }
 
 public enum KeychainSecretLimits {
@@ -91,13 +110,17 @@ public enum KeychainSecretLimits {
     public static let maxLabelBytes = 512
 }
 
-public struct KeychainSecretStore<Bytes: SecretByteStore>: Sendable {
+/// Secret bytes live in Keychain; non-secret metadata lives in `secrets.json`.
+/// Every mutation runs the whole read-modify-write of that file under `lock`,
+/// because one store instance is shared by all auth connection threads.
+public struct KeychainSecretStore: Sendable {
     private let url: URL
-    private let bytes: Bytes
+    private let bytes: any SecretByteStore
     private let clock: @Sendable () -> UInt64
+    private let lock = NSLock()
 
     public init(
-        url: URL, bytes: Bytes,
+        url: URL, bytes: any SecretByteStore,
         clock: @escaping @Sendable () -> UInt64 = {
             UInt64(Date().timeIntervalSince1970)
         }
@@ -111,61 +134,92 @@ public struct KeychainSecretStore<Bytes: SecretByteStore>: Sendable {
         label: String, attributes: [String: String], secret: Data
     ) throws -> SecretItemRecord {
         try validate(label: label, attributes: attributes, secret: secret)
-        var file = try load()
-        let now = clock()
-        let record = SecretItemRecord(
-            id: Token.generate(), collection: KeychainSecretLimits.defaultCollection, label: label,
-            attributes: attributes, created: now, modified: now)
-        try bytes.store(service: service(record.collection), account: record.id, secret: secret)
-        file.items.append(record)
-        try save(file)
-        return record
+        assert(secret.count <= KeychainSecretLimits.maxSecretBytes, "validate bounds the secret")
+        return try withMetadata { file in
+            let now = clock()
+            let record = SecretItemRecord(
+                id: Token.generate(), collection: KeychainSecretLimits.defaultCollection,
+                label: label, attributes: attributes, created: now, modified: now)
+            try bytes.store(
+                service: service(record.collection), account: record.id, secret: secret)
+            file.items.append(record)
+            return record
+        }
     }
 
     public func search(attributes: [String: String]) throws -> [SecretItemRecord] {
         try validateAttributes(attributes)
-        return try load().items.filter { item in
+        assert(attributes.count <= KeychainSecretLimits.maxAttributes, "validate bounds the query")
+        let items = try withMetadata { file in file.items }
+        return items.filter { item in
             attributes.allSatisfy { key, value in item.attributes[key] == value }
         }
     }
 
     public func secret(id: String) throws -> Data {
+        guard !id.isEmpty else { throw AuthProxyError.badRequest("secret id is empty") }
         let record = try requireRecord(id: id)
+        assert(!record.collection.isEmpty, "stored records carry a collection")
         return try bytes.read(service: service(record.collection), account: record.id)
     }
 
     public func update(id: String, secret: Data) throws -> SecretItemRecord {
+        guard !id.isEmpty else { throw AuthProxyError.badRequest("secret id is empty") }
         guard secret.count <= KeychainSecretLimits.maxSecretBytes else {
             throw AuthProxyError.tooLarge
         }
-        var file = try load()
-        guard let index = file.items.firstIndex(where: { $0.id == id }) else {
-            throw AuthProxyError.denied("secret item not found")
+        return try withMetadata { file in
+            guard let index = file.items.firstIndex(where: { $0.id == id }) else {
+                throw AuthProxyError.notFound("secret item not found")
+            }
+            let current = file.items[index]
+            let updated = SecretItemRecord(
+                id: current.id, collection: current.collection, label: current.label,
+                attributes: current.attributes, created: current.created, modified: clock())
+            try bytes.store(
+                service: service(current.collection), account: current.id, secret: secret)
+            file.items[index] = updated
+            return updated
         }
-        let current = file.items[index]
-        let updated = SecretItemRecord(
-            id: current.id, collection: current.collection, label: current.label,
-            attributes: current.attributes, created: current.created, modified: clock())
-        try bytes.store(service: service(current.collection), account: current.id, secret: secret)
-        file.items[index] = updated
-        try save(file)
-        return updated
     }
 
     public func delete(id: String) throws {
-        var file = try load()
-        guard let index = file.items.firstIndex(where: { $0.id == id }) else { return }
-        let record = file.items.remove(at: index)
-        try bytes.delete(service: service(record.collection), account: record.id)
-        try save(file)
+        guard !id.isEmpty else { throw AuthProxyError.badRequest("secret id is empty") }
+        try withMetadata { file in
+            guard let index = file.items.firstIndex(where: { $0.id == id }) else { return }
+            let record = file.items.remove(at: index)
+            assert(record.id == id, "removed the record we located")
+            try bytes.delete(service: service(record.collection), account: record.id)
+        }
+    }
+
+    public func record(id: String) throws -> SecretItemRecord {
+        guard !id.isEmpty else { throw AuthProxyError.badRequest("secret id is empty") }
+        return try requireRecord(id: id)
     }
 
     private func requireRecord(id: String) throws -> SecretItemRecord {
-        guard !id.isEmpty else { throw AuthProxyError.badRequest("secret id is empty") }
-        guard let record = try load().items.first(where: { $0.id == id }) else {
-            throw AuthProxyError.denied("secret item not found")
+        assert(!id.isEmpty, "callers reject an empty id")
+        let items = try withMetadata { file in file.items }
+        guard let record = items.first(where: { $0.id == id }) else {
+            throw AuthProxyError.notFound("secret item not found")
         }
         return record
+    }
+
+    /// Serializes load -> mutate -> save. `body` sees a mutable snapshot; the
+    /// file is rewritten only when it changed, so reads take no write path.
+    private func withMetadata<Value>(
+        _ body: (inout SecretMetadataFile) throws -> Value
+    ) throws -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        var file = try load()
+        let before = file
+        let value = try body(&file)
+        guard file != before else { return value }
+        try save(file)
+        return value
     }
 
     private func validate(label: String, attributes: [String: String], secret: Data) throws {
@@ -191,6 +245,7 @@ public struct KeychainSecretStore<Bytes: SecretByteStore>: Sendable {
 
     private func service(_ collection: String) -> String {
         assert(!collection.isEmpty, "secret collection must not be empty")
+        assert(collection == KeychainSecretLimits.defaultCollection, "v1 has one collection")
         return "dev.msl.secrets.\(collection)"
     }
 
@@ -206,13 +261,12 @@ public struct KeychainSecretStore<Bytes: SecretByteStore>: Sendable {
     }
 
     private func save(_ file: SecretMetadataFile) throws {
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        assert(file.version == 1, "only v1 metadata is written")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(file)
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        assert(!data.isEmpty, "encoded metadata is never empty")
+        try AuthSecureFile.write(data, to: url)
     }
 }
 

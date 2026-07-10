@@ -26,15 +26,19 @@ extension DaemonCore {
             argv: UserWrap.wrap(user: user, argv: argv, cwd: cwd), cwd: cwd, auth: auth)
     }
 
+    /// `ask` has no prompt surface, so only an explicit `on` permits forwarding.
     private func makeAuthSession(name: String) throws -> AuthSession {
         assert(!name.isEmpty, "auth session name must not be empty")
+        guard !name.isEmpty else { throw MSLError.invalidArgument("empty distro name") }
         let policy = try AuthPolicyStore(url: config.home.authPolicyURL).policy(for: name)
         let hostAgent = HostSSHAgentProxy().available
-        return authSessions.create(
+        let session = authSessions.create(
             distro: name,
             sshAgent: policy.sshAgent ?? hostAgent,
             sshAgentForwarding: policy.sshAgentForwarding == .on,
             secrets: policy.secrets)
+        assert(session.distro == name, "minted session carries the requested distro")
+        return session
     }
 
     func mergedEnv(_ env: [String: String]?, auth: AuthSession) -> [String: String] {

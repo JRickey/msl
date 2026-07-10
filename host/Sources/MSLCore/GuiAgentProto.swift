@@ -39,9 +39,13 @@ public struct GuiRuntimeData: Codable, Equatable, Sendable {
     public let socketPresent: Bool
     public let pid: UInt32?
     public let logTail: String
+    // A runtime is keyed by (distro, user); `windows` is the guest's bounded
+    // live-window count. Optional so a v1.4 agent still decodes.
+    public let user: String?
+    public let windows: UInt32?
 
     enum CodingKeys: String, CodingKey {
-        case state, pid
+        case state, pid, user, windows
         case runtimeDir = "runtime_dir"
         case waylandDisplay = "wayland_display"
         case socketPresent = "socket_present"
@@ -50,7 +54,7 @@ public struct GuiRuntimeData: Codable, Equatable, Sendable {
 
     public init(
         state: String, runtimeDir: String, waylandDisplay: String, socketPresent: Bool,
-        pid: UInt32?, logTail: String
+        pid: UInt32?, logTail: String, user: String? = nil, windows: UInt32? = nil
     ) {
         self.state = state
         self.runtimeDir = runtimeDir
@@ -58,6 +62,8 @@ public struct GuiRuntimeData: Codable, Equatable, Sendable {
         self.socketPresent = socketPresent
         self.pid = pid
         self.logTail = logTail
+        self.user = user
+        self.windows = windows
     }
 }
 

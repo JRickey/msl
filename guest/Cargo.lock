@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "msl-agent"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "libc",
  "msl-wire",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "msl-auth"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "base64",
  "libc",

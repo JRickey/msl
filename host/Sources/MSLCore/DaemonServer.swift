@@ -47,8 +47,8 @@ public final class DaemonServer: @unchecked Sendable {
         switch request {
         case .attach(let sessionID, let token):
             return handleAttach(framed: framed, sessionID: sessionID, token: token)
-        case .guiConnect(let name):
-            return handleGuiConnect(framed: framed, name: name)
+        case .guiAttach(let distro, let user, let token):
+            return handleGuiAttach(framed: framed, distro: distro, user: user, token: token)
         case .shutdown:
             // Stop the VM (releasing image locks) before acknowledging, so the
             // client's "shut down" means resources are actually free.
@@ -77,7 +77,7 @@ public final class DaemonServer: @unchecked Sendable {
             return try lifecycleReply(request)
         case .shell, .capture, .resize, .signal, .wait:
             return try sessionReply(request)
-        case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch:
+        case .guiProbe, .guiStart, .guiStatus, .guiStop, .guiLaunch, .guiToken:
             return try guiReply(request)
         case .mountPrepare, .mountCommit, .mountUnmount, .mountStatus:
             return try mountReply(request)
@@ -144,6 +144,8 @@ public final class DaemonServer: @unchecked Sendable {
         case .guiStatus(let req): return okFrame(try core.guiStatus(req))
         case .guiStop(let req): return okFrame(try core.guiStop(req))
         case .guiLaunch(let req): return okFrame(try core.guiLaunch(req))
+        case .guiToken(let name, let user):
+            return okFrame(try core.guiToken(name: name, user: user))
         default: return errorFrame("unsupported request")
         }
     }
@@ -169,24 +171,26 @@ public final class DaemonServer: @unchecked Sendable {
         return false
     }
 
-    /// GUI connect: open the guest surface plane, ACK, then relay the connection
-    /// raw until either side closes; balance the op reference on the way out.
-    private func handleGuiConnect(framed: VsockClient, name: String?) -> Bool {
+    /// GUI attach: consume the single-use token, open the guest surface plane,
+    /// ACK, then relay raw until either side closes; release the presenter hold.
+    private func handleGuiAttach(
+        framed: VsockClient, distro: String, user: String?, token: String
+    ) -> Bool {
         let guestFD: Int32
         do {
-            guestFD = try core.beginGuiConnect(name: name)
+            guestFD = try core.beginGuiAttach(distro: distro, user: user, token: token)
         } catch {
             _ = try? framed.send(errorFrame(describe(error)))
             return true
         }
         guard (try? framed.send(okFrame(LocalEmpty()))) != nil else {
             _ = Darwin.close(guestFD)
-            core.endGuiConnect()
+            core.endGuiAttach(distro: distro, user: user)
             return false
         }
         let clientFD = framed.detachDescriptor()
         ByteRelay(clientFD: clientFD, guestFD: guestFD).run()
-        core.endGuiConnect()
+        core.endGuiAttach(distro: distro, user: user)
         return false
     }
 

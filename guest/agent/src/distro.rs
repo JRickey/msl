@@ -461,6 +461,7 @@ mod linux {
             distro: true,
             cwd: None,
             init_pid: Some(init_pid),
+            ident: None,
         };
         let _ = exec::run(&argv, &HashMap::new(), POWEROFF_EXEC_MS, &opts);
     }

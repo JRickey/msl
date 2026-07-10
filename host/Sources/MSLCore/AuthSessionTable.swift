@@ -81,9 +81,16 @@ public final class AuthSessionTable: @unchecked Sendable {
         lock.unlock()
     }
 
-    public func validate(_ peer: AuthPeer, surface: AuthSurface) throws -> AuthSession {
+    /// Attribution: live token, matching distro, distro still running, surface
+    /// enabled by policy. `isRunning` is the daemon's view of the distro state.
+    public func validate(
+        _ peer: AuthPeer, surface: AuthSurface, isRunning: (String) -> Bool
+    ) throws -> AuthSession {
         guard Registry.isValidName(peer.distro) else {
             throw AuthValidationError(code: .badRequest, message: "invalid distro")
+        }
+        guard !peer.id.isEmpty, !peer.token.isEmpty else {
+            throw AuthValidationError(code: .denied, message: "bad auth session")
         }
         lock.lock()
         let session = byID[peer.id]
@@ -92,6 +99,10 @@ public final class AuthSessionTable: @unchecked Sendable {
             session.distro == peer.distro
         else {
             throw AuthValidationError(code: .denied, message: "bad auth session")
+        }
+        assert(session.distro == peer.distro, "matched session carries the peer's distro")
+        guard isRunning(session.distro) else {
+            throw AuthValidationError(code: .denied, message: "distro is not running")
         }
         switch surface {
         case .sshAgent where !session.sshAgent:

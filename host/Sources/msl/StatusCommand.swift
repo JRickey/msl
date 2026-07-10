@@ -26,6 +26,26 @@ struct StatusCommand: ParsableCommand {
         for entry in status.distros {  // bounded: registry list
             print(pad(entry.name, 18) + pad(entry.state, 14) + "\(entry.sessions)")
         }
+        printGui(status.gui)
+    }
+
+    private func printGui(_ runtimes: [GuiRuntimeStatus]?) {
+        guard let runtimes, !runtimes.isEmpty else { return }
+        print("GUI:")
+        for runtime in runtimes {  // bounded: GuiRuntimeTable.maxRuntimes
+            print("  " + guiLine(runtime))
+        }
+    }
+
+    private func guiLine(_ runtime: GuiRuntimeStatus) -> String {
+        var fields = ["\(runtime.distro)/\(runtime.user)", runtime.state]
+        if let pid = runtime.pid { fields.append("pid=\(pid)") }
+        fields.append("wayland=\(runtime.waylandDisplay)")
+        if let x11 = runtime.x11Display { fields.append("x11=\(x11)") }
+        fields.append("presenters=\(runtime.presenters)")
+        fields.append("windows=\(runtime.windows)")
+        if let error = runtime.lastError, !error.isEmpty { fields.append("error=\(error)") }
+        return fields.joined(separator: " ")
     }
 
     private func printMemory(_ memory: MemoryStatus?) {

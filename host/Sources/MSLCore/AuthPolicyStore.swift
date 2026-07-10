@@ -1,4 +1,44 @@
+import Darwin
 import Foundation
+
+/// Writes under `$MSL_HOME/auth/`. The file is created 0600 *before* any bytes
+/// land in it and then renamed over the target, so a secret-adjacent file is
+/// never briefly world-readable at the umask default.
+enum AuthSecureFile {
+    static func write(_ data: Data, to url: URL) throws {
+        precondition(!data.isEmpty, "refusing to write an empty auth file")
+        precondition(url.isFileURL, "auth file url must be a file url")
+        let directory = url.deletingLastPathComponent()
+        try ensureDirectory(directory)
+        let temp = directory.appendingPathComponent(
+            ".\(url.lastPathComponent).\(Token.generate()).tmp")
+        guard
+            FileManager.default.createFile(
+                atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        else { throw MSLError.io("cannot create \(temp.path)") }
+        do {
+            try data.write(to: temp)
+        } catch {
+            try? FileManager.default.removeItem(at: temp)
+            throw error
+        }
+        guard Darwin.rename(temp.path, url.path) == 0 else {
+            let code = errno
+            try? FileManager.default.removeItem(at: temp)
+            throw MSLError.io("rename \(temp.path) failed: errno=\(code)")
+        }
+    }
+
+    static func ensureDirectory(_ directory: URL) throws {
+        precondition(directory.isFileURL, "auth directory url must be a file url")
+        assert(!directory.path.isEmpty, "auth directory path must not be empty")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: directory.path)
+    }
+}
 
 public enum AuthForwardingPolicy: String, Codable, Sendable, Equatable {
     case off
@@ -69,13 +109,12 @@ public struct AuthPolicyStore: Sendable {
     }
 
     private func save(_ file: AuthPolicyFile) throws {
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        assert(file.version == 1, "only v1 policy is written")
+        assert(!url.path.isEmpty, "policy url must have a path")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(file)
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try AuthSecureFile.write(data, to: url)
     }
 }
 
