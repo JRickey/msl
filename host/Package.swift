@@ -31,10 +31,16 @@ let package = Package(
             dependencies: ["CMSLSys", "MSLFSWire"],
             swiftSettings: swiftSettings
         ),
+        .target(
+            name: "MSLGui",
+            dependencies: ["MSLCore"],
+            swiftSettings: swiftSettings
+        ),
         .executableTarget(
             name: "msl",
             dependencies: [
                 "MSLCore",
+                "MSLGui",
                 "MSLFSWire",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],

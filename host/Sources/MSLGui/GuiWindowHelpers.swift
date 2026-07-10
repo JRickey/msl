@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MSLCore
 
 // GuiWindow diagnostics and static sizing helpers (split for file length).
 

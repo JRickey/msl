@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MSLCore
 
 /// Host-owned popup dismissal: the guest closes popups on clicks it routes, but
 /// app deactivation, another window taking key, and chrome clicks never reach a

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MSLCore
 
 /// Layer-backed content view: turns NSEvents into window-local logical
 /// coordinates (top-left origin, y flipped from AppKit's bottom-left) and

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MSLCore
 
 // Toplevel-only resize hooks and size limits. Popups are client-sized and never
 // reach these paths (they carry no NSWindowDelegate and are not resizable).

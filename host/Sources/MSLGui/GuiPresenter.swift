@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import MSLCore
 
 /// Drives the spike: one NSApplication, a reader thread decoding GUI frames onto
 /// the main queue, a native window per remote toplevel, and the latency ledger.

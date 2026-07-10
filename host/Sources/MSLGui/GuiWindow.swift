@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MSLCore
 import QuartzCore
 
 /// Callbacks a `GuiWindow` makes back into the presenter (ledger + lifecycle).

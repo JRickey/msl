@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MSLCore
 
 // Input translation for GuiWindow, called by the content view on the main
 // thread: NSEvents become protocol pointer/key messages stamped for the ledger.

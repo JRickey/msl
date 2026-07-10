@@ -6,13 +6,13 @@ import IOSurface
 /// writable only when it is off screen (set true by the CATransaction
 /// completion that removed it). Touched only on the main thread.
 @MainActor
-final class GuiSurface {
-    let ioSurface: IOSurface
-    let width: Int
-    let height: Int
-    var reusable = true
+public final class GuiSurface {
+    public let ioSurface: IOSurface
+    public let width: Int
+    public let height: Int
+    public var reusable = true
 
-    init?(width: Int, height: Int) {
+    public init?(width: Int, height: Int) {
         guard width > 0, height > 0, width <= 16384, height <= 16384 else { return nil }
         let props: [IOSurfacePropertyKey: any Sendable] = [
             .width: width, .height: height, .bytesPerElement: 4,
@@ -26,7 +26,7 @@ final class GuiSurface {
 
     /// Copy each damaged rect's row-packed pixels into the surface. Dimensions
     /// must match; the parser already proved every rect lies in-bounds.
-    func apply(_ commit: GuiCommit) {
+    public func apply(_ commit: GuiCommit) {
         precondition(commit.width == UInt32(width), "commit width must match surface")
         precondition(commit.height == UInt32(height), "commit height must match surface")
         guard !commit.rects.isEmpty else { return }
@@ -54,7 +54,7 @@ final class GuiSurface {
     /// the strip a grow exposes. The presenter paints it behind the anchored
     /// content so that strip reads as window background, not a blank flash. Nil
     /// when the surface cannot be locked for reading.
-    func cornerColor() -> CGColor? {
+    public func cornerColor() -> CGColor? {
         assert(width > 0 && height > 0, "surface has a pixel to sample")
         let stride = ioSurface.bytesPerRow
         guard stride >= width * 4 else { return nil }
@@ -72,7 +72,7 @@ final class GuiSurface {
 
     /// Bring this surface current with `other` (same dimensions) by a full copy
     /// that honors each surface's own row stride.
-    func copyContents(from other: GuiSurface) {
+    public func copyContents(from other: GuiSurface) {
         precondition(width == other.width, "copy source width must match")
         precondition(height == other.height, "copy source height must match")
         guard ioSurface.lock(options: [], seed: nil) == 0 else { return }
@@ -97,15 +97,15 @@ final class GuiSurface {
 /// atomicity: the presenter promotes a target and recycles the outgoing surface
 /// when its removing CATransaction completes.
 @MainActor
-final class GuiSurfacePool {
+public final class GuiSurfacePool {
     static let depth = 3
 
     private var surfaces: [GuiSurface]
-    private(set) var front: GuiSurface?
-    private(set) var width: Int
-    private(set) var height: Int
+    public private(set) var front: GuiSurface?
+    public private(set) var width: Int
+    public private(set) var height: Int
 
-    init?(width: Int, height: Int) {
+    public init?(width: Int, height: Int) {
         guard let made = GuiSurfacePool.make(width: width, height: height) else { return nil }
         self.surfaces = made
         self.front = nil
@@ -130,7 +130,7 @@ final class GuiSurfacePool {
     /// needs is created here (a fast grow resizes every frame, and IOSurface
     /// allocation is costly); the rest of the pool backfills on demand. The
     /// front is dropped so the next present expects full damage.
-    func resize(width newWidth: Int, height newHeight: Int) -> Bool {
+    public func resize(width newWidth: Int, height newHeight: Int) -> Bool {
         assert(newWidth > 0 && newHeight > 0, "resize dimensions must be positive")
         guard let first = GuiSurface(width: newWidth, height: newHeight) else {
             return false
@@ -143,7 +143,7 @@ final class GuiSurfacePool {
         return true
     }
 
-    func reusableTarget() -> GuiSurface? {
+    public func reusableTarget() -> GuiSurface? {
         assert(surfaces.count >= 1, "pool never empties")
         for surface in surfaces {  // bounded: depth
             if surface.reusable, surface !== front { return surface }
@@ -157,7 +157,7 @@ final class GuiSurfacePool {
 
     /// Promote `target` to the front and return the outgoing surface, which the
     /// caller recycles only once its removing CATransaction completes.
-    func promote(_ target: GuiSurface) -> GuiSurface? {
+    public func promote(_ target: GuiSurface) -> GuiSurface? {
         assert(target !== front, "promoted surface must differ from the front")
         assert(target.reusable, "promoted surface must be reusable")
         target.reusable = false
@@ -167,7 +167,7 @@ final class GuiSurfacePool {
         return outgoing
     }
 
-    func detach() {
+    public func detach() {
         front = nil
         assert(front == nil, "detach clears the front surface")
     }

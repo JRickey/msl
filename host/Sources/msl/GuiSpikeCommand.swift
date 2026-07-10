@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Foundation
 import MSLCore
+import MSLGui
 
 /// Hidden prototype-gate command (ADR 0011): present a distro's remote Wayland
 /// toplevels as native windows and record the latency ledger. Drives the

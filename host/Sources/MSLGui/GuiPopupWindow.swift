@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MSLCore
 
 /// Whether a `GuiWindow` backs a remote toplevel or an xdg_popup. Popups skip the
 /// size-authority machine: they are client-sized and placed against their parent.

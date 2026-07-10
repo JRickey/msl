@@ -42,7 +42,7 @@ public final class GuiCommitRouter: @unchecked Sendable {
     private let lock = NSLock()
     private var latches: [UInt32: GuiCommitLatch] = [:]
 
-    static let maxWindows = 4096
+    public static let maxWindows = 4096
 
     public init() {}
 

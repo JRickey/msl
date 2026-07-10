@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Foundation
 import MSLCore
+import MSLGui
 
 struct GuiCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
