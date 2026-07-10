@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "msl-agent"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "libc",
  "msl-wire",

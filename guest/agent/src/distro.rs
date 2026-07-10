@@ -617,13 +617,34 @@ mod linux {
         generation: u64,
         init_pid: i32,
     ) -> Result<(), String> {
+        const PROBE_ATTEMPTS: u32 = 50;
+        const PROBE_POLL: Duration = Duration::from_millis(100);
         assert!(!name.is_empty(), "readiness needs a name");
         assert!(init_pid > 0, "readiness needs an init pid");
-        ensure_init_active(distros, name, generation, init_pid)?;
-        let probe = format!("/proc/{init_pid}/root/usr/bin/systemctl");
-        if !Path::new(&probe).exists() {
-            return Err("unsupported init: /usr/bin/systemctl not found".to_string());
+        wait_for_systemctl(distros, name, generation, init_pid)?;
+        let mut attempt: u32 = 0;
+        let mut last = "readiness probe did not settle".to_string();
+        // bounded: retry while systemd's private bus comes up post-exec.
+        while attempt < PROBE_ATTEMPTS {
+            ensure_init_active(distros, name, generation, init_pid)?;
+            match probe_readiness(distros, name, generation, init_pid) {
+                Ok(()) => return Ok(()),
+                Err(message) => last = message,
+            }
+            attempt = attempt.saturating_add(1);
+            thread::sleep(PROBE_POLL);
         }
+        Err(last)
+    }
+
+    fn probe_readiness(
+        distros: &Mutex<Distros>,
+        name: &str,
+        generation: u64,
+        init_pid: i32,
+    ) -> Result<(), String> {
+        assert!(!name.is_empty(), "probe needs a name");
+        assert!(init_pid > 0, "probe needs an init pid");
         let argv = vec![
             "/usr/bin/systemctl".to_string(),
             "is-system-running".to_string(),
@@ -646,6 +667,31 @@ mod linux {
         })?;
         ensure_init_active(distros, name, generation, init_pid)?;
         classify_readiness(data.exit_code, &data.stdout)
+    }
+
+    // systemctl appears only after the cloned child switch_roots and execs systemd.
+    fn wait_for_systemctl(
+        distros: &Mutex<Distros>,
+        name: &str,
+        generation: u64,
+        init_pid: i32,
+    ) -> Result<(), String> {
+        const READY_ATTEMPTS: u32 = 50;
+        const READY_POLL: Duration = Duration::from_millis(100);
+        assert!(!name.is_empty(), "probe needs a name");
+        assert!(init_pid > 0, "probe needs an init pid");
+        let probe = format!("/proc/{init_pid}/root/usr/bin/systemctl");
+        // bounded: at most READY_ATTEMPTS * READY_POLL == 5s.
+        let mut attempt: u32 = 0;
+        while attempt < READY_ATTEMPTS {
+            ensure_init_active(distros, name, generation, init_pid)?;
+            if Path::new(&probe).exists() {
+                return Ok(());
+            }
+            attempt = attempt.saturating_add(1);
+            thread::sleep(READY_POLL);
+        }
+        Err("unsupported init: /usr/bin/systemctl not found".to_string())
     }
 
     fn ensure_init_active(
