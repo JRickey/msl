@@ -1,7 +1,7 @@
 # Agent/user working files (per global project guidelines)
 CLAUDE.md
 AGENTS.md
-docs/
+docs
 new-worktree.sh
 
 # macOS
