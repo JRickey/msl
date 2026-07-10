@@ -21,7 +21,8 @@ public struct GuiPackageManifest: Sendable, Equatable {
               sudo \(manager) update
               sudo \(manager) install -y \(packages.joined(separator: " "))
 
-            X11 applications also need the later XWayland unit before DISPLAY is set.
+            X11 applications run through the bundled Xwayland; DISPLAY is set only
+            for GUI sessions whose compositor announced an X11 display.
             """
     }
 
@@ -46,6 +47,7 @@ public enum GuiEnablement {
         manager: "apt-get",
         packages: [
             "xkb-data",
+            "xwayland",
             "mesa-utils",
             "libgl1",
             "libegl1",

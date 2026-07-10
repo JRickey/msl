@@ -187,6 +187,11 @@ mod linux {
             grabs: msl_way::popups::GrabStack::new(),
             dismissed: msl_way::popups::DismissedSet::new(),
             warned_popup_configure: false,
+            xwayland_shell: smithay::wayland::xwayland_shell::XWaylandShellState::new::<State>(
+                &display.handle(),
+            ),
+            xwm: None,
+            shutdown: false,
         })
     }
 
@@ -287,21 +292,7 @@ mod linux {
     fn handle_host(state: &mut State, msg: HostMsg) {
         match msg {
             HostMsg::Configure(cfg) => apply_configure(state, &cfg),
-            HostMsg::Close(r) => {
-                match state.windows.get(&r.win).map(msl_way::comp::Win::is_popup) {
-                    Some(true) => msl_way::popups::dismiss_cascade(state, r.win),
-                    Some(false) => {
-                        if let Some(t) = state
-                            .windows
-                            .get(&r.win)
-                            .and_then(|w| w.toplevel().cloned())
-                        {
-                            t.send_close();
-                        }
-                    }
-                    None => {}
-                }
-            }
+            HostMsg::Close(r) => close_window(state, r.win),
             HostMsg::Pointer(p) => inject_pointer(state, &p),
             HostMsg::Key(k) => inject_key(state, &k),
             HostMsg::PresentAck(a) => {
@@ -313,6 +304,24 @@ mod linux {
             }
             HostMsg::PopupDismiss(r) => msl_way::popups::dismiss_cascade(state, r.win),
             HostMsg::HelloAck(_) | HostMsg::Unknown(_) => {}
+        }
+    }
+
+    /// Ask a window to close by the means its shell allows: `xdg_toplevel.close`
+    /// for xdg, `WM_DELETE_WINDOW` via `X11Surface::close` for X11 (never a
+    /// SIGKILL), and the popup dismissal cascade for popups.
+    fn close_window(state: &mut State, win: u32) {
+        let Some(entry) = state.windows.get(&win) else {
+            return;
+        };
+        if entry.is_popup() {
+            msl_way::popups::dismiss_cascade(state, win);
+        } else if let Some(t) = entry.toplevel().cloned() {
+            t.send_close();
+        } else if let Some(x11) = entry.x11().cloned()
+            && let Err(e) = x11.close()
+        {
+            eprintln!("msl-way: x11 close request failed: {e}");
         }
     }
 
@@ -411,6 +420,8 @@ Usage: msl-way [OPTIONS]
             Display::new().map_err(|e| io::Error::other(e.to_string()))?;
         let mut state = build_state(&display, &args.layout)?;
         install_wayland_socket(&event_loop, args)?;
+        install_shutdown_signals(&event_loop)?;
+        spawn_xwayland(&event_loop.handle(), &display)?;
         let listener = bind_vsock(args.vsock_port)?;
         let mut host: Option<HostConn> = None;
         let mut interval = DISPATCH_INTERVAL;
@@ -420,6 +431,12 @@ Usage: msl-way [OPTIONS]
             event_loop
                 .dispatch(Some(interval), &mut state)
                 .map_err(|e| io::Error::other(e.to_string()))?;
+            // Returning here drops the event loop, whose XWayland source unlinks
+            // its `/tmp/.X11-unix` socket via `X11Lock::Drop` — the only path
+            // that leaves no stale socket after `msl gui stop`.
+            if state.shutdown {
+                return Ok(());
+            }
             interval = DISPATCH_INTERVAL;
             display.dispatch_clients(&mut state)?;
             if host.is_none()
@@ -450,6 +467,77 @@ Usage: msl-way [OPTIONS]
             }
             display.flush_clients()?;
         }
+    }
+
+    /// Turn SIGTERM/SIGINT into a flagged clean exit. calloop's signalfd source
+    /// blocks the signals on this thread (inherited by the reader thread spawned
+    /// later), so the default terminate action never fires and the run loop can
+    /// unwind, dropping the `XWayland` socket instead of leaking it on a raw kill.
+    fn install_shutdown_signals(event_loop: &EventLoop<State>) -> io::Result<()> {
+        use smithay::reexports::calloop::signals::{Signal, Signals};
+        let signals = Signals::new(&[Signal::SIGTERM, Signal::SIGINT])
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        event_loop
+            .handle()
+            .insert_source(signals, |_event, &mut (), state: &mut State| {
+                state.shutdown = true;
+            })
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Xwayland binds `/tmp/.X11-unix/X<N>` but never creates the directory; a
+    /// minimal container often lacks it. Create it sticky world-writable (1777),
+    /// the standard, and adopt an existing one.
+    fn ensure_x11_unix_dir() -> io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let path = "/tmp/.X11-unix";
+        match std::fs::DirBuilder::new().mode(0o1777).create(path) {
+            Ok(()) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o1777)),
+            Err(ref e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Start a rootless Xwayland and, once it is ready, print its display and
+    /// bring up the X11 window manager. The `XWayland` handle lives inside the
+    /// event-loop source so its `Drop` (socket unlink, server shutdown) fires on
+    /// a clean exit.
+    fn spawn_xwayland(
+        handle: &smithay::reexports::calloop::LoopHandle<'static, State>,
+        display: &Display<State>,
+    ) -> io::Result<()> {
+        use smithay::xwayland::{X11Wm, XWayland, XWaylandEvent};
+        ensure_x11_unix_dir()?;
+        let dh = display.handle();
+        let (xwayland, client) = XWayland::spawn(
+            &dh,
+            None,
+            std::iter::empty::<(String, String)>(),
+            true,
+            std::process::Stdio::null(),
+            std::process::Stdio::null(),
+            |_| {},
+        )
+        .map_err(|e| io::Error::other(e.to_string()))?;
+        let wm_handle = handle.clone();
+        handle
+            .insert_source(xwayland, move |event, (), state: &mut State| match event {
+                XWaylandEvent::Ready {
+                    x11_socket,
+                    display_number,
+                } => {
+                    debug_assert!(state.xwm.is_none(), "xwayland readied twice");
+                    eprintln!("msl-way: DISPLAY=:{display_number}");
+                    match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
+                        Ok(wm) => state.xwm = Some(wm),
+                        Err(e) => eprintln!("msl-way: X11Wm::start_wm failed: {e}"),
+                    }
+                }
+                XWaylandEvent::Error => eprintln!("msl-way: XWayland failed to start"),
+            })
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(())
     }
 
     fn install_wayland_socket(event_loop: &EventLoop<State>, args: &Args) -> io::Result<()> {

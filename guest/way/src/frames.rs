@@ -419,6 +419,26 @@ pub fn translate_damage(r: Rect, crop: Rect) -> Option<Rect> {
     })
 }
 
+/// Parent-relative origin of an override-redirect X11 popup.
+///
+/// Computed from the absolute X11 screen coordinates of the child and its
+/// transient parent. Signed, so a popup anchored above or left of its parent
+/// keeps a negative offset.
+#[must_use]
+pub const fn x11_popup_offset(parent: (i32, i32), child: (i32, i32)) -> (i32, i32) {
+    (
+        child.0.saturating_sub(parent.0),
+        child.1.saturating_sub(parent.1),
+    )
+}
+
+/// Modality stand-in for X11: a dialog with a transient parent. smithay 0.7
+/// does not surface `_NET_WM_STATE_MODAL`, so this is the closest faithful cue.
+#[must_use]
+pub const fn x11_modal(is_dialog: bool, has_transient_parent: bool) -> bool {
+    is_dialog && has_transient_parent
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
@@ -665,10 +685,18 @@ mod linux {
         debug_assert!(win != 0, "window id 0 is reserved");
         debug_assert!(w > 0 && h > 0, "announcing a zero-sized window");
         let is_popup = state.windows.get(&win).is_some_and(Win::is_popup);
+        let is_x11 = state.windows.get(&win).is_some_and(Win::is_x11);
+        let x11_or = state
+            .windows
+            .get(&win)
+            .and_then(Win::x11)
+            .is_some_and(smithay::xwayland::X11Surface::is_override_redirect);
         let announced = state.windows.get(&win).is_some_and(|x| x.announced);
         if !announced {
             if is_popup {
                 announce_popup(state, win, w, h);
+            } else if is_x11 {
+                crate::xwm::announce_x11(state, win, w, h);
             } else {
                 announce_toplevel(state, win, surface, w, h);
             }
@@ -680,9 +708,10 @@ mod linux {
             }
             let payload = serde_json::to_vec(&WinRef { win }).unwrap_or_default();
             state.enqueue(T_WIN_MAP, payload);
-            // Keyboard focus for popups is grab-driven; a mapped tooltip must
-            // not steal it, so only toplevels take focus here.
-            if !is_popup {
+            // Keyboard focus goes to xdg toplevels and managed (non-OR) X11
+            // windows; popups are grab-driven and override-redirect menus must
+            // never steal focus, which may belong to another app or to nothing.
+            if !is_popup && !x11_or {
                 let serial = SERIAL_COUNTER.next_serial();
                 let kbd = state.keyboard.clone();
                 kbd.set_focus(state, Some(surface.clone()), serial);
@@ -719,7 +748,7 @@ mod linux {
         debug_assert!(win != 0, "window id 0 is reserved");
         let info = state.windows.get(&win).and_then(|x| match &x.role {
             WinRole::Popup { parent, pos, .. } => Some((*parent, *pos)),
-            WinRole::Toplevel(_) => None,
+            WinRole::Toplevel(_) | WinRole::X11(_) => None,
         });
         let Some((parent, pos)) = info else {
             return;
@@ -980,6 +1009,17 @@ mod linux {
         if state.windows.get(&win).is_some_and(Win::is_popup) {
             return;
         }
+        // Override-redirect X11 menus/tooltips are transient like popups: the
+        // fresh presenter never replays them, it re-derives them on the next map.
+        let x11_or = state
+            .windows
+            .get(&win)
+            .and_then(Win::x11)
+            .is_some_and(smithay::xwayland::X11Surface::is_override_redirect);
+        if x11_or {
+            return;
+        }
+        let is_x11 = state.windows.get(&win).is_some_and(Win::is_x11);
         let info = state.windows.get(&win).map(|x| {
             (
                 x.mapped,
@@ -1009,7 +1049,33 @@ mod linux {
             x.prev_buffer_size = (0, 0);
         }
         if mapped {
-            replay_mapped(state, win, &surface, &app_id, &title, size);
+            if is_x11 {
+                replay_x11_mapped(state, win, &surface, size);
+            } else {
+                replay_mapped(state, win, &surface, &app_id, &title, size);
+            }
+        }
+    }
+
+    /// Re-announce a managed X11 toplevel to a fresh presenter: identity, map,
+    /// then a full-damage replay of its last frame. Override-redirect windows are
+    /// filtered out before this point.
+    fn replay_x11_mapped(state: &mut State, win: u32, surface: &WlSurface, size: (u32, u32)) {
+        debug_assert!(win != 0, "reserved window id 0 in x11 replay");
+        debug_assert!(state.windows.get(&win).is_some_and(Win::is_x11), "not x11");
+        crate::xwm::announce_x11(state, win, size.0, size.1);
+        state.enqueue(
+            T_WIN_MAP,
+            serde_json::to_vec(&WinRef { win }).unwrap_or_default(),
+        );
+        if let Some(x) = state.windows.get_mut(&win) {
+            x.announced = true;
+            x.mapped = true;
+        }
+        let last = state.windows.get(&win).and_then(|x| x.last_frame.clone());
+        if let Some(fb) = last {
+            let t = state.now_ns();
+            let _ = emit_snapshot(state, win, surface, &fb, &Damageset::full(), t, 0);
         }
     }
 
@@ -1067,6 +1133,28 @@ mod tests {
 
     fn rect(x: u32, y: u32, w: u32, h: u32) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn x11_popup_offset_is_signed_child_minus_parent() {
+        assert_eq!(x11_popup_offset((100, 200), (140, 260)), (40, 60));
+        assert_eq!(
+            x11_popup_offset((100, 200), (60, 180)),
+            (-40, -20),
+            "a popup above-left of its parent keeps negative offsets"
+        );
+        assert_eq!(x11_popup_offset((0, 0), (0, 0)), (0, 0));
+    }
+
+    #[test]
+    fn x11_modal_requires_dialog_and_transient_parent() {
+        assert!(
+            x11_modal(true, true),
+            "a transient dialog stands in for modal"
+        );
+        assert!(!x11_modal(true, false), "a parentless dialog is not modal");
+        assert!(!x11_modal(false, true), "a non-dialog is never modal");
+        assert!(!x11_modal(false, false));
     }
 
     #[test]

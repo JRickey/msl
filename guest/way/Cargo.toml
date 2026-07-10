@@ -1,6 +1,6 @@
 [package]
 name = "msl-way"
-version = "0.6.0"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -18,9 +18,9 @@ libc = { workspace = true }
 # aarch64/x86_64 Linux target. Host builds (cargo test on macOS) compile the
 # pure-logic core alone — framing, ledger, pacing, damage packing.
 [target.'cfg(target_os = "linux")'.dependencies]
-smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend"] }
+smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend", "xwayland"] }
 wayland-server = "0.31"
-calloop = "0.14"
+calloop = { version = "0.14", features = ["signals"] }
 vsock = { workspace = true }
 
 [dev-dependencies]

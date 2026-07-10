@@ -32,9 +32,21 @@ public enum GuiRuntime {
     }
 
     public static func environment(runtimeDir: String) -> [String: String] {
+        return environment(runtimeDir: runtimeDir, x11Display: nil)
+    }
+
+    /// The GUI session environment, injecting `DISPLAY` only when the compositor
+    /// announced an X11 display. A session without XWayland leaves `DISPLAY`
+    /// unset so X11 clients fail fast rather than dialing a dead socket.
+    public static func environment(
+        runtimeDir: String, x11Display: String?
+    ) -> [String: String] {
         precondition(!runtimeDir.isEmpty, "GUI runtime directory must not be empty")
         var values = environment
         values["XDG_RUNTIME_DIR"] = runtimeDir
+        if let display = x11Display, !display.isEmpty {
+            values["DISPLAY"] = display
+        }
         return values
     }
 
