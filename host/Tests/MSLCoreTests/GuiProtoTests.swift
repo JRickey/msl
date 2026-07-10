@@ -65,6 +65,41 @@ final class GuiFrameHeaderTests: XCTestCase {
     }
 }
 
+final class GuiReaderSliceTests: XCTestCase {
+    func testTakePreservesSliceIndicesAcrossMultipleReads() throws {
+        let storage = Data([99, 98, 1, 2, 4, 3, 2, 1, 7, 8, 9, 10, 97])
+        var reader = GuiReader(storage[2..<12])
+
+        let first = try reader.take(2)
+        let value = try reader.u32()
+        let second = try reader.take(4)
+
+        XCTAssertEqual(first.startIndex, 2)
+        XCTAssertEqual(Array(first), [1, 2])
+        XCTAssertEqual(value, 0x0102_0304)
+        XCTAssertEqual(second.startIndex, 8)
+        XCTAssertEqual(Array(second), [7, 8, 9, 10])
+        XCTAssertEqual(reader.offset, 10)
+        XCTAssertEqual(reader.remaining, 0)
+    }
+
+    func testTakenSlicesOutliveReaderAndRejectUnderflow() throws {
+        let slices: (Data, Data) = try {
+            let storage = Data([0, 11, 12, 13, 14, 15, 16, 17])
+            var reader = GuiReader(storage[1..<8])
+            let first = try reader.take(3)
+            let second = try reader.take(4)
+            XCTAssertThrowsError(try reader.take(1))
+            return (first, second)
+        }()
+
+        XCTAssertEqual(Array(slices.0), [11, 12, 13])
+        XCTAssertEqual(Array(slices.1), [14, 15, 16, 17])
+        XCTAssertEqual(slices.0.startIndex, 1)
+        XCTAssertEqual(slices.1.startIndex, 4)
+    }
+}
+
 final class GuiControlCodecTests: XCTestCase {
     private func roundTrip<T: Codable & Equatable>(_ value: T) throws -> T {
         return try GuiProto.decode(T.self, from: try GuiProto.encode(value))

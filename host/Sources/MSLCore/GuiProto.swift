@@ -171,10 +171,8 @@ public enum GuiType: UInt32, Sendable {
     case selDataHostToGuest = 36
 }
 
-/// Little-endian byte cursor over an immutable frame payload; every read is
-/// bounds-checked and throws `MSLError.framing` on underflow. Backed by the
-/// `Data` value itself (no copy) and indexed from its `startIndex`, since a
-/// `Data` slice is not zero-based.
+/// Bounds-checked little-endian cursor over immutable `Data`; `take` returns a slice.
+/// Indexing starts at `startIndex` because sliced `Data` need not be zero-based.
 struct GuiReader {
     private let data: Data
     private let base: Int
@@ -208,7 +206,7 @@ struct GuiReader {
         guard remaining >= count else { throw MSLError.framing("gui read take underflow") }
         let start = base + cursor
         cursor += count
-        return data.subdata(in: start..<(start + count))
+        return data[start..<(start + count)]
     }
 }
 

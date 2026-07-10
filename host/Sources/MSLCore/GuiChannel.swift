@@ -7,30 +7,42 @@ public enum GuiClock {
     public static func nowNs() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
 }
 
-/// Owns the raw byte pipe to the guest compositor and speaks GUI frames over it.
-/// Blocking `readFrame` runs on the presenter's reader thread; `send` never
-/// blocks the caller — it hands the frame to a serial writer queue so the main
-/// thread is never stalled on vsock backpressure.
+/// Blocking reads belong on the presenter reader thread; sends use a serial
+/// queue so caller threads never wait on vsock backpressure.
 public final class GuiChannel: @unchecked Sendable {
     private var fd: Int32
     private let lock = NSLock()
     private let writeQueue = DispatchQueue(label: "msl.gui.write", qos: .userInitiated)
-    // Bounds outstanding un-written frames: a bounded enqueue is an honest
-    // backpressure proxy at spike grade. A full queue past `stallTimeoutMs`
-    // means the peer/link is wedged, so we tear the channel down rather than
-    // grow memory without limit.
+    // A hard cap prevents peer backpressure from growing memory without bound.
     private let writeSlots = DispatchSemaphore(value: 64)
+    private let beforeWrite: (@Sendable () -> Void)?
+    private let afterReadLease: (@Sendable () -> Void)?
     private var onStall: (@Sendable () -> Void)?
-    private static let stallTimeoutMs = 250
+    // Saturation marks the channel dead before notification; shutdown waits for the handler.
+    private var didSignalStall = false
+    private var dead = false
+    private var stallShutdownPending = false
+    private var shutdownStarted = false
+    // The descriptor stays owned until every I/O lease releases, preventing fd-reuse races.
+    private var leaseCount = 0
 
-    public init(fd: Int32) throws {
-        guard fd >= 0 else { throw MSLError.io("gui channel fd invalid (\(fd))") }
-        self.fd = fd
-        try Self.setBlocking(fd)
+    public convenience init(fd: Int32) throws {
+        try self.init(fd: fd, beforeWrite: nil, afterReadLease: nil)
     }
 
-    /// Register the callback fired when the writer backlog signals a wedged peer;
-    /// the presenter uses it to finalize the spike with a clear error.
+    init(
+        fd: Int32, beforeWrite: (@Sendable () -> Void)?,
+        afterReadLease: (@Sendable () -> Void)? = nil
+    ) throws {
+        guard fd >= 0 else { throw MSLError.io("gui channel fd invalid (\(fd))") }
+        self.fd = fd
+        self.beforeWrite = beforeWrite
+        self.afterReadLease = afterReadLease
+        try Self.setBlocking(fd)
+        try Self.setNoSigPipe(fd)
+    }
+
+    /// The callback runs at most once and before saturation-triggered socket shutdown.
     public func setStallHandler(_ handler: @escaping @Sendable () -> Void) {
         lock.lock()
         defer { lock.unlock() }
@@ -38,49 +50,88 @@ public final class GuiChannel: @unchecked Sendable {
     }
 
     public func close() {
-        lock.lock()
-        defer { lock.unlock() }
-        if fd >= 0 {
-            _ = Darwin.close(fd)
-            fd = -1
+        let handle: Int32? = withLock {
+            assertStateLocked()
+            dead = true
+            guard !stallShutdownPending, !shutdownStarted else { return nil }
+            return prepareShutdownLocked()
         }
+        if let handle { shutdownLeasedFD(handle) }
     }
 
-    /// Read one full frame (16-byte header then payload). Throws on EOF/error so
-    /// the reader loop can terminate the presenter cleanly.
     public func readFrame() throws -> GuiInboundFrame {
         let headerBytes = try readExactly(GuiProto.headerSize)
         let parsed = try GuiProto.parseHeader(Data(headerBytes))
-        assert(parsed.len >= 0, "parsed frame length is non-negative")
+        assert(headerBytes.count == GuiProto.headerSize, "GUI frame header must be complete")
+        assert(parsed.type != 0, "GUI frame type zero is reserved")
         let payload = parsed.len > 0 ? Data(try readExactly(parsed.len)) : Data()
         return GuiInboundFrame(type: parsed.type, flags: parsed.flags, payload: payload)
     }
 
-    /// Enqueue a frame for transmission; returns immediately in the common case.
-    /// If the writer backlog is full past the stall timeout, the peer/link is
-    /// wedged: close and signal the stall instead of queueing without bound.
+    /// Never waits for queue capacity; saturation marks the channel dead asynchronously.
     public func send(type: UInt32, flags: UInt32, payload: Data) {
         assert(payload.count <= GuiProto.maxFrame, "send payload must fit the frame bound")
-        let deadline = DispatchTime.now() + .milliseconds(Self.stallTimeoutMs)
-        guard writeSlots.wait(timeout: deadline) == .success else {
-            close()
-            let handler = withLock { onStall }
-            handler?()
+        assert(type != 0, "GUI frame type zero is reserved")
+        guard isOpen() else { return }
+        guard writeSlots.wait(timeout: .now()) == .success else {
+            signalStall()
+            return
+        }
+        guard isOpen() else {
+            writeSlots.signal()
             return
         }
         writeQueue.async { [weak self, writeSlots] in
             defer { writeSlots.signal() }
+            self?.beforeWrite?()
             self?.writeFrame(type: type, flags: flags, payload: payload)
         }
     }
 
-    private func withLock<Value>(_ body: () -> Value) -> Value {
+    private func signalStall() {
+        let notification: StallNotification? = withLock {
+            assertStateLocked()
+            guard !didSignalStall, !dead else { return nil }
+            didSignalStall = true
+            dead = true
+            stallShutdownPending = true
+            assertStateLocked()
+            return StallNotification(handler: onStall)
+        }
+        guard let notification else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            notification.handler?()
+            finishStallShutdown()
+        }
+    }
+
+    private func finishStallShutdown() {
+        let handle: Int32? = withLock {
+            assert(stallShutdownPending, "stall shutdown must be pending")
+            assert(dead, "stall shutdown requires a dead channel")
+            stallShutdownPending = false
+            guard !shutdownStarted else { return nil }
+            return prepareShutdownLocked()
+        }
+        if let handle { shutdownLeasedFD(handle) }
+    }
+
+    private func isOpen() -> Bool {
+        withLock {
+            assertStateLocked()
+            return !dead
+        }
+    }
+
+    private func withLock<Value>(_ body: () throws -> Value) rethrows -> Value {
         lock.lock()
         defer { lock.unlock() }
-        return body()
+        return try body()
     }
 
     private func writeFrame(type: UInt32, flags: UInt32, payload: Data) {
+        assert(type != 0, "GUI frame type zero is reserved")
+        assert(payload.count <= GuiProto.maxFrame, "GUI frame payload must fit the bound")
         guard
             let header = try? GuiProto.header(
                 type: type, flags: flags, payloadLen: payload.count)
@@ -88,6 +139,7 @@ public final class GuiChannel: @unchecked Sendable {
             close()
             return
         }
+        assert(header.count == GuiProto.headerSize, "GUI frame header must be complete")
         do {
             try writeAll([UInt8](header))
             if !payload.isEmpty { try writeAll([UInt8](payload)) }
@@ -96,11 +148,66 @@ public final class GuiChannel: @unchecked Sendable {
         }
     }
 
-    private func currentFD() throws -> Int32 {
-        lock.lock()
-        defer { lock.unlock() }
-        guard fd >= 0 else { throw MSLError.io("gui channel closed") }
+    private func acquireFD() throws -> Int32 {
+        try withLock {
+            assertStateLocked()
+            guard !dead, fd >= 0 else { throw MSLError.io("gui channel closed") }
+            leaseCount += 1
+            assert(leaseCount > 0, "GUI descriptor lease count must be positive")
+            assertStateLocked()
+            return fd
+        }
+    }
+
+    private func releaseFD() {
+        let handle: Int32? = withLock {
+            precondition(leaseCount > 0, "GUI descriptor lease release must be balanced")
+            assert(fd >= 0, "an active GUI descriptor lease owns a descriptor")
+            guard dead, shutdownStarted, leaseCount == 1 else {
+                leaseCount -= 1
+                assertStateLocked()
+                return nil
+            }
+            return fd
+        }
+        guard let handle else { return }
+        let result = Darwin.close(handle)
+        precondition(result == 0, "GUI descriptor close failed with errno \(errno)")
+        withLock {
+            precondition(leaseCount == 1, "GUI close must hold the final descriptor lease")
+            assert(fd == handle, "GUI close must finalize the leased descriptor")
+            leaseCount = 0
+            fd = -1
+            assertStateLocked()
+        }
+    }
+
+    private func prepareShutdownLocked() -> Int32 {
+        precondition(dead && !shutdownStarted, "GUI shutdown preparation requires a dead channel")
+        assert(fd >= 0, "GUI shutdown requires an owned descriptor")
+        shutdownStarted = true
+        leaseCount += 1
+        assertStateLocked()
         return fd
+    }
+
+    private func shutdownLeasedFD(_ handle: Int32) {
+        withLock {
+            assert(handle == fd, "GUI shutdown must use the leased descriptor")
+            assert(dead && shutdownStarted, "GUI shutdown lease requires shutdown state")
+        }
+        let result = Darwin.shutdown(handle, SHUT_RDWR)
+        precondition(
+            result == 0 || errno == ENOTCONN, "GUI descriptor shutdown failed with errno \(errno)")
+        releaseFD()
+    }
+
+    private func assertStateLocked() {
+        assert(leaseCount >= 0, "GUI descriptor lease count cannot be negative")
+        assert(!stallShutdownPending || (dead && didSignalStall), "invalid stall shutdown state")
+        assert(!shutdownStarted || dead, "GUI shutdown requires a dead channel")
+        assert(fd >= 0 || (dead && shutdownStarted && leaseCount == 0), "invalid GUI fd state")
+        assert(leaseCount == 0 || fd >= 0, "GUI descriptor leases require an owned descriptor")
     }
 
     private static func setBlocking(_ fd: Int32) throws {
@@ -111,9 +218,20 @@ public final class GuiChannel: @unchecked Sendable {
         }
     }
 
+    private static func setNoSigPipe(_ fd: Int32) throws {
+        var enabled: Int32 = 1
+        let result = setsockopt(
+            fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        guard result == 0 else {
+            throw MSLError.io("setsockopt SO_NOSIGPIPE failed: \(errno)")
+        }
+    }
+
     private func writeAll(_ bytes: [UInt8]) throws {
         precondition(!bytes.isEmpty, "writeAll needs a non-empty buffer")
-        let handle = try currentFD()
+        let handle = try acquireFD()
+        defer { releaseFD() }
+        assert(bytes.count <= GuiProto.maxFrame, "GUI write must fit the frame bound")
         var sent = 0
         let cap = bytes.count + 64  // bounded: each write advances ≥1 byte
         for _ in 0..<cap {
@@ -138,8 +256,11 @@ public final class GuiChannel: @unchecked Sendable {
         guard count <= GuiProto.maxFrame else {
             throw MSLError.framing("gui read \(count) exceeds \(GuiProto.maxFrame)")
         }
-        let handle = try currentFD()
         if count == 0 { return [] }
+        let handle = try acquireFD()
+        defer { releaseFD() }
+        afterReadLease?()
+        assert(count > 0, "leased GUI reads must request bytes")
         var buffer = [UInt8](repeating: 0, count: count)
         var got = 0
         let cap = count + 64  // bounded: each read advances ≥1 byte
@@ -160,5 +281,9 @@ public final class GuiChannel: @unchecked Sendable {
             }
         }
         throw MSLError.io("gui read did not complete within bound")
+    }
+
+    private struct StallNotification: Sendable {
+        let handler: (@Sendable () -> Void)?
     }
 }
