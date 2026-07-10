@@ -13,6 +13,7 @@ GUEST_BIN    := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-agent
 WAY_BIN      := $(GUEST_DIR)/target/$(GUEST_TARGET)/release/msl-way
 XKB_MUSL_LIB := $(GUEST_DIR)/target/xkb-musl/libxkbcommon.a
 HOST_BIN     := $(HOST_DIR)/.build/release/msl
+PRESENTER_BIN := $(HOST_DIR)/.build/release/msl-presenter
 MENUBAR_BIN  := $(HOST_DIR)/.build/release/msl-menubar
 APP_DIR      := $(BUILD_DIR)/msl.app
 APP_PLIST    := $(HOST_DIR)/Resources/msl-menubar/Info.plist
@@ -152,10 +153,14 @@ app: host sign
 	if [ ! -f "$(HOST_BIN)" ]; then \
 	  echo "app: $(HOST_BIN) missing; run 'make host' first" >&2; exit 1; \
 	fi; \
+	if [ ! -f "$(PRESENTER_BIN)" ]; then \
+	  echo "app: $(PRESENTER_BIN) missing; run 'make host' first" >&2; exit 1; \
+	fi; \
 	rm -rf "$(APP_DIR)"; \
 	mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources"; \
 	cp "$(MENUBAR_BIN)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
 	cp "$(HOST_BIN)" "$(APP_DIR)/Contents/MacOS/msl"; \
+	cp "$(PRESENTER_BIN)" "$(APP_DIR)/Contents/MacOS/msl-presenter"; \
 	cp "$(APP_PLIST)" "$(APP_DIR)/Contents/Info.plist"; \
 	cp "$(APP_ICON)" "$(APP_DIR)/Contents/Resources/msl.icns"; \
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" \
@@ -186,6 +191,8 @@ app: host sign
 	fi; \
 	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
 	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl"; \
+	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
+	  --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl-presenter"; \
 	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \
 	  --entitlements "$(APP_ENTITLEMENTS)" "$(APP_DIR)/Contents/MacOS/msl-menubar"; \
 	codesign --force $(SIGN_OPTIONS) --sign "$(APP_SIGN_IDENTITY)" \

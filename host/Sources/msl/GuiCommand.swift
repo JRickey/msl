@@ -1,8 +1,6 @@
 import ArgumentParser
-import Darwin
 import Foundation
 import MSLCore
-import MSLGui
 
 struct GuiCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -86,28 +84,21 @@ struct GuiLaunchCommand: ParsableCommand {
     @Argument(parsing: .postTerminator, help: "Command after -- (required).")
     var command: [String] = []
 
-    @Option(name: .long, help: "CSV path for the latency ledger.")
-    var csv: String = "./gui.csv"
-
     func run() throws {
-        try GuiLaunchSupport.launch(name: name, command: command, csv: csv)
+        try GuiLaunchSupport.launch(name: name, command: command)
     }
 }
 
 enum GuiLaunchSupport {
-    static func launch(name: String?, command: [String], csv: String = "./gui.csv") throws {
+    /// Ask the daemon to launch the app; the daemon spawns the out-of-process
+    /// presenter itself, so the CLI returns as soon as the app is running.
+    static func launch(name: String?, command: [String]) throws {
         guard !command.isEmpty else {
             throw ValidationError("usage: msl gui launch <distro> -- <command> [args...]")
         }
         let home = MSLHome.resolve()
         let distro = try resolvedDistroName(home: home, name: name)
-        _ = try startRuntime(home: home, name: distro)
         try launchApp(home: home, name: distro, command: command)
-        let fd = try openSurfacePlane(home: home, name: distro)
-        let channel = try GuiChannel(fd: fd)
-        MainActor.assumeIsolated {
-            GuiPresenter(channel: channel, distro: distro, csvPath: csv).run()
-        }
     }
 
     static func resolvedDistroName(home: MSLHome, name: String?) throws -> String {
@@ -170,26 +161,6 @@ enum GuiLaunchSupport {
     private static func capture(home: MSLHome, name: String, script: String) throws -> ExecData {
         return try DaemonClient.capture(
             home: home, name: name, argv: ["/bin/sh", "-lc", script], term: "dumb")
-    }
-
-    /// Mint a single-use attach token for the prepared runtime, then present it to
-    /// claim the raw surface-plane fd. The daemon refuses an untokenized attach.
-    private static func openSurfacePlane(home: MSLHome, name: String) throws -> Int32 {
-        precondition(!name.isEmpty, "GUI distro name must not be empty")
-        try DaemonClient.ensureRunning(home)
-        let control = try DaemonClient.connect(home)
-        defer { control.close() }
-        do {
-            let minted = try control.guiToken(name: name)
-            assert(!minted.token.isEmpty, "daemon must mint a non-empty attach token")
-            return try control.guiAttachRaw(
-                distro: minted.distro, user: minted.user, token: minted.token)
-        } catch {
-            let message = (error as? MSLError)?.description ?? error.localizedDescription
-            FileHandle.standardError.write(
-                Data("msl gui: cannot reach compositor: \(message)\n".utf8))
-            throw ExitCode(1)
-        }
     }
 
     private static func writeError(_ data: ExecData) {

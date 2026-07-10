@@ -11,6 +11,7 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .executable(name: "msl", targets: ["msl"]),
+        .executable(name: "msl-presenter", targets: ["msl-presenter"]),
         .executable(name: "msl-menubar", targets: ["msl-menubar"]),
         .executable(name: "msl-fskit", targets: ["msl-fskit"]),
         .executable(name: "msl-fskit-probe-server", targets: ["msl-fskit-probe-server"]),
@@ -40,10 +41,16 @@ let package = Package(
             name: "msl",
             dependencies: [
                 "MSLCore",
-                "MSLGui",
                 "MSLFSWire",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
+            swiftSettings: swiftSettings
+        ),
+        // The presenter is the only host binary that links AppKit; keeping it a
+        // separate executable is what lets `msl` (CLI + daemon) stay AppKit-free.
+        .executableTarget(
+            name: "msl-presenter",
+            dependencies: ["MSLCore", "MSLGui"],
             swiftSettings: swiftSettings
         ),
         .target(

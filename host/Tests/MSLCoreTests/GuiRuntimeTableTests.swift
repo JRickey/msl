@@ -117,15 +117,20 @@ final class GuiRuntimeTableTests: XCTestCase {
 
     // MARK: - Idle holds
 
-    func testLiveAppHoldsTheVM() throws {
-        var table = try prepared()
-        table.addWindow(key: key)
-        let past = now.addingTimeInterval(3600)
-        XCTAssertEqual(table.holdCount(now: past), 1)
-        XCTAssertFalse(
+    func testLaunchedAppHeldThroughGraceThenReclaimable() throws {
+        var table = try prepared()  // graceUntil = now + 60
+        table.noteLaunchedProcess(key: key)
+        // Held while the reconnect/grace window is open...
+        XCTAssertEqual(table.holdCount(now: now.addingTimeInterval(30)), 1)
+        // ...but a launched app with no presenter cannot pin the VM past grace.
+        // The old monotonic window count held it forever; the hold is now bounded.
+        XCTAssertEqual(table.holdCount(now: now.addingTimeInterval(61)), 0)
+        XCTAssertEqual(table.expired(now: now.addingTimeInterval(61)), [key])
+        XCTAssertTrue(
             IdlePolicy.shouldStop(
-                now: past, lastActivity: now, liveSessions: 0, pendingOps: 0,
-                guiHolds: table.holdCount(now: past), timeoutSeconds: 60))
+                now: now.addingTimeInterval(3600), lastActivity: now, liveSessions: 0,
+                pendingOps: 0, guiHolds: table.holdCount(now: now.addingTimeInterval(3600)),
+                timeoutSeconds: 60))
     }
 
     func testConnectedPresenterHoldsTheVM() throws {
@@ -170,7 +175,7 @@ final class GuiRuntimeTableTests: XCTestCase {
         var table = try prepared()
         try table.mint(key: key, token: token, expires: now.addingTimeInterval(30), now: now)
         try table.consume(key: key, token: token, now: now)
-        table.addWindow(key: key)
+        table.noteLaunchedProcess(key: key)
         XCTAssertTrue(table.remove(key: key))
         XCTAssertEqual(table.count, 0)
         XCTAssertEqual(table.holdCount(now: now), 0)
@@ -201,7 +206,7 @@ final class GuiRuntimeTableTests: XCTestCase {
     func testPresenterFinishedOnUnknownKeyIsANoOp() {
         var table = GuiRuntimeTable()
         table.presenterFinished(key: key, graceUntil: now)
-        table.addWindow(key: key)
+        table.noteLaunchedProcess(key: key)
         XCTAssertEqual(table.count, 0)
     }
 
@@ -211,8 +216,8 @@ final class GuiRuntimeTableTests: XCTestCase {
         var table = try prepared()
         try table.mint(key: key, token: token, expires: now.addingTimeInterval(30), now: now)
         try table.consume(key: key, token: token, now: now)
-        table.addWindow(key: key)
-        table.addWindow(key: key)
+        table.noteLaunchedProcess(key: key)
+        table.noteLaunchedProcess(key: key)
         let statuses = table.statuses()
         XCTAssertEqual(statuses.count, 1)
         XCTAssertEqual(statuses[0].distro, "ubuntu")
