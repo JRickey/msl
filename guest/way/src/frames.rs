@@ -4,6 +4,7 @@
 //! host-testable; the Smithay buffer plumbing that feeds them is guest-only.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use crate::remote::{MAX_COMMIT_RECTS, Rect};
 
@@ -139,6 +140,12 @@ impl Pacing {
     #[must_use]
     pub const fn in_flight(&self) -> bool {
         self.in_flight.is_some()
+    }
+
+    #[must_use]
+    pub fn remaining_timeout(&self, now_ns: u64) -> Option<Duration> {
+        self.in_flight
+            .map(|_| Duration::from_nanos(self.deadline_ns.saturating_sub(now_ns)))
     }
 
     /// Record that present `seq` was just emitted; arm the starvation deadline.
@@ -1174,6 +1181,41 @@ mod tests {
         p.present_now(5, 0);
         assert_eq!(p.on_ack(4), Release::None);
         assert!(p.in_flight(), "stale ack must not release");
+    }
+
+    #[test]
+    fn pacing_timeout_is_none_without_in_flight_present() {
+        let p = Pacing::new(10);
+        assert_eq!(p.remaining_timeout(0), None);
+        assert!(p.wants_emit());
+    }
+
+    #[test]
+    fn pacing_timeout_reports_time_before_deadline() {
+        let mut p = Pacing::new(10);
+        p.present_now(1, 20);
+        assert_eq!(p.remaining_timeout(26), Some(Duration::from_nanos(4)));
+        assert!(p.in_flight());
+    }
+
+    #[test]
+    fn pacing_timeout_is_zero_at_deadline() {
+        let mut p = Pacing::new(10);
+        p.present_now(1, 20);
+        assert_eq!(p.remaining_timeout(30), Some(Duration::ZERO));
+        assert!(p.in_flight());
+    }
+
+    #[test]
+    fn pacing_timeout_uses_saturated_deadline() {
+        let mut p = Pacing::new(10);
+        p.present_now(1, u64::MAX - 5);
+        assert_eq!(
+            p.remaining_timeout(u64::MAX - 2),
+            Some(Duration::from_nanos(2))
+        );
+        assert_eq!(p.remaining_timeout(u64::MAX), Some(Duration::ZERO));
+        assert!(p.in_flight());
     }
 
     #[test]

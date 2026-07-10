@@ -24,6 +24,7 @@ mod linux {
     use smithay::input::{Seat, SeatState};
     use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
     use smithay::reexports::calloop::EventLoop;
+    use smithay::reexports::calloop::ping::{Ping, make_ping};
     use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
     use smithay::reexports::wayland_server::{Display, DisplayHandle};
     use smithay::utils::Transform;
@@ -44,7 +45,7 @@ mod linux {
     use msl_way::{frames, input};
 
     const DEFAULT_VSOCK_PORT: u32 = 5020;
-    const DISPATCH_INTERVAL: Duration = Duration::from_millis(8);
+    const DISCONNECTED_ACCEPT_INTERVAL: Duration = Duration::from_millis(100);
     const HOST_QUEUE_CAP: usize = 1024;
     const DRAIN_BUDGET: usize = 256;
 
@@ -175,6 +176,7 @@ mod linux {
             fractional,
             windows: HashMap::new(),
             surface_win: HashMap::new(),
+            x11_windows: HashMap::new(),
             focus: None,
             next_win: 1,
             seq: 0,
@@ -195,7 +197,7 @@ mod linux {
         })
     }
 
-    fn handshake(mut stream: VsockStream, state: &mut State) -> io::Result<HostConn> {
+    fn handshake(mut stream: VsockStream, state: &mut State, ping: Ping) -> io::Result<HostConn> {
         let distro = std::env::var("MSL_DISTRO").unwrap_or_else(|_| "linux".to_string());
         let hello = Hello {
             version: PROTOCOL_VERSION,
@@ -221,22 +223,24 @@ mod linux {
         state.sync_output();
         let reader = stream.try_clone()?;
         let (tx, rx) = mpsc::sync_channel(HOST_QUEUE_CAP);
-        thread::spawn(move || reader_loop(reader, &tx));
+        thread::spawn(move || reader_loop(reader, &tx, &ping));
         Ok(HostConn { write: stream, rx })
     }
 
     /// Read host frames until the peer closes or the bounded queue backs up; a
     /// full queue means the host is misbehaving, so we drop the connection.
-    fn reader_loop(mut stream: VsockStream, tx: &SyncSender<HostMsg>) {
+    fn reader_loop(mut stream: VsockStream, tx: &SyncSender<HostMsg>, ping: &Ping) {
+        // Host input has no polling deadline; enqueue and terminal read must wake calloop.
         while let Ok(frame) = read_frame(&mut stream) {
             let Ok(msg) = msl_way::remote::parse_host(&frame) else {
                 continue;
             };
             match tx.try_send(msg) {
-                Ok(()) => {}
+                Ok(()) => ping.ping(),
                 Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => break,
             }
         }
+        ping.ping();
     }
 
     fn apply_configure(state: &mut State, cfg: &Configure) {
@@ -421,15 +425,16 @@ Usage: msl-way [OPTIONS]
         let mut state = build_state(&display, &args.layout)?;
         install_wayland_socket(&event_loop, args)?;
         install_shutdown_signals(&event_loop)?;
+        let host_ping = install_host_ping(&event_loop)?;
         spawn_xwayland(&event_loop.handle(), &display)?;
         let listener = bind_vsock(args.vsock_port)?;
         let mut host: Option<HostConn> = None;
-        let mut interval = DISPATCH_INTERVAL;
+        let mut interval = Some(DISCONNECTED_ACCEPT_INTERVAL);
         eprintln!("msl-way: listening on vsock port {}", args.vsock_port);
 
         loop {
             event_loop
-                .dispatch(Some(interval), &mut state)
+                .dispatch(interval, &mut state)
                 .map_err(|e| io::Error::other(e.to_string()))?;
             // Returning here drops the event loop, whose XWayland source unlinks
             // its `/tmp/.X11-unix` socket via `X11Lock::Drop` — the only path
@@ -437,12 +442,12 @@ Usage: msl-way [OPTIONS]
             if state.shutdown {
                 return Ok(());
             }
-            interval = DISPATCH_INTERVAL;
+            let mut immediate = false;
             display.dispatch_clients(&mut state)?;
             if host.is_none()
                 && let Some(stream) = accept_host(&listener)?
             {
-                match handshake(stream, &mut state) {
+                match handshake(stream, &mut state, host_ping.clone()) {
                     Ok(conn) => {
                         host = Some(conn);
                         frames::replay_all(&mut state);
@@ -452,7 +457,7 @@ Usage: msl-way [OPTIONS]
             }
             match host.as_ref().map(|conn| drain_host(&mut state, conn)) {
                 Some(Drain::Closed) => host = None,
-                Some(Drain::More) => interval = Duration::ZERO,
+                Some(Drain::More) => immediate = true,
                 _ => {}
             }
             let now = state.now_ns();
@@ -466,6 +471,32 @@ Usage: msl-way [OPTIONS]
                 host = None;
             }
             display.flush_clients()?;
+            interval = next_dispatch_timeout(&state, host.is_some(), immediate);
+        }
+    }
+
+    fn install_host_ping(event_loop: &EventLoop<State>) -> io::Result<Ping> {
+        let (ping, source) = make_ping()?;
+        event_loop
+            .handle()
+            .insert_source(source, |(), &mut (), _state: &mut State| {})
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(ping)
+    }
+
+    fn next_dispatch_timeout(state: &State, connected: bool, immediate: bool) -> Option<Duration> {
+        if immediate {
+            return Some(Duration::ZERO);
+        }
+        let pacing = state.next_pacing_timeout(state.now_ns());
+        if connected {
+            pacing
+        } else {
+            Some(
+                pacing
+                    .unwrap_or(DISCONNECTED_ACCEPT_INTERVAL)
+                    .min(DISCONNECTED_ACCEPT_INTERVAL),
+            )
         }
     }
 

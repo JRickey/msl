@@ -4,7 +4,7 @@
 //! into surface-protocol messages queued on [`State::out`] for the event loop.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay::input::keyboard::KeyboardHandle;
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
@@ -36,6 +36,7 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
+use smithay::xwayland::xwm::X11Window;
 use smithay::xwayland::{X11Surface, X11Wm};
 
 use crate::frames;
@@ -205,6 +206,7 @@ pub struct State {
     pub fractional: FractionalScaleManagerState,
     pub windows: HashMap<u32, Win>,
     pub surface_win: HashMap<WlSurface, u32>,
+    pub x11_windows: HashMap<X11Window, u32>,
     pub focus: Option<u32>,
     pub next_win: u32,
     pub seq: u32,
@@ -262,6 +264,14 @@ impl State {
     #[must_use]
     pub fn win_id_of(&self, surface: &WlSurface) -> Option<u32> {
         self.surface_win.get(surface).copied()
+    }
+
+    #[must_use]
+    pub fn next_pacing_timeout(&self, now_ns: u64) -> Option<Duration> {
+        self.windows
+            .values()
+            .filter_map(|win| win.pacing.remaining_timeout(now_ns))
+            .min()
     }
 
     /// Push the current scale/refresh onto the `wl_output` global; Smithay emits

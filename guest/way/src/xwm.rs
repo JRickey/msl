@@ -32,15 +32,25 @@ impl XWaylandShellHandler for State {
     fn surface_associated(&mut self, _xwm: XwmId, wl_surface: WlSurface, surface: X11Surface) {
         debug_assert!(wl_surface.is_alive(), "associated a dead wl_surface");
         debug_assert!(surface.alive(), "associated a dead x11 window");
-        if self.win_id_of(&wl_surface).is_some() {
+        if let Some(existing_win) = self.win_id_of(&wl_surface) {
+            let xid = surface.window_id();
+            let registered_xid = self
+                .windows
+                .get(&existing_win)
+                .and_then(Win::x11)
+                .map(X11Surface::window_id);
+            debug_assert_eq!(registered_xid, Some(xid), "x11 surface re-associated");
+            debug_assert_eq!(
+                self.x11_windows.get(&xid).copied(),
+                Some(existing_win),
+                "x11 reverse map missing existing association"
+            );
             return;
         }
         let win = self.next_win;
         self.next_win = self.next_win.wrapping_add(1);
         debug_assert!(win != 0 || self.next_win != 0, "window id space exhausted");
-        self.surface_win.insert(wl_surface.clone(), win);
-        self.windows.insert(win, Win::new_x11(surface, wl_surface));
-        debug_assert!(self.windows.contains_key(&win), "x11 window insert failed");
+        register_x11_window(self, win, wl_surface, surface);
     }
 }
 
@@ -189,14 +199,22 @@ fn apply_configure_geometry(
 /// Drop the host window backing an X11 window and tell the presenter, keyed by
 /// the X11 window id so an unmap and a later destroy are idempotent.
 fn forget_x11_window(state: &mut State, xid: X11Window) {
-    let Some(win) = host_win_of_x11(state, xid) else {
+    let Some(win) = state.x11_windows.remove(&xid) else {
         return;
     };
     debug_assert!(win != 0, "reserved window id 0 in registry");
-    let surface = state.windows.get(&win).map(|w| w.surface.clone());
-    let _ = state.windows.remove(&win);
+    let entry = state.windows.remove(&win);
+    debug_assert!(
+        entry
+            .as_ref()
+            .and_then(Win::x11)
+            .is_some_and(|x11| x11.window_id() == xid),
+        "x11 reverse map diverged from window registry"
+    );
+    let surface = entry.map(|w| w.surface);
     if let Some(surface) = surface {
-        let _ = state.surface_win.remove(&surface);
+        let removed = state.surface_win.remove(&surface);
+        debug_assert_eq!(removed, Some(win), "x11 surface registry diverged");
     }
     if state.focus == Some(win) {
         state.focus = None;
@@ -204,6 +222,23 @@ fn forget_x11_window(state: &mut State, xid: X11Window) {
     let payload = serde_json::to_vec(&WinRef { win }).unwrap_or_default();
     state.enqueue(T_WIN_DESTROY, payload);
     debug_assert!(!state.windows.contains_key(&win), "x11 window not removed");
+}
+
+fn register_x11_window(state: &mut State, win: u32, surface: WlSurface, x11: X11Surface) {
+    let xid = x11.window_id();
+    let vacant = !state.windows.contains_key(&win)
+        && !state.surface_win.contains_key(&surface)
+        && !state.x11_windows.contains_key(&xid);
+    debug_assert!(vacant, "duplicate x11 window registration");
+    if !vacant {
+        return;
+    }
+    let old_surface = state.surface_win.insert(surface.clone(), win);
+    let old_window = state.windows.insert(win, Win::new_x11(x11, surface));
+    let old_xid = state.x11_windows.insert(xid, win);
+    debug_assert!(old_surface.is_none(), "x11 surface replaced an existing id");
+    debug_assert!(old_window.is_none(), "x11 window replaced an existing id");
+    debug_assert!(old_xid.is_none(), "x11 id replaced an existing window");
 }
 
 /// Announce a mapped X11 window to the presenter.
@@ -320,20 +355,9 @@ fn x11_popup_target(state: &State, x11: &X11Surface) -> Option<(u32, (i32, i32))
     Some((parent_win, offset))
 }
 
-/// The host win id backing an X11 window id, if one is registered.
 fn host_win_of_x11(state: &State, xid: X11Window) -> Option<u32> {
     debug_assert!(xid != 0, "lookup of reserved x11 window id 0");
-    debug_assert!(
-        u16::try_from(state.windows.len()).is_ok(),
-        "window table unbounded"
-    );
-    // bounded: at most the live-window count, itself capped by the agent
-    for (win, w) in &state.windows {
-        if w.x11().is_some_and(|s| s.window_id() == xid) {
-            return Some(*win);
-        }
-    }
-    None
+    state.x11_windows.get(&xid).copied()
 }
 
 smithay::delegate_xwayland_shell!(State);
