@@ -56,7 +56,8 @@ Only the shared-library source under src/ and xkbcommon/ is compiled into
 msl-way; msl does not ship the test data under test/data.
 
 ================================================================================
-Rust crates statically linked into msl-agent, msl-shim, and msl-way
+Rust crates statically linked into the shipped guest binaries — msl-agent,
+mac (msl-shim), msl-way, msl-fsd, msl-session, msl-ssh-agent, msl-secretsd
 (guest/ cargo workspace) — grouped by license
 ================================================================================
 
@@ -68,31 +69,50 @@ commands, and provenance.
 
 --- MIT License ---
 
-appendlist, block-buffer (RustCrypto), calloop, cpufeatures (RustCrypto),
-crypto-common (RustCrypto), digest (RustCrypto), downcast-rs, drm-fourcc,
-generic-array, memoffset, nix, quick-xml, slab, smithay, tracing,
-tracing-attributes, tracing-core, wayland-backend, wayland-protocols,
-wayland-protocols-misc, wayland-protocols-wlr, wayland-scanner,
-wayland-server, wayland-sys, xkbcommon (Rust bindings crate — distinct from
-the C library above)
+appendlist, calloop, downcast-rs, drm-fourcc, endi, generic-array, memoffset,
+nix, quick-xml, slab, smithay, tracing, tracing-attributes, tracing-core,
+wayland-backend, wayland-protocols, wayland-protocols-misc,
+wayland-protocols-wlr, wayland-scanner, wayland-server, wayland-sys, winnow,
+xkbcommon (Rust bindings crate — distinct from the C library above), zbus,
+zbus_macros, zbus_names, zmij, zvariant, zvariant_derive, zvariant_utils
 
 --- MIT OR Apache-2.0 (or equivalent dual/multi-license; used here under MIT) ---
 
-bitflags, cfg-if, cursor-icon, errno, getrandom, hashbrown, itoa, libc,
-linux-raw-sys, log, memmap2, num-traits, once_cell, pin-project-lite,
-polling, ppv-lite86, proc-macro2, quote, rand, rand_chacha, rand_core,
-rustix, serde, serde_core, serde_derive, serde_json, sha2, smallvec, syn,
-tempfile, thiserror, thiserror-impl, typenum, unicode-ident, xkeysym, zmij
+async-broadcast, async-recursion, async-trait, base64, bitflags, block-buffer
+(RustCrypto), cfg-if, cpufeatures (RustCrypto), crossbeam-utils, crypto-common
+(RustCrypto), digest (RustCrypto), enumflags2, enumflags2_derive, errno,
+futures-core, futures-io, getrandom, hashbrown, hex, itoa, libc, log, memmap2,
+num-traits, once_cell, ordered-stream, piper, ppv-lite86, proc-macro-crate,
+proc-macro2, profiling, profiling-procmacros, quote, rand, rand_chacha,
+rand_core, scopeguard, serde, serde_core, serde_derive, serde_json,
+serde_repr, sha2, signal-hook-registry, smallvec, syn, tempfile, thiserror,
+thiserror-impl, toml_datetime, toml_edit, toml_parser, typenum, x11rb,
+x11rb-protocol
+
+--- Apache-2.0 OR MIT ---
+
+async-channel, async-executor, async-io, async-lock, async-process,
+async-signal, async-task, atomic-waker, blocking, concurrent-queue,
+equivalent, event-listener, event-listener-strategy, fastrand, futures-lite,
+indexmap, parking, pin-project-lite, polling, uuid
 
 --- Apache-2.0 only ---
 
-approx, cgmath, vsock
+approx, cgmath, gethostname, vsock
 
---- Other permissive (Unlicense/MIT, BSD-2-Clause/Apache-2.0/MIT) ---
+--- Conjunctive terms (the second license is required, not an alternative) ---
 
-atomic_float (Apache-2.0/MIT/Unlicense), equivalent (Apache-2.0/MIT),
-fastrand (Apache-2.0/MIT), indexmap (Apache-2.0/MIT), memchr
-(Unlicense/MIT), profiling, profiling-procmacros, zerocopy
+encoding_rs — (Apache-2.0 OR MIT) AND BSD-3-Clause. The BSD-3-Clause text
+applies to the bundled Unicode mapping tables and is reproduced in
+THIRD-PARTY-LICENSES.
+
+unicode-ident — (MIT OR Apache-2.0) AND Unicode-3.0.
+
+--- Other permissive ---
+
+atomic_float (Apache-2.0/MIT/Unlicense), cursor-icon (MIT/Apache-2.0/Zlib),
+linux-raw-sys and rustix (Apache-2.0 WITH LLVM-exception/Apache-2.0/MIT),
+memchr (Unlicense/MIT), xkeysym (MIT/Apache-2.0/Zlib), zerocopy
 (BSD-2-Clause/Apache-2.0/MIT)
 
 Copyright in each crate belongs to its respective authors; per crates.io
