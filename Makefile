@@ -370,8 +370,10 @@ release-pkg: release-app skill-archive
 	  --scripts packaging/scripts \
 	  --identifier dev.msl.pkg --version "$(VERSION)" --install-location / \
 	  "$(PKG_COMPONENT)"; \
-	productbuild --package "$(PKG_COMPONENT)" --sign "$(RELEASE_INSTALLER_SIGN_IDENTITY)" \
-	  "$(PKG_PRODUCT)"; \
+	productbuild --distribution packaging/distribution.xml \
+	  --package-path "$(BUILD_DIR)" \
+	  --resources packaging/resources \
+	  --sign "$(RELEASE_INSTALLER_SIGN_IDENTITY)" "$(PKG_PRODUCT)"; \
 	pkgutil --check-signature "$(PKG_PRODUCT)"; \
 	shasum -a 256 "$(PKG_PRODUCT)" >"$(PKG_PRODUCT).sha256"; \
 	echo "release-pkg: wrote $(PKG_PRODUCT)"

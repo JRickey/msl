@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+    <title>msl</title>
+    <welcome file="welcome.html"/>
+    <readme file="readme.html"/>
+    <license file="LICENSE.txt"/>
+    <conclusion file="conclusion.html"/>
+    <options customize="never" require-scripts="true" hostArchitectures="arm64"/>
+    <pkg-ref id="dev.msl.pkg"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="dev.msl.pkg"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="dev.msl.pkg" visible="false">
+        <pkg-ref id="dev.msl.pkg"/>
+    </choice>
+    <pkg-ref id="dev.msl.pkg" version="0" onConclusion="none">msl-component.pkg</pkg-ref>
+</installer-gui-script>
