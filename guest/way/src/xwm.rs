@@ -50,6 +50,10 @@ impl XWaylandShellHandler for State {
         let win = self.next_win;
         self.next_win = self.next_win.wrapping_add(1);
         debug_assert!(win != 0 || self.next_win != 0, "window id space exhausted");
+        eprintln!(
+            "msl-way: x11 associated xid={:#x} win={win}",
+            surface.window_id()
+        );
         register_x11_window(self, win, wl_surface, surface);
     }
 }

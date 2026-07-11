@@ -810,6 +810,7 @@ mod linux {
     ) -> bool {
         debug_assert!(win != 0, "window id 0 is reserved");
         debug_assert!(fb.w > 0 && fb.h > 0, "emitting a zero-sized frame");
+        let first_frame = !state.windows.get(&win).is_some_and(|x| x.announced);
         announce_and_map(state, win, surface, fb.w, fb.h);
         let rects = commit_rects(dmg, fb.w, fb.h);
         // A tightly-packed full-frame commit already IS the payload; repacking
@@ -842,6 +843,12 @@ mod linux {
             return false;
         };
         state.enqueue(T_COMMIT, payload);
+        if first_frame {
+            eprintln!(
+                "msl-way: first frame queued win={win} seq={seq} {}x{}",
+                fb.w, fb.h
+            );
+        }
         state.ledger.record(win, seq, t_commit, t_send);
         if let Some(x) = state.windows.get_mut(&win) {
             x.prev_buffer_size = (fb.w, fb.h);

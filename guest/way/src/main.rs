@@ -45,6 +45,7 @@ mod linux {
     use msl_way::{frames, input};
 
     const DEFAULT_VSOCK_PORT: u32 = 5020;
+    const CONNECTED_DISPATCH_INTERVAL: Duration = Duration::from_millis(8);
     const DISCONNECTED_ACCEPT_INTERVAL: Duration = Duration::from_millis(100);
     const HOST_QUEUE_CAP: usize = 1024;
     const DRAIN_BUDGET: usize = 256;
@@ -471,7 +472,7 @@ Usage: msl-way [OPTIONS]
                 host = None;
             }
             display.flush_clients()?;
-            interval = next_dispatch_timeout(&state, host.is_some(), immediate);
+            interval = Some(next_dispatch_timeout(&state, host.is_some(), immediate));
         }
     }
 
@@ -484,20 +485,17 @@ Usage: msl-way [OPTIONS]
         Ok(ping)
     }
 
-    fn next_dispatch_timeout(state: &State, connected: bool, immediate: bool) -> Option<Duration> {
+    fn next_dispatch_timeout(state: &State, connected: bool, immediate: bool) -> Duration {
         if immediate {
-            return Some(Duration::ZERO);
+            return Duration::ZERO;
         }
         let pacing = state.next_pacing_timeout(state.now_ns());
-        if connected {
-            pacing
+        let deadline = if connected {
+            CONNECTED_DISPATCH_INTERVAL
         } else {
-            Some(
-                pacing
-                    .unwrap_or(DISCONNECTED_ACCEPT_INTERVAL)
-                    .min(DISCONNECTED_ACCEPT_INTERVAL),
-            )
-        }
+            DISCONNECTED_ACCEPT_INTERVAL
+        };
+        pacing.unwrap_or(deadline).min(deadline)
     }
 
     /// Turn SIGTERM/SIGINT into a flagged clean exit. calloop's signalfd source
