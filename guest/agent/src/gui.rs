@@ -18,7 +18,9 @@ pub const MAX_RUNTIMES: usize = 8;
 pub const MAX_WINDOWS: u32 = 64;
 
 const WAY_BIN: &str = "/run/msl/tools/msl-way";
-const WAY_PATTERN: &str = "/run/msl/tools/msl-way.*--wayland-socket msl-way-0";
+// Match the compositor by exact process name, not a cmdline regex: `pgrep -f`
+// would also match the shell running this script (its text names msl-way).
+const WAY_COMM: &str = "msl-way";
 const RUNTIME_SUBDIR: &str = "msl-gui";
 const LOG_NAME: &str = "msl-way.log";
 const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -555,6 +557,9 @@ pub fn gui_env(runtime_dir: &str) -> HashMap<String, String> {
     assert!(!runtime_dir.contains('\0'), "XDG_RUNTIME_DIR must be clean");
     HashMap::from([
         ("WAYLAND_DISPLAY".to_string(), WAYLAND_DISPLAY.to_string()),
+        // The per-distro compositor hosts a single XWayland on :0; X11-only apps
+        // need DISPLAY to reach it (toolkit apps prefer Wayland via the backends).
+        ("DISPLAY".to_string(), ":0".to_string()),
         ("XDG_RUNTIME_DIR".to_string(), runtime_dir.to_string()),
         ("GDK_BACKEND".to_string(), "wayland,x11".to_string()),
         ("QT_QPA_PLATFORM".to_string(), "wayland;xcb".to_string()),
@@ -674,10 +679,9 @@ fn status_script(ctx: &Context) -> String {
     let root = &ctx.root;
     format!(
         r#"
-pattern='{WAY_PATTERN}'
-if pgrep -u {uid} -f "$pattern" >/dev/null 2>&1; then
+if pgrep -u {uid} -x {WAY_COMM} >/dev/null 2>&1; then
   echo "state=running"
-  pgrep -u {uid} -f "$pattern" | head -n 1 | sed 's/^/pid=/'
+  pgrep -u {uid} -x {WAY_COMM} | head -n 1 | sed 's/^/pid=/'
 else
   echo "state=stopped"
 fi
@@ -719,11 +723,10 @@ if [ ! -d /usr/share/X11/xkb ]; then
   echo "missing=xkb-data" >&2
   exit 45
 fi
-pattern='{WAY_PATTERN}'
 printf 'runtime_dir=%s\n' '{xdg}'
-if pgrep -u {uid} -f "$pattern" >/dev/null 2>&1; then
+if pgrep -u {uid} -x {WAY_COMM} >/dev/null 2>&1; then
   echo "state=running"
-  pgrep -u {uid} -f "$pattern" | head -n 1 | sed 's/^/pid=/'
+  pgrep -u {uid} -x {WAY_COMM} | head -n 1 | sed 's/^/pid=/'
   echo "socket=present"
   exit 0
 fi
@@ -732,7 +735,7 @@ XDG_RUNTIME_DIR='{xdg}' nohup {WAY_BIN} --wayland-socket {WAYLAND_DISPLAY} \
 for i in $(seq 1 40); do
   if [ -S '{xdg}/{WAYLAND_DISPLAY}' ]; then
     echo "state=running"
-    pgrep -u {uid} -f "$pattern" | head -n 1 | sed 's/^/pid=/'
+    pgrep -u {uid} -x {WAY_COMM} | head -n 1 | sed 's/^/pid=/'
     echo "socket=present"
     exit 0
   fi
@@ -751,9 +754,8 @@ fn stop_script(ctx: &Context) -> String {
     let xdg = &ctx.xdg;
     format!(
         r#"
-pattern='{WAY_PATTERN}'
-if pgrep -u {uid} -f "$pattern" >/dev/null 2>&1; then
-  pkill -u {uid} -f "$pattern" || true
+if pgrep -u {uid} -x {WAY_COMM} >/dev/null 2>&1; then
+  pkill -u {uid} -x {WAY_COMM} || true
   echo "state=stopping"
 else
   echo "state=stopped"
@@ -797,10 +799,11 @@ mod tests {
     }
 
     #[test]
-    fn gui_env_carries_all_eight_session_variables() {
+    fn gui_env_carries_the_session_variables() {
         let env = gui_env("/run/user/1000");
         let expected = [
             ("WAYLAND_DISPLAY", "msl-way-0"),
+            ("DISPLAY", ":0"),
             ("XDG_RUNTIME_DIR", "/run/user/1000"),
             ("GDK_BACKEND", "wayland,x11"),
             ("QT_QPA_PLATFORM", "wayland;xcb"),
@@ -813,7 +816,6 @@ mod tests {
         for (key, value) in expected {
             assert_eq!(env.get(key).map(String::as_str), Some(value), "{key}");
         }
-        assert!(!env.contains_key("DISPLAY"), "XWayland owns DISPLAY later");
     }
 
     #[test]
