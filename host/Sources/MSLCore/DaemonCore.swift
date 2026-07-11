@@ -39,6 +39,11 @@ public final class DaemonCore: @unchecked Sendable {
     let pollQueue = DispatchQueue(label: "msl.daemon.poll", qos: .utility)
     private var idleTimer: DispatchSourceTimer?
 
+    /// Self-exit guard for a bundle-launched daemon; disarmed for dev builds.
+    /// Only touched from the serial idle timer, so its miss count needs no lock.
+    let bundleWatchdog = BundleWatchdog(bundlePath: BundleWatchdog.resolveBundlePath())
+    var bundleMissCount = 0
+
     let mountTable = FSMountTable()
     var mountListener: FSMountListener?
     let mountInitLock = NSLock()

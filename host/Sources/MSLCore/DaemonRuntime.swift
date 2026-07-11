@@ -21,10 +21,10 @@ public enum DaemonRuntime: Sendable {
         writePID(pidPath)
         if !spawned { log("listening on \(socketPath)") }
         let core = DaemonCore(config: config)
-        core.startIdleTimer()
-        core.reconcileMounts()
         let cleanup: @Sendable () -> Void = { teardown(core, lock, socketPath, pidPath) }
         installSignals(cleanup)
+        core.startIdleTimer()
+        core.reconcileMounts()
         let server = DaemonServer(
             core: core, listener: listener,
             onShutdown: {

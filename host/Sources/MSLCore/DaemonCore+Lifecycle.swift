@@ -214,6 +214,7 @@ extension DaemonCore {
     /// Coarse tick: reap sessions no client attached to within the deadline and
     /// GUI runtimes whose reconnect window closed, then stop the VM if it is idle.
     func idleTick() {
+        checkBundleWatchdog()
         let now = Date()
         let expired = withLock { sessions.expiredPending(now: now, deadline: attachDeadline) }
         for sessionID in expired {  // bounded: session table (<=64)
