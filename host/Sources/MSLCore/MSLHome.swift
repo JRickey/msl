@@ -40,6 +40,7 @@ public struct MSLHome: Sendable {
     public var authDirectory: URL { root.appendingPathComponent("auth") }
     public var authPolicyURL: URL { authDirectory.appendingPathComponent("policy.json") }
     public var secretsMetadataURL: URL { authDirectory.appendingPathComponent("secrets.json") }
+    public var hostSettingsURL: URL { root.appendingPathComponent("config.json") }
     public var registryURL: URL { root.appendingPathComponent("registry.json") }
     public var launchersURL: URL { root.appendingPathComponent("launchers.json") }
 

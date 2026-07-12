@@ -86,5 +86,10 @@ let package = Package(
             dependencies: ["MSLMenuBarCore"],
             swiftSettings: swiftSettings
         ),
+        .testTarget(
+            name: "MSLCommandTests",
+            dependencies: ["msl"],
+            swiftSettings: swiftSettings
+        ),
     ]
 )
