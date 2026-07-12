@@ -197,8 +197,8 @@ extension DaemonCore {
         saved.pollTimer?.cancel()
         saved.interop?.stop()
         saved.auth?.stop()
-        saved.host?.removeInteropListener(port: Proto.interopPort)
-        saved.host?.removeInteropListener(port: Proto.authPort)
+        saved.host?.removeReverseListener(port: Proto.interopPort)
+        saved.host?.removeReverseListener(port: Proto.authPort)
         saved.forwarder?.stop()
         saved.wake?.stop()
     }

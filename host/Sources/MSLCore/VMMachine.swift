@@ -326,3 +326,22 @@ public final class VMHost: @unchecked Sendable {
         return min(max(bytes, low), high)
     }
 }
+
+/// The VZ implementation of `VMBackend`. Most requirements are already satisfied
+/// by `VMHost`'s existing methods; `setReverseListener`/`removeReverseListener`
+/// live in `VZReverseListenerAdapter.swift`'s extension (same module, so they
+/// still satisfy the protocol) to keep the VZ socket types confined there. Only
+/// the capability surface and the balloon rename are new here.
+extension VMHost: VMBackend {
+    /// VZ attaches the Rosetta share (host install checked separately), has no
+    /// GPU device today, and reclaims memory through the traditional balloon.
+    public var capabilities: VMBackendCapabilities {
+        VMBackendCapabilities(kind: .vz, rosetta: true, gpu: false, balloon: .traditional)
+    }
+
+    /// Map the generic memory target onto the VZ traditional balloon.
+    @discardableResult
+    public func setMemoryTarget(mib: UInt64) -> Bool {
+        setBalloonTarget(mib: mib)
+    }
+}

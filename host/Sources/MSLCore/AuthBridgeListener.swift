@@ -1,11 +1,10 @@
 import Darwin
 import Foundation
-import Virtualization
 
 /// Reverse-vsock auth bridge. Guest adapters hold one long-lived connection
 /// each, so the daemon activity hold is taken per request, not per connection:
 /// an attached-but-idle adapter must never keep the VM out of idle reclaim.
-final class AuthBridgeListener: NSObject, VZVirtioSocketListenerDelegate, @unchecked Sendable {
+final class AuthBridgeListener: ReverseVsockHandler, @unchecked Sendable {
     private let sessions: AuthSessionTable
     private let sshProxy: HostSSHAgentProxy
     private let secrets: KeychainSecretStore
@@ -47,33 +46,28 @@ final class AuthBridgeListener: NSObject, VZVirtioSocketListenerDelegate, @unche
         self.isDistroRunning = isDistroRunning
         self.idleTimeout = idleTimeout
         self.requestTimeout = requestTimeout
-        super.init()
     }
 
     func stop() {
         withLock { accepting = false }
     }
 
-    func listener(
-        _ listener: VZVirtioSocketListener,
-        shouldAcceptNewConnection connection: VZVirtioSocketConnection,
-        from socketDevice: VZVirtioSocketDevice
-    ) -> Bool {
-        let raw = Darwin.dup(connection.fileDescriptor)
-        connection.close()
-        guard raw >= 0 else {
-            logger("auth: dup failed errno=\(errno)")
-            return false
-        }
+    /// VM-queue callback: must return fast. The adapter already dup'd the fd;
+    /// admit and hand off to a detached serve thread.
+    func handleReverseConnection(fd: Int32, port: UInt32) -> Bool {
         guard admit() else {
-            _ = Darwin.close(raw)
+            _ = Darwin.close(fd)
             return false
         }
         Thread.detachNewThread { [self] in
-            serve(fd: raw)
+            serve(fd: fd)
             withLock { live = max(0, live - 1) }
         }
         return true
+    }
+
+    func handleReverseAcceptFailure(errno code: Int32, port: UInt32) {
+        logger("auth: dup failed errno=\(code)")
     }
 
     func admit() -> Bool {
@@ -318,7 +312,7 @@ extension DaemonCore {
             beginActivity: { [weak self] in self?.markAuthActivity(begin: true) },
             endActivity: { [weak self] in self?.markAuthActivity(begin: false) },
             isDistroRunning: { [weak self] name in self?.isDistroUp(name) ?? false })
-        guard host.setInteropListener(listener, port: Proto.authPort) else {
+        guard host.setReverseListener(listener, port: Proto.authPort) else {
             log("warning: auth listener install failed")
             return
         }

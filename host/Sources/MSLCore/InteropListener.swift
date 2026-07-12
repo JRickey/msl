@@ -1,11 +1,10 @@
 import Darwin
 import Foundation
-import Virtualization
 
 /// Accepts guest-initiated interop connections on the VM queue and hands each to
 /// a detached `InteropSession`. `@unchecked Sendable`: `liveSessions`/`accepting`
 /// are guarded by `lock`; nothing else shared is mutated after init.
-final class InteropListener: NSObject, VZVirtioSocketListenerDelegate, @unchecked Sendable {
+final class InteropListener: ReverseVsockHandler, @unchecked Sendable {
     private let spawner: @Sendable (MacExecHello) throws -> MacProcess
     private let logger: @Sendable (String) -> Void
     private let beginActivity: @Sendable () -> Void
@@ -26,7 +25,6 @@ final class InteropListener: NSObject, VZVirtioSocketListenerDelegate, @unchecke
         self.logger = logger
         self.beginActivity = beginActivity
         self.endActivity = endActivity
-        super.init()
     }
 
     /// Stop admitting new connections; in-flight sessions run to completion.
@@ -34,26 +32,20 @@ final class InteropListener: NSObject, VZVirtioSocketListenerDelegate, @unchecke
         withLock { accepting = false }
     }
 
-    /// VM-queue callback: must return fast. Dup the fd (independent of the VZ
-    /// connection's lifetime), decide admission, hand off to a session thread.
-    func listener(
-        _ listener: VZVirtioSocketListener,
-        shouldAcceptNewConnection connection: VZVirtioSocketConnection,
-        from socketDevice: VZVirtioSocketDevice
-    ) -> Bool {
-        let raw = Darwin.dup(connection.fileDescriptor)
-        connection.close()
-        guard raw >= 0 else {
-            logger("interop: dup failed errno=\(errno)")
-            return false
-        }
+    /// VM-queue callback: must return fast. The adapter already dup'd the fd;
+    /// decide admission and hand off to a session thread.
+    func handleReverseConnection(fd: Int32, port: UInt32) -> Bool {
         let decision = admit()
         guard decision != .reject else {
-            _ = Darwin.close(raw)
+            _ = Darwin.close(fd)
             return false
         }
-        startSession(fd: raw, admitted: decision == .accept)
+        startSession(fd: fd, admitted: decision == .accept)
         return true
+    }
+
+    func handleReverseAcceptFailure(errno code: Int32, port: UInt32) {
+        logger("interop: dup failed errno=\(code)")
     }
 
     private enum Decision { case accept, overCap, reject }
@@ -85,55 +77,13 @@ final class InteropListener: NSObject, VZVirtioSocketListenerDelegate, @unchecke
     }
 }
 
-extension VMHost {
-    /// Install `delegate` as the reverse listener for guest-initiated connects on
-    /// `port` (interop 5010). The listener + delegate are retained here so they
-    /// outlive the call (VZ holds only a weak delegate). False when no VM/device.
-    public func setInteropListener<Delegate: VZVirtioSocketListenerDelegate & Sendable>(
-        _ delegate: Delegate, port: UInt32
-    ) -> Bool {
-        precondition(port > 0, "interop port must be positive")
-        let box = Box<Bool>(false)
-        let semaphore = DispatchSemaphore(value: 0)
-        queue.async {
-            defer { semaphore.signal() }
-            guard let vm = self.machine,
-                let device = vm.socketDevices.first as? VZVirtioSocketDevice
-            else { return }
-            let listener = VZVirtioSocketListener()
-            listener.delegate = delegate
-            device.setSocketListener(listener, forPort: port)
-            self.interopListeners[port] = listener
-            self.interopDelegates[port] = delegate
-            box.value = true
-        }
-        semaphore.wait()
-        return box.value
-    }
-
-    /// Remove the reverse listener for `port` and drop the retained objects.
-    /// Safe to call on a stopped VM (the device lookup simply no-ops).
-    public func removeInteropListener(port: UInt32) {
-        assert(port > 0, "interop port must be positive")
-        let semaphore = DispatchSemaphore(value: 0)
-        queue.async {
-            defer { semaphore.signal() }
-            let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice
-            device?.removeSocketListener(forPort: port)
-            self.interopListeners[port] = nil
-            self.interopDelegates[port] = nil
-        }
-        semaphore.wait()
-    }
-}
-
 extension DaemonCore {
     /// Install the reverse interop listener (vsock 5010) when enabled. A refused
     /// install is logged, not fatal — the rest of the daemon still serves.
     func installInterop(host: VMHost) {
         guard config.interopEnabled else { return }
         let listener = makeInteropListener()
-        guard host.setInteropListener(listener, port: Proto.interopPort) else {
+        guard host.setReverseListener(listener, port: Proto.interopPort) else {
             log("warning: interop listener install failed")
             return
         }

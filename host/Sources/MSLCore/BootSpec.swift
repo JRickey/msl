@@ -17,13 +17,16 @@ public struct BootSpec: Sendable {
     /// Attach a VZLinuxRosettaDirectoryshare (tag "rosetta") when set. The caller
     /// must gate this on VMHost.rosettaAvailable(); a false value is the default.
     public let rosettaShare: Bool
+    /// Which backend boots this spec. Defaults to `.vz`; `VMBackendFactory`
+    /// consults it (milestone G1). `.krun` is not constructible yet.
+    public let backend: VMBackendKind
 
     public init(
         kernelPath: String, initramfsPath: String, commandLine: String,
         cpuCount: Int, memoryMiB: UInt64, consoleLogPath: String?,
         execCommand: String?, timeout: Double, diskPaths: [String] = [],
         shares: [ShareSpec] = [], balloonEnabled: Bool = false,
-        rosettaShare: Bool = false
+        rosettaShare: Bool = false, backend: VMBackendKind = .vz
     ) throws {
         guard cpuCount >= 1 else { throw MSLError.invalidArgument("cpus must be >= 1") }
         guard memoryMiB >= 1 else { throw MSLError.invalidArgument("memory-mib must be >= 1") }
@@ -49,6 +52,7 @@ public struct BootSpec: Sendable {
         self.shares = shares
         self.balloonEnabled = balloonEnabled
         self.rosettaShare = rosettaShare
+        self.backend = backend
     }
 
     private static func validatedDisks(
