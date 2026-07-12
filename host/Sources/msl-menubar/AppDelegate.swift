@@ -1,11 +1,14 @@
 import AppKit
 import Foundation
 import MSLCore
+import MSLMenuBarCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let home = MSLHome.resolve()
+    private let preferencesStore = AppPreferencesStore()
     private var mainWindow: MainWindowController?
+    private var settingsWindow: SettingsWindowController?
     private var statusController: StatusController?
     private var installer: InstallService?
 
@@ -15,8 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainWindow = MainWindowController(home: home)
         self.installer = installer
         self.mainWindow = mainWindow
-        self.statusController = StatusController(
-            home: home, installer: installer, openMainWindow: { mainWindow.present() })
+        applyMenuBarPreference(preferencesStore.load().showMenuBarItem)
         Notifier.requestAuthorization()
         assert(self.installer != nil, "install service must precede document open events")
         assert(self.mainWindow != nil, "main window must exist for launch presentation")
@@ -55,6 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             to: appMenu, title: "About MSL",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
         appMenu.addItem(.separator())
+        let settingsItem = addMenuItem(
+            to: appMenu, title: "Settings…", action: #selector(showSettings), key: ",")
+        settingsItem.target = self
+        appMenu.addItem(.separator())
         addMenuItem(
             to: appMenu, title: "Hide MSL", action: #selector(NSApplication.hide(_:)), key: "h")
         appMenu.addItem(.separator())
@@ -74,11 +80,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         assert(NSApp.windowsMenu === windowMenu, "window commands require a window menu")
     }
 
+    @objc private func showSettings() {
+        let controller: SettingsWindowController
+        if let settingsWindow {
+            controller = settingsWindow
+        } else {
+            let created = SettingsWindowController(
+                preferences: preferencesStore.load(),
+                onShowMenuBarItemChanged: { [weak self] show in
+                    self?.setMenuBarPreference(show)
+                }
+            )
+            settingsWindow = created
+            controller = created
+        }
+        controller.present()
+        assert(settingsWindow === controller, "Settings commands must reuse one controller")
+    }
+
+    private func setMenuBarPreference(_ show: Bool) {
+        preferencesStore.save(AppPreferences(showMenuBarItem: show))
+        applyMenuBarPreference(show)
+    }
+
+    private func applyMenuBarPreference(_ show: Bool) {
+        let action = StatusItemPreferencePolicy.action(
+            showMenuBarItem: show,
+            hasStatusController: statusController != nil
+        )
+        switch action {
+        case .none:
+            return
+        case .create:
+            guard let installer, let mainWindow else { return }
+            statusController = StatusController(
+                home: home,
+                installer: installer,
+                openMainWindow: { mainWindow.present() }
+            )
+        case .dispose:
+            statusController?.dispose()
+            statusController = nil
+        }
+    }
+
+    @discardableResult
     private func addMenuItem(
         to menu: NSMenu, title: String, action: Selector, key: String = ""
-    ) {
+    ) -> NSMenuItem {
         precondition(!title.isEmpty, "menu title must not be empty")
         let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
         assert(item.action == action, "menu item must retain its action")
+        return item
     }
 }

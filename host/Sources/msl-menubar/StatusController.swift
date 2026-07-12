@@ -3,15 +3,13 @@ import Foundation
 import MSLCore
 import MSLMenuBarCore
 
-/// Owns the menu-bar status item and rebuilds its menu on open. State is read
-/// only when the menu opens (no timers, no polling): a synchronous placeholder
-/// shows immediately, then an off-main probe refreshes the still-open menu.
+/// Owns the menu-bar item; its lazy menu probes off-main only while opened.
 @MainActor
 final class StatusController: NSObject, NSMenuDelegate {
     private let home: MSLHome
     private let installer: InstallService
     private let openMainWindow: @MainActor () -> Void
-    private let statusItem: NSStatusItem
+    private var statusItem: NSStatusItem?
     private let menu = NSMenu()
 
     init(
@@ -26,11 +24,20 @@ final class StatusController: NSObject, NSMenuDelegate {
         configureButton()
         menu.autoenablesItems = false
         menu.delegate = self
-        statusItem.menu = menu
+        statusItem?.menu = menu
+    }
+
+    func dispose() {
+        guard let item = statusItem else { return }
+        item.menu = nil
+        menu.delegate = nil
+        NSStatusBar.system.removeStatusItem(item)
+        statusItem = nil
+        assert(statusItem == nil, "disposed status controller must release its item")
     }
 
     private func configureButton() {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem?.button else { return }
         let image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "msl")
         image?.isTemplate = true
         button.image = image
