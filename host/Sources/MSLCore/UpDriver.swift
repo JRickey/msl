@@ -38,7 +38,7 @@ public struct UpConfig: Sendable {
 /// mode. This process is the one-shot up driver. `@unchecked Sendable`: mutable fields
 /// are set once during `launch()` before concurrent use.
 public final class UpDriver: @unchecked Sendable {
-    private let host: VMHost
+    private let host: any VMBackend
     private let spec: BootSpec
     private let config: UpConfig
     private let driverQueue = DispatchQueue(label: "msl.up.driver", qos: .userInitiated)
@@ -47,7 +47,7 @@ public final class UpDriver: @unchecked Sendable {
     private var powerWake: PowerWake?
     private var signalSource: DispatchSourceSignal?
 
-    public init(host: VMHost, spec: BootSpec, config: UpConfig) {
+    public init(host: any VMBackend, spec: BootSpec, config: UpConfig) {
         self.host = host
         self.spec = spec
         self.config = config

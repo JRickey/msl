@@ -13,13 +13,17 @@ public struct DistroEntry: Codable, Sendable, Equatable {
     public let macShare: Bool?
     /// x86-64 Rosetta translation opt-in (nil = off). Synthesized Codable omits it when nil.
     public let rosetta: Bool?
+    /// GPU passthrough opt-in (nil = off). Inert until the krun backend ships
+    /// (milestone G3); the field lands now so the registry format churns once.
+    /// Synthesized Codable omits it when nil, so old registry.json files decode.
+    public let gpu: Bool?
     /// Catalog selector that produced this distro, when installed from the catalog.
     public let catalogSelector: String?
 
     public init(
         name: String, image: String, hostname: String, createdAt: String,
         defaultUser: String? = nil, macShare: Bool? = nil, rosetta: Bool? = nil,
-        catalogSelector: String? = nil
+        gpu: Bool? = nil, catalogSelector: String? = nil
     ) {
         self.name = name
         self.image = image
@@ -28,6 +32,7 @@ public struct DistroEntry: Codable, Sendable, Equatable {
         self.defaultUser = defaultUser
         self.macShare = macShare
         self.rosetta = rosetta
+        self.gpu = gpu
         self.catalogSelector = catalogSelector
     }
 }
@@ -103,6 +108,30 @@ public struct Registry: Codable, Sendable, Equatable {
         return true
     }
 
+    /// Reject an unsupportable gpu/rosetta combination for a distro before it is
+    /// persisted (milestone G1.5, docs/specs/gpu). Rosetta needs the
+    /// Virtualization.framework backend while GPU needs krun, so the two can
+    /// never be on together; and the krun backend is not built yet, so an
+    /// invocation that enables GPU always fails. `gpuOn`/`rosettaOn` are the
+    /// values the distro would hold after the change; `enablingGpu` is true only
+    /// when this invocation itself switches GPU on, so unrelated changes to a
+    /// distro that already stores gpu=true are not rejected with a misleading
+    /// availability error.
+    public static func validateGpuRosetta(
+        gpuOn: Bool, rosettaOn: Bool, enablingGpu: Bool
+    ) throws {
+        guard !(gpuOn && rosettaOn) else {
+            throw MSLError.configuration(
+                "GPU and Rosetta are mutually exclusive per distro "
+                    + "(Rosetta requires the Virtualization.framework backend)")
+        }
+        guard !enablingGpu else {
+            throw MSLError.configuration(
+                "GPU distros require the krun backend, which is not available yet "
+                    + "(docs/specs/gpu, milestone G3)")
+        }
+    }
+
     public func entry(name: String) -> DistroEntry? {
         return distros.first { $0.name == name }
     }
@@ -147,7 +176,7 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser,
-                macShare: current.macShare, rosetta: current.rosetta,
+                macShare: current.macShare, rosetta: current.rosetta, gpu: current.gpu,
                 catalogSelector: current.catalogSelector)
         }
     }
@@ -163,7 +192,7 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
                 createdAt: current.createdAt, defaultUser: user,
-                macShare: current.macShare, rosetta: current.rosetta,
+                macShare: current.macShare, rosetta: current.rosetta, gpu: current.gpu,
                 catalogSelector: current.catalogSelector)
         }
     }
@@ -174,7 +203,8 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser, macShare: share,
-                rosetta: current.rosetta, catalogSelector: current.catalogSelector)
+                rosetta: current.rosetta, gpu: current.gpu,
+                catalogSelector: current.catalogSelector)
         }
     }
 
@@ -184,7 +214,20 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser,
-                macShare: current.macShare, rosetta: on,
+                macShare: current.macShare, rosetta: on, gpu: current.gpu,
+                catalogSelector: current.catalogSelector)
+        }
+    }
+
+    /// Set the GPU passthrough opt-in (nil/false = off); unknown name throws.
+    /// Inert until the krun backend ships (milestone G3); `msl config` refuses to
+    /// enable it, so a persisted `true` is not reachable through the CLI today.
+    public mutating func setGpu(name: String, on: Bool) throws {
+        try mutateEntry(name: name) { current in
+            DistroEntry(
+                name: current.name, image: current.image, hostname: current.hostname,
+                createdAt: current.createdAt, defaultUser: current.defaultUser,
+                macShare: current.macShare, rosetta: current.rosetta, gpu: on,
                 catalogSelector: current.catalogSelector)
         }
     }
@@ -199,7 +242,7 @@ public struct Registry: Codable, Sendable, Equatable {
             DistroEntry(
                 name: current.name, image: current.image, hostname: current.hostname,
                 createdAt: current.createdAt, defaultUser: current.defaultUser,
-                macShare: current.macShare, rosetta: current.rosetta,
+                macShare: current.macShare, rosetta: current.rosetta, gpu: current.gpu,
                 catalogSelector: selector)
         }
     }

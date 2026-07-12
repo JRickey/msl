@@ -249,7 +249,10 @@ public final class InstallDriver {
             consoleLogPath: logPath, execCommand: nil, timeout: options.bootTimeout,
             diskPaths: [imageURL.path],
             shares: [ShareSpec(tag: "staging", hostPath: stagingDir.path, readOnly: true)])
-        let host = VMHost(spec: spec)
+        // The builder VM is VZ-only by design (docs/specs/gpu/06 §factory): it
+        // needs neither GPU nor Rosetta, so the spec keeps the default `.vz`
+        // backend and the factory always returns a VZ host here.
+        let host = try VMBackendFactory.make(spec: spec)
         try host.startAndWait(onStop: { _, _ in })
         defer { _ = host.stopAndWait() }
         let control = try ControlClient(client: try host.connectAndWait())

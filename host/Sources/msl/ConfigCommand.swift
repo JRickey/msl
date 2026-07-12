@@ -5,7 +5,7 @@ import MSLCore
 struct ConfigCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
-        abstract: "Show or change per-distro settings (user, mac-share, hostname, rosetta).",
+        abstract: "Show or change per-distro settings (user, mac-share, hostname, rosetta, gpu).",
         discussion: """
             With no options, prints the distro's current settings. Hostname and \
             mac-share changes take effect on the next distro boot — run 'msl stop' \
@@ -32,6 +32,15 @@ struct ConfigCommand: ParsableCommand {
             """)
     var rosetta: String?
 
+    @Option(
+        name: .customLong("gpu"),
+        help: """
+            GPU passthrough: on | off. Requires the krun backend (milestone G3), \
+            which is not available yet, so 'on' is rejected. Mutually exclusive \
+            with rosetta.
+            """)
+    var gpu: String?
+
     func run() throws {
         assert(!name.isEmpty, "distro name argument must not be empty")
         let home = MSLHome.resolve()
@@ -51,7 +60,7 @@ struct ConfigCommand: ParsableCommand {
     }
 
     private var hasChanges: Bool {
-        hostname != nil || defaultUser != nil || macShare != nil || rosetta != nil
+        hostname != nil || defaultUser != nil || macShare != nil || rosetta != nil || gpu != nil
     }
 
     private func requireEntry(_ registry: Registry) throws {
@@ -63,6 +72,10 @@ struct ConfigCommand: ParsableCommand {
 
     private func applySetters(_ registry: inout Registry) throws -> Bool {
         assert(!name.isEmpty, "distro name must not be empty")
+        // Cross-validate gpu/rosetta before any setter mutates, so a rejected
+        // combination (or an attempt to enable the still-unbuilt GPU backend)
+        // persists nothing — the transaction aborts on the throw.
+        try validateGpuRosetta(registry)
         var changed = false
         if let hostname {
             try registry.setHostname(name: name, hostname: hostname)
@@ -81,7 +94,23 @@ struct ConfigCommand: ParsableCommand {
             try registry.setRosetta(name: name, on: Self.parseRosetta(rosetta))
             changed = true
         }
+        if let gpu {
+            try registry.setGpu(name: name, on: Self.parseGpu(gpu))
+            changed = true
+        }
         return changed
+    }
+
+    /// Fold this invocation's `--gpu`/`--rosetta` flags over the distro's stored
+    /// values and reject an unsupportable result. `requireEntry` has already run,
+    /// so the entry is present; the guard is a belt against a future reorder. The
+    /// krun-availability rejection fires only when this invocation enables GPU.
+    private func validateGpuRosetta(_ registry: Registry) throws {
+        guard let entry = registry.entry(name: name) else { return }
+        let gpuOn = try gpu.map(Self.parseGpu) ?? (entry.gpu ?? false)
+        let rosettaOn = try rosetta.map(Self.parseRosetta) ?? (entry.rosetta ?? false)
+        try Registry.validateGpuRosetta(
+            gpuOn: gpuOn, rosettaOn: rosettaOn, enablingGpu: gpu != nil && gpuOn)
     }
 
     private static func parseMacShare(_ value: String) throws -> Bool? {
@@ -103,6 +132,15 @@ struct ConfigCommand: ParsableCommand {
         }
     }
 
+    private static func parseGpu(_ value: String) throws -> Bool {
+        switch value {
+        case "on": return true
+        case "off": return false
+        default:
+            throw MSLError.invalidArgument("--gpu must be on|off, got: \(value)")
+        }
+    }
+
     private func printEntry(_ registry: Registry) throws {
         guard let entry = registry.entry(name: name) else {
             throw MSLError.invalidArgument("no such distro: \(name)")
@@ -111,11 +149,13 @@ struct ConfigCommand: ParsableCommand {
         let user = entry.defaultUser ?? "root (unset)"
         let share = entry.macShare.map { $0 ? "on" : "off" } ?? "inherit"
         let rosetta = (entry.rosetta ?? false) ? "on" : "off"
+        let gpu = (entry.gpu ?? false) ? "on" : "off"
         print("name:          \(entry.name)")
         print("hostname:      \(entry.hostname)")
         print("default user:  \(user)")
         print("mac-share:     \(share)")
         print("rosetta:       \(rosetta)")
+        print("gpu:           \(gpu)")
         print("image:         \(entry.image)")
         print("created:       \(entry.createdAt)")
     }

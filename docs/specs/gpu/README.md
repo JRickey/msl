@@ -68,8 +68,8 @@ Maintained by implementers; update when a milestone lands.
 
 | Milestone | Status |
 |---|---|
-| G0 spike | not started |
-| G1 backend abstraction | not started |
+| G0 spike | not started (needs macOS hardware) |
+| G1 backend abstraction | implemented (commits 08af620, 03a24e1, +G1.4/G1.5); awaiting macOS CI build/test validation and the G1 hardware spot-check |
 | G2 kernel | not started |
 | G3 msl-vmm | not started |
 | G4 guest userland | not started |

@@ -78,12 +78,31 @@ final class RegistryConfigSettersTests: XCTestCase {
         XCTAssertEqual(reg.entry(name: "ubuntu")?.rosetta, false)
     }
 
+    func testSetGpuSetsAndClears() throws {
+        var reg = try populated()
+        XCTAssertNil(reg.entry(name: "ubuntu")?.gpu)
+        try reg.setGpu(name: "ubuntu", on: true)
+        XCTAssertEqual(reg.entry(name: "ubuntu")?.gpu, true)
+        try reg.setGpu(name: "ubuntu", on: false)
+        XCTAssertEqual(reg.entry(name: "ubuntu")?.gpu, false)
+    }
+
     func testSettersRejectUnknownName() throws {
         var reg = try populated()
         XCTAssertThrowsError(try reg.setHostname(name: "ghost", hostname: "ok"))
         XCTAssertThrowsError(try reg.setDefaultUser(name: "ghost", user: "j"))
         XCTAssertThrowsError(try reg.setMacShare(name: "ghost", share: true))
         XCTAssertThrowsError(try reg.setRosetta(name: "ghost", on: true))
+        XCTAssertThrowsError(try reg.setGpu(name: "ghost", on: true))
+    }
+
+    func testSettersPreserveGpu() throws {
+        var reg = try populated()
+        try reg.setGpu(name: "ubuntu", on: true)
+        try reg.setHostname(name: "ubuntu", hostname: "dev")
+        try reg.setMacShare(name: "ubuntu", share: false)
+        try reg.setDefaultUser(name: "ubuntu", user: "jack")
+        XCTAssertEqual(reg.entry(name: "ubuntu")?.gpu, true)
     }
 
     func testSettersPreserveRosetta() throws {
@@ -121,11 +140,13 @@ final class RegistryConfigPersistenceTests: XCTestCase {
         try reg.setDefaultUser(name: "ubuntu", user: "jack")
         try reg.setMacShare(name: "ubuntu", share: false)
         try reg.setRosetta(name: "ubuntu", on: true)
+        try reg.setGpu(name: "ubuntu", on: false)
         try reg.save(to: url)
         let loaded = try Registry.load(from: url)
         XCTAssertEqual(loaded.entry(name: "ubuntu")?.defaultUser, "jack")
         XCTAssertEqual(loaded.entry(name: "ubuntu")?.macShare, false)
         XCTAssertEqual(loaded.entry(name: "ubuntu")?.rosetta, true)
+        XCTAssertEqual(loaded.entry(name: "ubuntu")?.gpu, false)
     }
 
     func testCatalogSelectorRoundTripAndSetterPreservation() throws {
@@ -154,6 +175,7 @@ final class RegistryConfigPersistenceTests: XCTestCase {
         XCTAssertFalse(text.contains("defaultUser"), "unset user must be an absent key: \(text)")
         XCTAssertFalse(text.contains("macShare"), "unset share must be an absent key: \(text)")
         XCTAssertFalse(text.contains("rosetta"), "unset rosetta must be an absent key: \(text)")
+        XCTAssertFalse(text.contains("\"gpu\""), "unset gpu must be an absent key: \(text)")
         XCTAssertFalse(
             text.contains("catalogSelector"), "unset catalog selector must be absent: \(text)")
     }
@@ -169,6 +191,53 @@ final class RegistryConfigPersistenceTests: XCTestCase {
         XCTAssertNil(loaded.entry(name: "ubuntu")?.defaultUser)
         XCTAssertNil(loaded.entry(name: "ubuntu")?.macShare)
         XCTAssertNil(loaded.entry(name: "ubuntu")?.rosetta)
+        XCTAssertNil(loaded.entry(name: "ubuntu")?.gpu)
         XCTAssertNil(loaded.entry(name: "ubuntu")?.catalogSelector)
+    }
+}
+
+/// The inert GPU flag's cross-validation (milestone G1.5). GPU is not
+/// constructible until the krun backend ships, and it can never coexist with
+/// Rosetta, so `msl config` rejects both cases before persisting.
+final class GpuRosettaValidationTests: XCTestCase {
+    func testGpuOffAllowsEitherRosettaState() {
+        XCTAssertNoThrow(
+            try Registry.validateGpuRosetta(gpuOn: false, rosettaOn: false, enablingGpu: false))
+        XCTAssertNoThrow(
+            try Registry.validateGpuRosetta(gpuOn: false, rosettaOn: true, enablingGpu: false))
+    }
+
+    func testEnablingGpuRejectsWithKrunMessage() {
+        XCTAssertThrowsError(
+            try Registry.validateGpuRosetta(gpuOn: true, rosettaOn: false, enablingGpu: true)
+        ) { error in
+            guard case MSLError.configuration(let message) = error else {
+                return XCTFail("expected configuration error, got \(error)")
+            }
+            XCTAssertTrue(message.contains("krun backend"), message)
+        }
+    }
+
+    /// A distro that already stores gpu=true (unreachable via the CLI today, but
+    /// possible through a future import) must not have unrelated config changes
+    /// rejected with the availability error — only *enabling* GPU is gated.
+    func testStoredGpuWithoutEnablingPasses() {
+        XCTAssertNoThrow(
+            try Registry.validateGpuRosetta(gpuOn: true, rosettaOn: false, enablingGpu: false))
+    }
+
+    func testGpuWithRosettaRejectsAsMutuallyExclusive() {
+        // Mutual exclusion binds on the folded state regardless of which flag
+        // this invocation set, so it fires with and without enablingGpu.
+        for enabling in [true, false] {  // bounded: two cases
+            XCTAssertThrowsError(
+                try Registry.validateGpuRosetta(gpuOn: true, rosettaOn: true, enablingGpu: enabling)
+            ) { error in
+                guard case MSLError.configuration(let message) = error else {
+                    return XCTFail("expected configuration error, got \(error)")
+                }
+                XCTAssertTrue(message.contains("mutually exclusive"), message)
+            }
+        }
     }
 }

@@ -75,7 +75,8 @@ struct UpCommand: ParsableCommand {
             hostCwd: FileManager.default.currentDirectoryPath,
             term: ProcessInfo.processInfo.environment["TERM"] ?? "xterm-256color",
             rosetta: useRosetta)
-        let driver = UpDriver(host: VMHost(spec: spec), spec: spec, config: config)
+        let driver = try UpDriver(
+            host: VMBackendFactory.make(spec: spec), spec: spec, config: config)
         Self.retainedDriver = driver
         driver.launch()
         dispatchMain()

@@ -40,6 +40,11 @@ struct BootCommand: ParsableCommand {
     @Option(name: .long, help: "virtiofs share tag=hostpath[:ro], repeatable.")
     var share: [String] = []
 
+    // Hidden backend selector: `krun` is reserved for milestone G3 and fails
+    // naturally in the factory until then. `vz` is the only working value today.
+    @Option(name: .long, help: ArgumentHelp("VM backend: vz | krun.", visibility: .hidden))
+    var backend: VMBackendKind = .vz
+
     func run() throws {
         try rejectRegisteredDistroBoot()
         let kernelPath = try requirePath(kernel, flag: "--kernel")
@@ -55,8 +60,9 @@ struct BootCommand: ParsableCommand {
             execCommand: exec,
             timeout: timeout,
             diskPaths: disk,
-            shares: shares)
-        let host = VMHost(spec: spec)
+            shares: shares,
+            backend: backend)
+        let host = try VMBackendFactory.make(spec: spec)
         let driver = Driver(host: host, spec: spec)
         driver.launch()
         dispatchMain()

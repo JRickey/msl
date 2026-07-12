@@ -6,13 +6,13 @@ import Foundation
 /// point for the CLI (never `fatalError`). `@unchecked Sendable`: the only
 /// mutable field is set once during `launch()` before any concurrent use.
 public final class Driver: @unchecked Sendable {
-    private let host: VMHost
+    private let host: any VMBackend
     private let spec: BootSpec
     private let driverQueue = DispatchQueue(label: "msl.driver", qos: .userInitiated)
     private let signalQueue = DispatchQueue(label: "msl.signal", qos: .userInitiated)
     private var signalSource: DispatchSourceSignal?
 
-    public init(host: VMHost, spec: BootSpec) {
+    public init(host: any VMBackend, spec: BootSpec) {
         self.host = host
         self.spec = spec
     }
