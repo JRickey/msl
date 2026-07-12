@@ -1,7 +1,11 @@
 # Agent/user working files (per global project guidelines)
 CLAUDE.md
 AGENTS.md
-docs
+# docs/ stays untracked as local working notes, except committed specs below.
+docs/*
+!docs/specs/
+docs/specs/*
+!docs/specs/gpu/
 new-worktree.sh
 
 # macOS
