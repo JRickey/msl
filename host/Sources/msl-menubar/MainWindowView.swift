@@ -267,16 +267,28 @@ private struct DistroInspector: View {
         DetailGroup(title: "Finder") {
             if let path = distro.inventory.finderPath {
                 DetailRow(label: "Mounted at", value: path)
-            } else if model.finderEnabled == false {
-                HStack {
-                    Text("Finder integration is not set up.").foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Set Up Finder", action: model.enableFinder)
-                }
             } else {
-                Text("Not mounted. Mount controls will appear when the mount service is available.")
-                    .foregroundStyle(.secondary)
+                finderSetupContent
             }
+        }
+    }
+
+    @ViewBuilder
+    private var finderSetupContent: some View {
+        switch model.finderSetupState {
+        case .checking:
+            ProgressView("Checking Finder integration…")
+        case .disabled:
+            HStack {
+                Text("Finder integration is not set up.").foregroundStyle(.secondary)
+                Spacer()
+                Button("Set Up Finder", action: model.enableFinder)
+            }
+        case .ready:
+            Text("Not mounted. Mount controls will appear when the mount service is available.")
+                .foregroundStyle(.secondary)
+        case .restartRequired:
+            FinderRestartBanner(restart: model.restartMac)
         }
     }
 
@@ -314,6 +326,28 @@ private struct DistroInspector: View {
     private func requestStop() {
         assert(distro.isRunning, "only a running distro can request stop")
         confirmStop = true
+    }
+}
+
+private struct FinderRestartBanner: View {
+    let restart: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Restart Required").fontWeight(.semibold)
+                Text("Restart your Mac to finish enabling Finder integration.")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Restart Mac", action: restart)
+        }
+        .padding(10)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .contain)
     }
 }
 

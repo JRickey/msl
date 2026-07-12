@@ -79,7 +79,19 @@ public struct AppDistroSnapshot: Equatable, Identifiable, Sendable {
 
     public func storageLabel(_ value: UInt64?) -> String {
         guard let value else { return "Not available" }
-        return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file)
+        return IECByteFormatter.string(from: value)
+    }
+}
+
+public enum FinderSetupState: Equatable, Sendable {
+    case checking
+    case disabled
+    case ready
+    case restartRequired
+
+    public func refreshed(enabled: Bool) -> FinderSetupState {
+        if self == .restartRequired { return .restartRequired }
+        return enabled ? .ready : .disabled
     }
 }
 

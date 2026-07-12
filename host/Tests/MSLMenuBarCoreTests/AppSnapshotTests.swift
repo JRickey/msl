@@ -35,9 +35,16 @@ final class AppSnapshotTests: XCTestCase {
 
     func testStorageLabels() throws {
         let distro = try XCTUnwrap(AppSnapshot(inventory: inventory(), status: nil).distros.first)
-        XCTAssertNotEqual(distro.storageLabel(3_100_000_000), "Not available")
+        XCTAssertEqual(distro.storageLabel(3 * 1024 * 1024 * 1024), "3.0 GiB")
+        XCTAssertEqual(distro.storageLabel(1536), "1.5 KiB")
         XCTAssertEqual(distro.storageLabel(nil), "Not available")
-        XCTAssertTrue(distro.storageLabel(3_100_000_000).contains("GB"))
+    }
+
+    func testRestartRequiredFinderStateSurvivesRefresh() {
+        XCTAssertEqual(FinderSetupState.checking.refreshed(enabled: false), .disabled)
+        XCTAssertEqual(FinderSetupState.disabled.refreshed(enabled: true), .ready)
+        XCTAssertEqual(FinderSetupState.restartRequired.refreshed(enabled: false), .restartRequired)
+        XCTAssertEqual(FinderSetupState.restartRequired.refreshed(enabled: true), .restartRequired)
     }
 
     func testEmptyStateHasNoSelection() {
