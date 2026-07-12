@@ -18,10 +18,14 @@ final class MainWindowModel: ObservableObject {
     @Published var distroDraft = DistroSettingsDraft(distro: nil, defaultDistro: nil)
     @Published var hostSettingsDraft = HostSettingsDraft.placeholder
     @Published private(set) var pendingRestarts = PendingRestarts()
-    @Published private(set) var operationInFlight = false
+    @Published var operationInFlight = false
+    @Published var finderOperations: [String: FinderDistroOperation] = [:]
     @Published var presentedError: String?
 
-    private let home: MSLHome
+    let home: MSLHome
+    let finderActions: AppFinderActions
+    let finderPathOpener: @MainActor @Sendable (String) -> Bool
+    let finderRefresh: (@MainActor @Sendable () async throws -> Void)?
     private var refreshID = UUID()
     private var savedHostSettings = MSLHostSettings()
     private var hostFacts = SharedVMHardwareFacts(
@@ -30,8 +34,25 @@ final class MainWindowModel: ObservableObject {
     private var resetDistroAfterRefresh = false
     private var resetHostAfterRefresh = false
 
-    init(home: MSLHome) {
+    init(
+        home: MSLHome, finderActions: AppFinderActions = .live,
+        finderPathOpener: @escaping @MainActor @Sendable (String) -> Bool = {
+            NSWorkspace.shared.open(URL(fileURLWithPath: $0))
+        },
+        initialSnapshot: AppSnapshot = .empty,
+        initialFinderSetupState: FinderSetupState = .checking,
+        finderRefresh: (@MainActor @Sendable () async throws -> Void)? = nil
+    ) {
+        precondition(home.root.isFileURL, "MSL home must be a file URL")
+        assert(!home.root.path.isEmpty, "MSL home path must not be empty")
         self.home = home
+        self.finderActions = finderActions
+        self.finderPathOpener = finderPathOpener
+        self.finderRefresh = finderRefresh
+        snapshot = initialSnapshot
+        finderSetupState = initialFinderSetupState
+        selectedName = initialSnapshot.selectedName(preserving: nil)
+        resetDistroDraft()
     }
 
     var selectedDistro: AppDistroSnapshot? {
@@ -71,23 +92,51 @@ final class MainWindowModel: ObservableObject {
     var subsystemNeedsRestart: Bool { pendingRestarts.contains(.subsystem) }
 
     func refresh(policy: PendingRefreshPolicy = .reconcileStopped) {
+        guard !operationInFlight else { return }
+        let requestID = beginRefresh()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.performRefresh(requestID: requestID, policy: policy)
+            } catch {
+                self.finish(error: error, requestID: requestID)
+            }
+        }
+    }
+
+    func refreshForFinderOperation() async throws {
+        if let finderRefresh {
+            try await finderRefresh()
+            return
+        }
+        let requestID = beginRefresh()
+        do {
+            try await performRefresh(requestID: requestID, policy: .reconcileStopped)
+        } catch {
+            if refreshID == requestID { isRefreshing = false }
+            throw error
+        }
+    }
+
+    private func beginRefresh() -> UUID {
         let requestID = UUID()
         refreshID = requestID
         isRefreshing = true
+        return requestID
+    }
+
+    private func performRefresh(requestID: UUID, policy: PendingRefreshPolicy) async throws {
         let home = self.home
-        Task { @MainActor [weak self] in
-            do {
-                async let snapshot = AppInventoryProbe.snapshot(home: home)
-                async let finderEnabled = FSKitAction.status()
-                async let hostLoad = AppSettingsActions.loadHost(home: home)
-                let values = try await (snapshot, finderEnabled, hostLoad)
-                self?.apply(
-                    snapshot: values.0, finderEnabled: values.1, hostLoad: values.2,
-                    requestID: requestID, pendingPolicy: policy)
-            } catch {
-                self?.finish(error: error, requestID: requestID)
-            }
+        async let snapshot = AppInventoryProbe.snapshot(home: home)
+        async let finderEnabled = FSKitAction.status()
+        async let hostLoad = AppSettingsActions.loadHost(home: home)
+        let values = try await (snapshot, finderEnabled, hostLoad)
+        guard refreshID == requestID else {
+            throw MSLError.io("inventory refresh was superseded")
         }
+        apply(
+            snapshot: values.0, finderEnabled: values.1, hostLoad: values.2,
+            requestID: requestID, pendingPolicy: policy)
     }
 
     func openShell() {
@@ -98,15 +147,6 @@ final class MainWindowModel: ObservableObject {
                 self?.presentedError = error
             }
         }
-    }
-
-    func openFinder() {
-        guard let path = selectedDistro?.inventory.finderPath else {
-            presentedError = "Mount this distro before opening it in Finder."
-            return
-        }
-        let opened = NSWorkspace.shared.open(URL(fileURLWithPath: path))
-        if !opened { presentedError = "Finder could not open \(path)." }
     }
 
     func stopSelected() {

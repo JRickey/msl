@@ -25,7 +25,7 @@ struct AppToolbar: ToolbarContent {
                 label: { Label("Refresh", systemImage: "arrow.clockwise") }
             )
             .keyboardShortcut("r", modifiers: .command)
-            .disabled(model.isRefreshing)
+            .disabled(model.isRefreshing || model.operationInFlight)
             .accessibilityLabel("Refresh subsystem information")
         }
     }

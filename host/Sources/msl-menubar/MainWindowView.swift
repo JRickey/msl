@@ -156,6 +156,7 @@ private struct DistroInspector: View {
     @ObservedObject var model: MainWindowModel
     let distro: AppDistroSnapshot
     @State private var confirmStop = false
+    @State private var confirmUnmount = false
     @State private var confirmRestart = false
     @State private var confirmSubsystemRestart = false
 
@@ -193,6 +194,15 @@ private struct DistroInspector: View {
             Text(restartMessage)
         }
         .confirmationDialog(
+            "Unmount \(distro.name) from Finder?", isPresented: $confirmUnmount,
+            titleVisibility: .visible
+        ) {
+            Button("Unmount from Finder", role: .destructive, action: model.unmountFromFinder)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Open Finder files for this distro will no longer be available.")
+        }
+        .confirmationDialog(
             "Restart the subsystem to apply settings?", isPresented: $confirmSubsystemRestart,
             titleVisibility: .visible
         ) {
@@ -221,8 +231,8 @@ private struct DistroInspector: View {
             Button("Open Shell", systemImage: "terminal", action: model.openShell)
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
-            Button("Open in Finder", systemImage: "folder", action: model.openFinder)
-                .disabled(!distro.finderAvailable)
+            FinderActionControls(
+                model: model, distro: distro, confirmUnmount: $confirmUnmount)
             Button("Stop", systemImage: "stop.fill") { requestStop() }
                 .disabled(!model.snapshot.daemonRunning || !distro.isRunning)
         }
@@ -328,7 +338,7 @@ private struct DistroInspector: View {
                 Button("Set Up Finder", action: model.enableFinder)
             }
         case .ready:
-            Text("Not mounted. Mount controls will appear when the mount service is available.")
+            Text("Ready to mount. Use Mount in Finder above to browse and edit Linux files.")
                 .foregroundStyle(.secondary)
         case .restartRequired:
             FinderRestartBanner(restart: model.restartMac)
