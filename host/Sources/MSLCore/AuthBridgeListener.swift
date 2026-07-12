@@ -303,7 +303,7 @@ enum AuthPoll {
 }
 
 extension DaemonCore {
-    func installAuthBridge(host: VMHost) {
+    func installAuthBridge(host: any VMBackend) {
         let listener = AuthBridgeListener(
             sessions: authSessions, sshProxy: HostSSHAgentProxy(),
             secrets: KeychainSecretStore(

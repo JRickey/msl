@@ -39,7 +39,7 @@ extension DaemonCore {
             throw MSLError.configuration("no distro images to attach (install one first)")
         }
         let spec = try makeBootSpec(diskPaths: mapping.diskPaths)
-        let newHost = VMHost(spec: spec)
+        let newHost = try VMBackendFactory.make(spec: spec)
         try newHost.startAndWait(onStop: { [weak self] error, requested in
             self?.handleStop(error, requested: requested)
         })
@@ -54,7 +54,7 @@ extension DaemonCore {
         }
     }
 
-    private func connectAndPing(host: VMHost) throws -> ControlClient {
+    private func connectAndPing(host: any VMBackend) throws -> ControlClient {
         let client = try ControlClient(client: try host.connectAndWait())
         let ping = try client.ping()
         if (ping.protocolVersion ?? 0) != Proto.version {
@@ -64,7 +64,7 @@ extension DaemonCore {
     }
 
     private func finishBoot(
-        host: VMHost, control: ControlClient, entries: [DeviceEntry], rosettaAttached: Bool
+        host: any VMBackend, control: ControlClient, entries: [DeviceEntry], rosettaAttached: Bool
     ) {
         let wake = PowerWake(onWake: { [weak self] in self?.syncTimeIfRunning() })
         wake.start()
@@ -93,9 +93,9 @@ extension DaemonCore {
 
     /// Drop the balloon target to the floor once control is up; on a device that
     /// refuses the target, park the ladder at the configured max (no ballooning).
-    private func startMemoryLadder(host: VMHost) {
+    private func startMemoryLadder(host: any VMBackend) {
         let floor = config.memoryFloorMiB
-        let seated = host.setBalloonTarget(mib: floor)
+        let seated = host.setMemoryTarget(mib: floor)
         withLock { balloonTargetMiB = seated ? floor : config.memoryMiB }
         assert(config.memoryFloorMiB <= config.memoryMiB, "floor must not exceed max")
     }
@@ -112,7 +112,7 @@ extension DaemonCore {
 
     /// Build the closure `PortForwarder` uses to reach the guest: connect vsock
     /// 5003, send the `ForwardHello`, verify the reply, and hand back the raw fd.
-    private func makeForwardConnect(host: VMHost) -> @Sendable (UInt16) throws -> Int32 {
+    private func makeForwardConnect(host: any VMBackend) -> @Sendable (UInt16) throws -> Int32 {
         let timeout = min(config.bootTimeout, 15)
         return { port in
             precondition(port > 0, "forward port must be positive")
@@ -280,7 +280,7 @@ extension DaemonCore {
     }
 
     private func stepLadder(
-        control: ControlClient, host: VMHost, stats: MemStatsData, justReclaimed: Bool
+        control: ControlClient, host: any VMBackend, stats: MemStatsData, justReclaimed: Bool
     ) {
         let inputs = withLock {
             MemoryLadder.Inputs(
@@ -292,7 +292,7 @@ extension DaemonCore {
         let action = MemoryLadder.decide(inputs)
         guard let next = Self.ladderTarget(action) else { return }
         assert(next >= config.memoryFloorMiB, "ladder target must respect the floor")
-        guard host.setBalloonTarget(mib: next) else { return }
+        guard host.setMemoryTarget(mib: next) else { return }
         withLock {
             balloonTargetMiB = next
             if case .shrink = action { comfortTicks = 0 }

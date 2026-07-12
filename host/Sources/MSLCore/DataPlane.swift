@@ -6,7 +6,7 @@ import Foundation
 public enum DataPlane {
     /// Connect + handshake for `sessionID`/`token`; returns the detached raw fd.
     public static func open(
-        host: VMHost, sessionID: UInt64, token: String, timeout: Double
+        host: any VMBackend, sessionID: UInt64, token: String, timeout: Double
     ) throws -> Int32 {
         precondition(!token.isEmpty, "data token must not be empty")
         precondition(timeout > 0, "data connect timeout must be positive")

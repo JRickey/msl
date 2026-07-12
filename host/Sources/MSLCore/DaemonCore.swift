@@ -19,7 +19,7 @@ public final class DaemonCore: @unchecked Sendable {
     let guiPresenterGrace: TimeInterval = 60
 
     var running = false
-    var host: VMHost?
+    var host: (any VMBackend)?
     var control: ControlClient?
     var attached: [DeviceEntry] = []
     var distrosUp: Set<String> = []

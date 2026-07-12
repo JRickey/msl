@@ -28,6 +28,18 @@ final class VMBackendTests: XCTestCase {
         XCTAssertFalse(backend.capabilities.gpu)
     }
 
+    /// Locks the daemon seam: a factory-built backend must flow through a plain
+    /// `any VMBackend` parameter (how `DaemonCore` now stores and passes `host`).
+    func testFactoryBackendIsUsableAsExistential() throws {
+        let spec = try Self.makeSpec(backend: .vz)
+        let backend = try VMBackendFactory.make(spec: spec)
+        XCTAssertEqual(Self.backendKind(backend), .vz)
+    }
+
+    private static func backendKind(_ backend: any VMBackend) -> VMBackendKind {
+        backend.capabilities.kind
+    }
+
     // MARK: - reverse handler
 
     func testStoppedListenerRejectsAndClosesFd() throws {

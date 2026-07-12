@@ -8,5 +8,5 @@ struct TeardownBundle {
     let pollTimer: DispatchSourceTimer?
     let interop: InteropListener?
     let auth: AuthBridgeListener?
-    let host: VMHost?
+    let host: (any VMBackend)?
 }

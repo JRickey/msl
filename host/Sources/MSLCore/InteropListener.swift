@@ -80,7 +80,7 @@ final class InteropListener: ReverseVsockHandler, @unchecked Sendable {
 extension DaemonCore {
     /// Install the reverse interop listener (vsock 5010) when enabled. A refused
     /// install is logged, not fatal — the rest of the daemon still serves.
-    func installInterop(host: VMHost) {
+    func installInterop(host: any VMBackend) {
         guard config.interopEnabled else { return }
         let listener = makeInteropListener()
         guard host.setReverseListener(listener, port: Proto.interopPort) else {

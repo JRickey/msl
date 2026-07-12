@@ -12,6 +12,9 @@ struct DistroBootSettings {
 extension DaemonCore {
     /// Attach the Rosetta share this boot when some distro opted in AND the host
     /// has Rosetta installed. Warns (and returns false) on opt-in without it.
+    /// The decision runs before boot (it feeds `makeBootSpec`), so there is no
+    /// backend instance to consult yet; `rosettaShare` is honored only by the VZ
+    /// backend, and per-backend capability gating arrives with milestone G7.
     func resolveRosettaShare() throws -> Bool {
         let registry = try Registry.load(from: config.home.registryURL)
         let wanted = registry.distros.contains { $0.rosetta == true }
