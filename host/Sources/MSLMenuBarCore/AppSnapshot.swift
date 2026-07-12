@@ -100,6 +100,7 @@ public struct AppSnapshot: Equatable, Sendable {
     public let vmState: String
     public let defaultDistro: String?
     public let distros: [AppDistroSnapshot]
+    public let memory: MemoryStatus?
     public let forwardedPorts: [UInt16]
 
     public init(inventory: AppInventory, status: StatusData?) {
@@ -114,6 +115,7 @@ public struct AppSnapshot: Equatable, Sendable {
                 inventory: item, state: runtime?.state ?? "stopped",
                 sessions: runtime?.sessions ?? 0)
         }
+        self.memory = status?.memory
         self.forwardedPorts = status?.forwardedPorts ?? []
         assert(distros.count == inventory.distros.count, "projection preserves inventory rows")
         assert(!vmState.isEmpty, "VM state must be displayable")

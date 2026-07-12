@@ -105,6 +105,13 @@ public enum DaemonClient {
         try control.down(name: name, all: all, timeoutMs: nil)
     }
 
+    public static func up(_ home: MSLHome, name: String?) throws {
+        try ensureRunning(home)
+        let control = try connect(home)
+        defer { control.close() }
+        try control.up(name: name)
+    }
+
     public static func shutdown(_ home: MSLHome) throws {
         let control = try connect(home)
         defer { control.close() }

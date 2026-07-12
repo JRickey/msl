@@ -30,40 +30,13 @@ struct MainWindowView: View {
     }
 }
 
-private struct SourceList: View {
-    @ObservedObject var model: MainWindowModel
-
-    var body: some View {
-        List(AppDestination.allCases, selection: $model.destination) { destination in
-            Label(destination.rawValue, systemImage: destination.symbolName)
-                .tag(destination)
-                .accessibilityLabel(destination.rawValue)
-        }
-        .listStyle(.sidebar)
-        .accessibilityLabel("MSL sections")
-    }
-}
-
-private struct AppToolbar: ToolbarContent {
-    @ObservedObject var model: MainWindowModel
-
-    var body: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button(action: model.refresh) {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .keyboardShortcut("r", modifiers: .command)
-            .disabled(model.isRefreshing)
-            .accessibilityLabel("Refresh subsystem information")
-        }
-    }
-}
-
 private struct DestinationContent: View {
     @ObservedObject var model: MainWindowModel
 
     var body: some View {
-        if model.destination == .distros {
+        if model.destination == .overview {
+            OverviewStatusView(model: model)
+        } else if model.destination == .distros {
             DistroLibrary(model: model)
         } else {
             HonestEmptyState(destination: model.destination)
@@ -75,7 +48,9 @@ private struct DestinationDetail: View {
     @ObservedObject var model: MainWindowModel
 
     var body: some View {
-        if model.destination == .distros {
+        if model.destination == .overview {
+            OverviewSettingsView(model: model)
+        } else if model.destination == .distros {
             DistroDetail(model: model)
         } else {
             HonestEmptyState(destination: model.destination)
@@ -181,12 +156,16 @@ private struct DistroInspector: View {
     @ObservedObject var model: MainWindowModel
     let distro: AppDistroSnapshot
     @State private var confirmStop = false
+    @State private var confirmRestart = false
+    @State private var confirmSubsystemRestart = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 identity
                 actions
+                if model.selectedNeedsRestart { distroRestartBanner }
+                if model.subsystemNeedsRestart { subsystemRestartBanner }
                 statusSection
                 storageSection
                 configurationSection
@@ -203,6 +182,24 @@ private struct DistroInspector: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(stopMessage)
+        }
+        .confirmationDialog(
+            "Restart \(distro.name) to apply settings?", isPresented: $confirmRestart,
+            titleVisibility: .visible
+        ) {
+            Button("Restart Distro", action: model.restartSelectedToApply)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(restartMessage)
+        }
+        .confirmationDialog(
+            "Restart the subsystem to apply settings?", isPresented: $confirmSubsystemRestart,
+            titleVisibility: .visible
+        ) {
+            Button("Restart Subsystem", action: model.restartSubsystemToApply)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(subsystemRestartMessage)
         }
     }
 
@@ -230,6 +227,7 @@ private struct DistroInspector: View {
                 .disabled(!model.snapshot.daemonRunning || !distro.isRunning)
         }
         .controlSize(.large)
+        .disabled(model.operationInFlight)
         .accessibilityElement(children: .contain)
     }
 
@@ -254,13 +252,58 @@ private struct DistroInspector: View {
     }
 
     private var configurationSection: some View {
-        DetailGroup(title: "Configuration") {
-            DetailRow(label: "Hostname", value: distro.inventory.hostname)
-            DetailRow(label: "Default user", value: distro.inventory.defaultUser ?? "root")
-            DetailRow(label: "Mac home sharing", value: macShareLabel)
-            DetailRow(label: "Rosetta", value: distro.inventory.rosetta ? "On" : "Off")
-            DetailRow(label: "Created", value: distro.inventory.createdAt)
+        Form {
+            Section("Configuration") {
+                TextField("Hostname", text: $model.distroDraft.hostname)
+                TextField("Default user", text: $model.distroDraft.defaultUser)
+                Picker("Mac home sharing", selection: $model.distroDraft.macShare) {
+                    ForEach(MacShareChoice.allCases) { choice in
+                        Text(choice.rawValue).tag(choice)
+                    }
+                }
+                Toggle("Use Rosetta for x86-64 Linux binaries", isOn: $model.distroDraft.rosetta)
+                Text("Rosetta is normally off and is only needed for x86-64 Linux software.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Default distro", isOn: $model.distroDraft.isDefault)
+                    .disabled(isDefault)
+                LabeledContent("Created", value: distro.inventory.createdAt)
+                if let error = model.distroDraft.validationError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                }
+                if model.distroHasChanges { distroEditActions }
+            }
         }
+        .disabled(model.operationInFlight)
+    }
+
+    private var distroEditActions: some View {
+        HStack {
+            Spacer()
+            Button("Revert", action: model.revertDistroSettings)
+            Button("Save", action: model.saveDistroSettings)
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.distroCanSave)
+        }
+    }
+
+    private var distroRestartBanner: some View {
+        RestartBanner(
+            title: "Restart to Apply",
+            message: "Hostname or Mac sharing changes are waiting for a distro restart.",
+            buttonTitle: "Restart to Apply", action: { confirmRestart = true }
+        )
+        .disabled(model.operationInFlight)
+    }
+
+    private var subsystemRestartBanner: some View {
+        RestartBanner(
+            title: "Subsystem Restart Required",
+            message: "Rosetta or shared VM changes are waiting for a subsystem restart.",
+            buttonTitle: "Restart Subsystem", action: { confirmSubsystemRestart = true }
+        )
+        .disabled(model.operationInFlight)
     }
 
     private var finderSection: some View {
@@ -306,11 +349,6 @@ private struct DistroInspector: View {
 
     private var isDefault: Bool { model.snapshot.defaultDistro == distro.name }
 
-    private var macShareLabel: String {
-        guard let value = distro.inventory.macShare else { return "Inherit" }
-        return value ? "On" : "Off"
-    }
-
     private var portLabel: String {
         guard !model.snapshot.forwardedPorts.isEmpty else { return "None" }
         return model.snapshot.forwardedPorts.map(String.init).joined(separator: ", ")
@@ -323,71 +361,19 @@ private struct DistroInspector: View {
         return "Running processes in this distro will be stopped."
     }
 
+    private var restartMessage: String {
+        if distro.sessions > 0 {
+            return "This will stop \(distro.sessions) live session(s), then start the distro again."
+        }
+        return "The distro will stop and start again."
+    }
+
+    private var subsystemRestartMessage: String {
+        "Every active distro and all \(model.overview.liveSessions) live session(s) will stop."
+    }
+
     private func requestStop() {
         assert(distro.isRunning, "only a running distro can request stop")
         confirmStop = true
-    }
-}
-
-private struct FinderRestartBanner: View {
-    let restart: () -> Void
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Restart Required").fontWeight(.semibold)
-                Text("Restart your Mac to finish enabling Finder integration.")
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Restart Mac", action: restart)
-        }
-        .padding(10)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-        .accessibilityElement(children: .contain)
-    }
-}
-
-private struct DetailGroup<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: Content
-
-    init(title: String, @ViewBuilder content: () -> Content) {
-        precondition(!title.isEmpty, "detail group needs a title")
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        GroupBox(title) {
-            VStack(spacing: 0) { content }
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-private struct DetailRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        LabeledContent(label, value: value)
-            .padding(.vertical, 6)
-            .accessibilityElement(children: .combine)
-    }
-}
-
-private struct HonestEmptyState: View {
-    let destination: AppDestination
-
-    var body: some View {
-        ContentUnavailableView(
-            destination.rawValue, systemImage: destination.symbolName,
-            description: Text("This section is not available yet.")
-        )
-        .accessibilityLabel("\(destination.rawValue). This section is not available yet.")
     }
 }
