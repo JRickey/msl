@@ -35,13 +35,30 @@ struct ConfigCommand: ParsableCommand {
     func run() throws {
         assert(!name.isEmpty, "distro name argument must not be empty")
         let home = MSLHome.resolve()
-        var registry = try Registry.load(from: home.registryURL)
+        let store = RegistryStore(home: home)
+        let registry: Registry
+        if hasChanges {
+            registry = try store.update { current in
+                try requireEntry(current)
+                let changed = try applySetters(&current)
+                assert(changed, "a mutation transaction must apply at least one setter")
+            }
+        } else {
+            registry = try store.load()
+            try requireEntry(registry)
+        }
+        try printEntry(registry)
+    }
+
+    private var hasChanges: Bool {
+        hostname != nil || defaultUser != nil || macShare != nil || rosetta != nil
+    }
+
+    private func requireEntry(_ registry: Registry) throws {
+        assert(!name.isEmpty, "distro name must not be empty")
         guard registry.entry(name: name) != nil else {
             throw MSLError.invalidArgument("no such distro: \(name) (see 'msl list')")
         }
-        let changed = try applySetters(&registry)
-        if changed { try registry.save(to: home.registryURL) }
-        try printEntry(registry)
     }
 
     private func applySetters(_ registry: inout Registry) throws -> Bool {

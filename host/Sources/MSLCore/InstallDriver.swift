@@ -188,9 +188,11 @@ public final class InstallDriver {
             name: plan.name, image: imageURL.lastPathComponent, hostname: plan.hostname,
             createdAt: Self.timestamp(), defaultUser: plan.defaultUser,
             catalogSelector: plan.catalogSelector)
-        var registry = try Registry.load(from: home.registryURL)
-        try registry.add(entry)
-        try registry.save(to: home.registryURL)
+        let store = RegistryStore(home: home)
+        let updated = try store.update { registry in
+            try registry.add(entry)
+        }
+        assert(updated.entry(name: entry.name) == entry, "saved registry must contain the install")
         committed = true
         return entry
     }

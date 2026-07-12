@@ -12,9 +12,11 @@ struct DefaultCommand: ParsableCommand {
 
     func run() throws {
         let home = MSLHome.resolve()
-        var registry = try Registry.load(from: home.registryURL)
-        try registry.setDefault(name: name)
-        try registry.save(to: home.registryURL)
+        let store = RegistryStore(home: home)
+        let updated = try store.update { registry in
+            try registry.setDefault(name: name)
+        }
+        assert(updated.defaultDistro == name, "saved default must match the requested distro")
         print("default is now \(name)")
     }
 }
