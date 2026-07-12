@@ -1,5 +1,23 @@
 # 07 — Milestone G2: Self-built Kernel with virtio-gpu
 
+> **Status (implemented as a patch series):** G2.2/G2.3/G2.5 are implemented in
+> [patches/msl-kernel/](patches/msl-kernel/) — apply with `git am` in the
+> msl-kernel repo (instructions in that directory's README). Decisions taken:
+> kernel pinned to **6.12.95**; tarball sha256 ships **fail-closed** via a
+> `make pin` bootstrap (kernel.org was unreachable from the authoring
+> environment; no fabricated checksums); **one Image for both backends**
+> (`build/Image` from either `fetch` or `build`; profiles split only if a
+> regression appears); baseline seeded from apple/containerization
+> `config-arm64` and olddefconfig-resolved; 4K pages per the default in
+> §page-size. Validation done: config pipeline + assertions green against a
+> real 6.12.95 tree, full LLVM=1 arm64 Image compile succeeded, and
+> `extract-ikconfig` on the built Image confirms `DRM_VIRTIO_GPU=y`,
+> `SYNC_FILE=y`, `UDMABUF=y`, modules/fbdev off. Outstanding: `make pin` on a
+> networked machine, G2.1 baseline-extraction note, G2.4 initramfs decision
+> (blocked on G3.1), G2.6 boot validation on hardware, and the release
+> artifact flow in G8. The top-level msl Makefile glue (`KERNEL_MODE=fetch|build`)
+> is landed in this repo.
+
 Goal: implement the msl-kernel submodule's `make build` target (the stub that
 already points at this spec tree) so msl ships a kernel with virtio-gpu and
 modern sync primitives, replacing the fetched Kata image for at least the

@@ -391,10 +391,15 @@ notarize: release-pkg
 	shasum -a 256 "$(PKG_PRODUCT)" >"$(PKG_PRODUCT).sha256"; \
 	echo "notarize: stapled $(PKG_PRODUCT)"
 
+# KERNEL_MODE selects how the kernel Image is produced (docs/specs/gpu, G2):
+#   fetch - prebuilt pinned Kata kernel (default; no toolchain needed)
+#   build - self-built virtio-gpu kernel from pinned source (GPU VM path)
+KERNEL_MODE ?= fetch
+
 .PHONY: kernel
 kernel:
 	@set -eu; \
-	$(MAKE) -C "$(KERNEL_DIR)" fetch
+	$(MAKE) -C "$(KERNEL_DIR)" $(KERNEL_MODE)
 
 # Real file targets: `guest` is phony (cargo owns incremental rebuilds), so the
 # cpio always regenerates, but consumers can now depend on the concrete file.

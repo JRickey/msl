@@ -70,7 +70,7 @@ Maintained by implementers; update when a milestone lands.
 |---|---|
 | G0 spike | not started (needs macOS hardware) |
 | G1 backend abstraction | implemented (commits 08af620, 03a24e1, +G1.4/G1.5); awaiting macOS CI build/test validation and the G1 hardware spot-check |
-| G2 kernel | not started |
+| G2 kernel | implemented as a git-am patch series in [patches/msl-kernel/](patches/msl-kernel/) (config pipeline + full arm64 compile validated); outstanding: `make pin` on a networked machine, submodule bump, hardware boot check (G2.6) |
 | G3 msl-vmm | not started |
 | G4 guest userland | not started |
 | G5 way/protocol | not started |
