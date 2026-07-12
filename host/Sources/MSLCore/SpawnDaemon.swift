@@ -1,15 +1,19 @@
 import Darwin
 import Foundation
 
-/// Auto-spawns the resident daemon by re-execing this binary as
-/// `msl daemon run --spawned`, detached into its own session with stdio wired to
-/// the daemon log. Used by `msl shell`/`run` when no daemon is accepting yet.
+/// Auto-spawns the resident daemon through the resolved msl CLI, detached with
+/// stdio wired to the daemon log.
 public enum SpawnDaemon {
-    /// Resolve this executable's absolute path for re-exec and the LaunchAgent.
+    /// Resolve the bundled CLI for app callers, or the current CLI otherwise.
     public static func selfExecutablePath() -> String {
-        if let path = Bundle.main.executablePath, !path.isEmpty { return path }
-        let argv0 = CommandLine.arguments.first ?? "msl"
-        return URL(fileURLWithPath: argv0).standardizedFileURL.path
+        let currentPath: String
+        if let bundlePath = Bundle.main.executablePath, !bundlePath.isEmpty {
+            currentPath = bundlePath
+        } else {
+            let argv0 = CommandLine.arguments.first ?? "msl"
+            currentPath = URL(fileURLWithPath: argv0).standardizedFileURL.path
+        }
+        return MSLExecutableResolver.resolve(currentExecutablePath: currentPath)
     }
 
     /// Spawn the daemon detached. Throws if the log cannot be prepared or
