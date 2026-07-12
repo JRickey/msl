@@ -10,12 +10,17 @@ import MSLMenuBarCore
 final class StatusController: NSObject, NSMenuDelegate {
     private let home: MSLHome
     private let installer: InstallService
+    private let openMainWindow: @MainActor () -> Void
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
 
-    init(home: MSLHome, installer: InstallService) {
+    init(
+        home: MSLHome, installer: InstallService,
+        openMainWindow: @escaping @MainActor () -> Void
+    ) {
         self.home = home
         self.installer = installer
+        self.openMainWindow = openMainWindow
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         configureButton()
@@ -49,6 +54,8 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     private func rebuild(with model: MenuModel?, finderEnabled: Bool? = nil) {
         menu.removeAllItems()
+        menu.addItem(action(title: "Open MSL", selector: #selector(openApp)))
+        menu.addItem(.separator())
         appendHeader(model)
         menu.addItem(.separator())
         appendDistros(model)
@@ -214,6 +221,10 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    @objc private func openApp() {
+        openMainWindow()
     }
 
     private func disabled(title: String) -> NSMenuItem {

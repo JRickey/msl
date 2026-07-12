@@ -22,8 +22,6 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSHumanReadableCopyright</key>
     <string>msl is licensed under Apache-2.0.</string>
     <key>UTExportedTypeDeclarations</key>

@@ -3,5 +3,6 @@ import AppKit
 let application = NSApplication.shared
 let controller = AppDelegate()
 application.delegate = controller
-application.setActivationPolicy(.accessory)
+let activationChanged = application.setActivationPolicy(.regular)
+assert(activationChanged, "msl must become a regular Dock application")
 application.run()
